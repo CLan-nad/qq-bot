@@ -1,4 +1,5 @@
 qq-botpy==1.2.1
 openai==3.29.0
 python-dotenv==1.2.4
+httpx2==2.13.1
 

@@ -26,6 +26,10 @@ class Settings:
     task_max_count: int
     task_quiet_start: str
     task_quiet_end: str
+    vision_model: str
+    vision_max_images_per_request: int
+    vision_recent_messages: int
+    vision_max_image_bytes: int
 
 
 def load_settings() -> Settings:
@@ -58,5 +62,13 @@ def load_settings() -> Settings:
         task_max_count=int(os.getenv("XIAOXIA_TASK_MAX_COUNT", "20")),
         task_quiet_start=os.getenv("XIAOXIA_TASK_QUIET_START", "23:30"),
         task_quiet_end=os.getenv("XIAOXIA_TASK_QUIET_END", "07:00"),
+        vision_model=os.getenv("XIAOXIA_VISION_MODEL", "deepseek-flash"),
+        vision_max_images_per_request=int(
+            os.getenv("XIAOXIA_VISION_MAX_IMAGES_PER_REQUEST", "3")
+        ),
+        vision_recent_messages=int(os.getenv("XIAOXIA_VISION_RECENT_MESSAGES", "20")),
+        vision_max_image_bytes=int(
+            os.getenv("XIAOXIA_VISION_MAX_IMAGE_BYTES", str(8 * 1024 * 1024))
+        ),
     )
 

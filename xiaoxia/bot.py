@@ -14,6 +14,15 @@ from botpy.message import GroupMessage
 from botpy.robot import Token
 
 from .config import Settings
+from .images import (
+    ImageAttachment,
+    fetch_image_bytes,
+    image_attachments,
+    message_with_image_descriptions,
+    message_with_unrecognized_images,
+    needs_image_description,
+    to_data_url,
+)
 from .llm import XiaoxiaLLM
 from .scheduling import (
     advance_task,
@@ -136,6 +145,79 @@ class XiaoxiaClient(botpy.Client):
             raw=message.raw,
         )
 
+    async def _describe_attachments(
+        self,
+        attachments: list[ImageAttachment],
+        *,
+        hint: str = "",
+    ) -> list[str]:
+        descriptions: list[str] = []
+        for attachment in attachments:
+            image_ref = await self._image_reference(attachment)
+            try:
+                description = await self.llm.describe_image(image_ref, hint=hint)
+            except Exception:
+                logger.exception(
+                    "failed to describe image %s",
+                    attachment.filename or attachment.content_type,
+                )
+                description = ""
+            descriptions.append(description)
+        return descriptions
+
+    async def _image_reference(self, attachment: ImageAttachment) -> str:
+        """优先自己取图并内联，失败时退回让模型直接下载原始链接。"""
+        fetched = await fetch_image_bytes(
+            attachment.url,
+            max_bytes=self.settings.vision_max_image_bytes,
+        )
+        if fetched is None:
+            logger.info("image download failed, passing url through: %s", attachment.filename)
+            return attachment.url
+        data, content_type = fetched
+        logger.debug(
+            "inlined image %s (%s bytes, %s)",
+            attachment.filename,
+            len(data),
+            content_type,
+        )
+        return to_data_url(data, content_type)
+
+    async def _describe_recent_images(
+        self,
+        group_openid: str,
+        *,
+        exclude_key: str,
+        budget: int,
+    ) -> int:
+        """懒加载识别最近还没识别过的图片，返回剩余可用额度。"""
+        if budget <= 0:
+            return 0
+        for stored in self.store.recent_messages_with_raw(
+            group_openid,
+            self.settings.vision_recent_messages,
+        ):
+            if budget <= 0:
+                break
+            if stored.message_key == exclude_key or not needs_image_description(stored.content):
+                continue
+            attachments = image_attachments(stored.raw)[:budget]
+            if not attachments:
+                continue
+            descriptions = await self._describe_attachments(attachments)
+            budget -= len(attachments)
+            if not any(description.strip() for description in descriptions):
+                self.store.update_message_content(
+                    group_openid,
+                    stored.message_key,
+                    message_with_unrecognized_images(stored.content),
+                )
+                continue
+            enriched = message_with_image_descriptions(stored.content, descriptions)
+            if enriched != stored.content:
+                self.store.update_message_content(group_openid, stored.message_key, enriched)
+        return budget
+
     def _now(self) -> datetime:
         return datetime.now(ZoneInfo(self.settings.timezone))
 
@@ -169,9 +251,10 @@ class XiaoxiaClient(botpy.Client):
     async def on_ready(self) -> None:
         stats = self.store.stats()
         logger.info(
-            "小毛豆已上线：%s | model=%s | stored_messages=%s | memory_cards=%s | scheduled_tasks=%s",
+            "小毛豆已上线：%s | model=%s | vision=%s | stored_messages=%s | memory_cards=%s | scheduled_tasks=%s",
             getattr(self.robot, "name", "小毛豆"),
             self.settings.model,
+            self.settings.vision_model if self.settings.vision_max_images_per_request > 0 else "off",
             stats["messages"],
             stats["memory_cards"],
             stats["scheduled_tasks"],
@@ -348,11 +431,32 @@ class XiaoxiaClient(botpy.Client):
             return
 
         self._save_message(message, source)
+
+        # 图片描述写回本地库，最近上下文、长期记忆、历史检索都能看到图片内容。
+        content = (message.content or "").strip()
+        descriptions: list[str] = []
+        budget = self.settings.vision_max_images_per_request
+        if budget > 0:
+            attachments = image_attachments(message.raw)[:budget]
+            if attachments:
+                descriptions = await self._describe_attachments(attachments, hint=content)
+                budget -= len(attachments)
+                if any(description.strip() for description in descriptions):
+                    enriched = message_with_image_descriptions(content, descriptions)
+                    if enriched != content:
+                        self.store.update_message_content(message.group_openid, key, enriched)
+                    content = enriched
+            await self._describe_recent_images(
+                message.group_openid,
+                exclude_key=key,
+                budget=budget,
+            )
+
         requester = StoredMessage(
             username=message.username,
             member_openid=message.author.member_openid or "",
             role=message.member_role,
-            content=message.content or "",
+            content=content,
             timestamp=message.timestamp or "",
             source=source,
         )
@@ -371,7 +475,10 @@ class XiaoxiaClient(botpy.Client):
                     self._strip_bot_mention(raw_request, bot_mention)
                     if bot_mention
                     else raw_request
-                ) or "你好，请介绍一下你能帮我们做什么。"
+                )
+                if descriptions:
+                    request = message_with_image_descriptions(request, descriptions)
+                request = request or "你好，请介绍一下你能帮我们做什么。"
 
                 intent = await self.llm.parse_intent(
                     request=request,

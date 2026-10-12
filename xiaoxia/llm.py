@@ -70,6 +70,16 @@ memories 中的 person 使用明确显示名，不要只写“我/她/他”。
 kind 可为 preference、fact、agreement、event、relationship。"""
 
 
+VISION_SYSTEM_PROMPT = """你是 QQ 群聊里的图片识别助手，服务一对情侣的日常聊天。
+用中文客观描述图片，控制在 400 字以内；只输出描述正文，不要 Markdown、标题或前后缀。
+
+要求：
+1. 如果是聊天截图或对话截图，逐条转述关键对话内容，并说明每句话是哪一方说的（如“左侧/右侧”“对方发来”）。
+2. 如果是照片，说明场景、人物动作、物品，以及画面里出现的文字。
+3. 如果是表情包或梗图，说明画面内容和大致情绪、笑点。
+4. 只描述看得到的内容，不评价外貌，不编造，也不要输出与图片无关的建议。"""
+
+
 class XiaoxiaLLM:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -85,13 +95,14 @@ class XiaoxiaLLM:
         self,
         *,
         system_prompt: str,
-        user_prompt: str,
+        user_prompt: str | list[dict[str, Any]],
         temperature: float,
         max_tokens: int,
         json_mode: bool = False,
+        model: str | None = None,
     ) -> str:
         kwargs: dict[str, Any] = {
-            "model": self.settings.model,
+            "model": model or self.settings.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -103,6 +114,25 @@ class XiaoxiaLLM:
             kwargs["response_format"] = {"type": "json_object"}
         response = await self.client.chat.completions.create(**kwargs)
         return (response.choices[0].message.content or "").strip()
+
+    async def describe_image(self, image_url: str, *, hint: str = "") -> str:
+        """调用视觉模型描述单张图片。image_url 可以是外链，也可以是内联的 data URL。"""
+        prompt = "请描述这张图片。"
+        hint = (hint or "").strip()
+        if hint:
+            prompt += f"\n发送者附带的文字：{hint}"
+        user_content: list[dict[str, Any]] = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]
+        content = await self._chat(
+            system_prompt=VISION_SYSTEM_PROMPT,
+            user_prompt=user_content,
+            temperature=0.2,
+            max_tokens=700,
+            model=self.settings.vision_model,
+        )
+        return content[:500]
 
     @staticmethod
     def _json_content(content: str) -> dict:

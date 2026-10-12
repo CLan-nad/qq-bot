@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -15,6 +15,8 @@ class StoredMessage:
     content: str
     timestamp: str
     source: str
+    message_key: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -187,6 +189,8 @@ class ChatStore:
         attachments = raw.get("attachments") or []
         names = []
         for item in attachments:
+            if not isinstance(item, dict):
+                continue
             content_type = item.get("content_type") or "attachment"
             names.append(f"[{content_type}]")
         return " ".join(names)
@@ -247,6 +251,55 @@ class ChatStore:
                 (message_key,),
             )
         return cursor.rowcount == 1
+
+    def update_message_content(self, group_openid: str, message_key: str, content: str) -> bool:
+        """回填图片描述等派生内容，FTS 索引由触发器同步更新。"""
+        text = (content or "").strip()
+        if not text or not message_key:
+            return False
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE messages SET content = ? WHERE group_openid = ? AND message_key = ?",
+                (text, group_openid, message_key),
+            )
+        return cursor.rowcount == 1
+
+    def recent_messages_with_raw(
+        self,
+        group_openid: str,
+        limit: int,
+    ) -> list[StoredMessage]:
+        rows = self._conn.execute(
+            """
+            SELECT message_key, username, member_openid, role, content, timestamp, source, raw_json
+            FROM messages
+            WHERE group_openid = ?
+            ORDER BY row_id DESC
+            LIMIT ?
+            """,
+            (group_openid, limit),
+        ).fetchall()
+        messages: list[StoredMessage] = []
+        for row in reversed(rows):
+            try:
+                raw = json.loads(row["raw_json"] or "{}")
+            except (TypeError, ValueError):
+                raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
+            messages.append(
+                StoredMessage(
+                    username=row["username"] or "unknown",
+                    member_openid=row["member_openid"] or "",
+                    role=row["role"] or "member",
+                    content=row["content"] or "",
+                    timestamp=row["timestamp"] or "",
+                    source=row["source"] or "",
+                    message_key=row["message_key"] or "",
+                    raw=raw,
+                )
+            )
+        return messages
 
     def recent_messages(self, group_openid: str, limit: int) -> list[StoredMessage]:
         rows = self._conn.execute(
