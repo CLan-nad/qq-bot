@@ -30,6 +30,16 @@ class Settings:
     vision_max_images_per_request: int
     vision_recent_messages: int
     vision_max_image_bytes: int
+    search_provider: str
+    tavily_api_key: str
+    search_max_results: int
+    web_fetch_max_chars: int
+    shell_enabled: bool
+    shell_mode: str
+    shell_cwd: str
+    shell_timeout_seconds: int
+    shell_max_output_chars: int
+    document_max_chars: int
 
 
 def load_settings() -> Settings:
@@ -70,5 +80,15 @@ def load_settings() -> Settings:
         vision_max_image_bytes=int(
             os.getenv("XIAOXIA_VISION_MAX_IMAGE_BYTES", str(8 * 1024 * 1024))
         ),
+        search_provider=os.getenv("XIAOXIA_SEARCH_PROVIDER", "auto").strip().lower(),
+        tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
+        search_max_results=int(os.getenv("XIAOXIA_SEARCH_MAX_RESULTS", "5")),
+        web_fetch_max_chars=int(os.getenv("XIAOXIA_WEB_FETCH_MAX_CHARS", "8000")),
+        shell_enabled=os.getenv("XIAOXIA_SHELL_ENABLED", "1").strip() not in {"0", "false", "no"},
+        shell_mode=os.getenv("XIAOXIA_SHELL_MODE", "readonly").strip().lower(),
+        shell_cwd=os.getenv("XIAOXIA_SHELL_CWD", "toolbox"),
+        shell_timeout_seconds=int(os.getenv("XIAOXIA_SHELL_TIMEOUT_SECONDS", "10")),
+        shell_max_output_chars=int(os.getenv("XIAOXIA_SHELL_MAX_OUTPUT_CHARS", "50000")),
+        document_max_chars=int(os.getenv("XIAOXIA_DOCUMENT_MAX_CHARS", "24000")),
     )
 

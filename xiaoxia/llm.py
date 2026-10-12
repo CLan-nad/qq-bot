@@ -37,6 +37,11 @@ INTENT_SYSTEM_PROMPT = """你是小毛豆的意图解析器。你只输出一个
 - memory_list: 查看已记住的信息
 - memory_search: 查询或搜索历史聊天/记忆
 - memory_forget: 删除某条记忆
+- web_search: 需要联网搜索资料
+- web_fetch: 打开并阅读某个网页链接
+- document_read: 读取并解析用户发来的文档（文件附件或文档链接）
+- shell_run: 需要在本机执行命令或跑一段代码
+- math_eval: 计算数学表达式
 - chat: 普通聊天、总结、开话题、润色等
 
 task_create 输出字段：
@@ -55,6 +60,11 @@ memory_remember 输出 memories 数组，每项包含 kind、person、content。
 memory_search 输出 query，用适合检索的短关键词。
 memory_forget 输出 memory_id 或 match。
 person 优先使用明确显示名；用户说“我”时指当前触发者，说“她/他/对象/另一半”时指另一位成员。
+web_search 输出 query（适合搜索的短语）。
+web_fetch 输出 url；如果用户没给链接，就回退成 web_search。
+document_read 输出 url（有链接时填；没有就留空，解析当前消息里的文件附件）。
+shell_run 输出 command，且只能是单条命令或一段短脚本，不能包含 sudo。
+math_eval 输出 expression。
 无法确定或普通聊天时输出 {"action":"chat"}。"""
 
 
@@ -209,6 +219,33 @@ class XiaoxiaLLM:
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,
             temperature=0.65,
+            max_tokens=900,
+        )
+        return content[: self.settings.reply_max_chars]
+
+    async def generate_tool_reply(
+        self,
+        *,
+        request: str,
+        tool_name: str,
+        tool_output: str,
+        tool_error: str = "",
+    ) -> str:
+        """把工具执行结果整理成一条适合发到群里的回复。"""
+        user_prompt = f"""用户请求：{request}
+
+工具：{tool_name}
+执行结果：
+{tool_output or tool_error or "（无输出）"}
+"""
+        content = await self._chat(
+            system_prompt=(
+                "你是 QQ 群里的“小毛豆”。下面是一个工具的执行结果，请基于它回答用户的请求。"
+                "要求：直接输出正文；忠于工具结果，不编造；信息不足就明说；"
+                "列表类结果用短编号分点，不要输出 Markdown 标题或代码块。"
+            ),
+            user_prompt=user_prompt,
+            temperature=0.4,
             max_tokens=900,
         )
         return content[: self.settings.reply_max_chars]

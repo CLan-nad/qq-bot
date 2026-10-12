@@ -32,6 +32,15 @@ from .scheduling import (
     resolve_next_run,
 )
 from .store import ChatStore, MemoryCard, ScheduledTask, StoredMessage
+from .tools import (
+    ToolResult,
+    document_attachments,
+    eval_math,
+    fetch_page,
+    read_document,
+    run_shell,
+    search_web,
+)
 
 
 logger = logging.getLogger("xiaoxia")
@@ -547,6 +556,16 @@ class XiaoxiaClient(botpy.Client):
                 recent=recent,
                 identity=identity,
             )
+        if action == "web_search":
+            return await self._handle_web_search(request, intent)
+        if action == "web_fetch":
+            return await self._handle_web_fetch(request, intent)
+        if action == "document_read":
+            return await self._handle_document_read(request, intent, message)
+        if action == "shell_run":
+            return await self._handle_shell_run(request, intent)
+        if action == "math_eval":
+            return await self._handle_math_eval(request, intent)
 
         return await self.llm.generate_reply(
             requester=requester,
@@ -794,6 +813,109 @@ class XiaoxiaClient(botpy.Client):
             memory_context=self._memory_context(message.group_openid),
             search_context="\n\n".join(search_parts),
             identity_context=identity.prompt(),
+        )
+
+    @staticmethod
+    def _format_search_result(result: ToolResult) -> str:
+        lines: list[str] = []
+        if result.output:
+            lines.append("摘要：" + result.output)
+        for index, item in enumerate(result.data, 1):
+            title = (item.get("title") or "").strip()
+            url = (item.get("url") or "").strip()
+            snippet = (item.get("snippet") or "").strip()
+            lines.append(f"{index}. {title}\n   {url}\n   {snippet}")
+        return "\n".join(lines)
+
+    async def _handle_web_search(self, request: str, intent: dict) -> str:
+        query = self._optional_str(intent.get("query")) or request
+        result = await search_web(
+            query,
+            limit=self.settings.search_max_results,
+            provider=self.settings.search_provider,
+            tavily_api_key=self.settings.tavily_api_key,
+        )
+        if not result.ok:
+            return result.error or "搜索失败了。"
+        return await self.llm.generate_tool_reply(
+            request=request,
+            tool_name="web_search",
+            tool_output=self._format_search_result(result),
+        )
+
+    async def _handle_web_fetch(self, request: str, intent: dict) -> str:
+        url = self._optional_str(intent.get("url"))
+        if not url:
+            return await self._handle_web_search(request, intent)
+        result = await fetch_page(url, max_chars=self.settings.web_fetch_max_chars)
+        if not result.ok:
+            return result.error or "网页读取失败。"
+        return await self.llm.generate_tool_reply(
+            request=request,
+            tool_name="web_fetch",
+            tool_output=result.output,
+        )
+
+    async def _handle_document_read(
+        self,
+        request: str,
+        intent: dict,
+        message: RichGroupMessage,
+    ) -> str:
+        url = self._optional_str(intent.get("url"))
+        filename = ""
+        if not url:
+            attachments = document_attachments(message.raw)
+            if attachments:
+                url = attachments[0].url
+                filename = attachments[0].filename
+        if not url:
+            return "我还没看到要读取的文档，请把文件发到群里，或者贴一个文档链接。"
+
+        result = await read_document(
+            url,
+            filename=filename,
+            max_chars=self.settings.document_max_chars,
+        )
+        if not result.ok:
+            return result.error or "文档读取失败。"
+        return await self.llm.generate_tool_reply(
+            request=request,
+            tool_name="document_read",
+            tool_output=result.output,
+        )
+
+    async def _handle_shell_run(self, request: str, intent: dict) -> str:
+        if not self.settings.shell_enabled:
+            return "本地命令执行目前是关闭的。"
+        command = self._optional_str(intent.get("command"))
+        if not command:
+            return "要执行什么命令，再说具体一点？"
+        result = await run_shell(
+            command,
+            cwd=self.settings.shell_cwd,
+            mode=self.settings.shell_mode,
+            timeout=self.settings.shell_timeout_seconds,
+            max_output_chars=self.settings.shell_max_output_chars,
+        )
+        if not result.ok and not result.output:
+            return result.error or "命令执行失败。"
+        return await self.llm.generate_tool_reply(
+            request=request,
+            tool_name="shell_run",
+            tool_output=result.output,
+            tool_error=result.error,
+        )
+
+    async def _handle_math_eval(self, request: str, intent: dict) -> str:
+        expression = self._optional_str(intent.get("expression")) or request
+        result = eval_math(expression)
+        if not result.ok:
+            return result.error or "计算失败。"
+        return await self.llm.generate_tool_reply(
+            request=request,
+            tool_name="math_eval",
+            tool_output=result.output,
         )
 
     async def on_group_msg_receive(self, event) -> None:
