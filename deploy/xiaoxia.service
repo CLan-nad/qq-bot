@@ -1,0 +1,20 @@
+[Unit]
+Description=Xiaomaodou QQ Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xiaoxia
+Group=xiaoxia
+WorkingDirectory=/opt/xiaoxia
+ExecStart=/opt/xiaoxia/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+Environment=PYTHONUTF8=1
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
