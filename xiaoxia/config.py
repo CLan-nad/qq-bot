@@ -32,7 +32,9 @@ class Settings:
     vision_max_image_bytes: int
     search_provider: str
     tavily_api_key: str
+    bocha_api_key: str
     search_max_results: int
+    search_timeout_seconds: int
     web_fetch_max_chars: int
     shell_enabled: bool
     shell_mode: str
@@ -82,7 +84,9 @@ def load_settings() -> Settings:
         ),
         search_provider=os.getenv("XIAOXIA_SEARCH_PROVIDER", "auto").strip().lower(),
         tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
+        bocha_api_key=os.getenv("BOCHA_API_KEY", "").strip(),
         search_max_results=int(os.getenv("XIAOXIA_SEARCH_MAX_RESULTS", "5")),
+        search_timeout_seconds=int(os.getenv("XIAOXIA_SEARCH_TIMEOUT_SECONDS", "12")),
         web_fetch_max_chars=int(os.getenv("XIAOXIA_WEB_FETCH_MAX_CHARS", "8000")),
         shell_enabled=os.getenv("XIAOXIA_SHELL_ENABLED", "1").strip() not in {"0", "false", "no"},
         shell_mode=os.getenv("XIAOXIA_SHELL_MODE", "readonly").strip().lower(),

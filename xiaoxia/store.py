@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -249,6 +250,48 @@ class ChatStore:
             cursor = self._conn.execute(
                 "INSERT OR IGNORE INTO processed_at_messages (message_key) VALUES (?)",
                 (message_key,),
+            )
+        return cursor.rowcount == 1
+
+    def save_bot_message(
+        self,
+        *,
+        group_openid: str,
+        content: str,
+        timestamp: str,
+        source: str = "BOT_REPLY",
+        username: str = "小毛豆",
+    ) -> bool:
+        """记录机器人自己发出的消息，让它能记住上一轮说过什么。
+
+        QQ 不会把机器人自己发的消息回推给机器人，所以必须自己落库；
+        否则最近上下文里永远只有两个人的消息，模型看不到自己的上一轮回复。
+        """
+        text = (content or "").strip()
+        if not group_openid or not text:
+            return False
+        key = f"bot:{uuid.uuid4().hex}"
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO messages (
+                    message_key, message_id, msg_seq, group_openid, member_openid,
+                    username, role, content, timestamp, source, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    key,
+                    "",
+                    "",
+                    group_openid,
+                    "",
+                    (username or "").strip() or "小毛豆",
+                    "bot",
+                    text,
+                    timestamp or "",
+                    source,
+                    "{}",
+                ),
             )
         return cursor.rowcount == 1
 

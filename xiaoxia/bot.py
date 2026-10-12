@@ -154,6 +154,19 @@ class XiaoxiaClient(botpy.Client):
             raw=message.raw,
         )
 
+    def _remember_bot_reply(self, group_openid: str, content: str, source: str) -> None:
+        """把机器人自己的回复写进本地库，让它下一轮能看到自己说过什么。"""
+        try:
+            self.store.save_bot_message(
+                group_openid=group_openid,
+                content=content,
+                timestamp=self._now().isoformat(timespec="seconds"),
+                source=source,
+                username=getattr(self.robot, "name", None) or "小毛豆",
+            )
+        except Exception:
+            logger.exception("failed to persist bot reply")
+
     async def _describe_attachments(
         self,
         attachments: list[ImageAttachment],
@@ -320,6 +333,7 @@ class XiaoxiaClient(botpy.Client):
                     group_openid=task.group_openid,
                     content=content,
                 )
+                self._remember_bot_reply(task.group_openid, content, "BOT_TASK")
                 self.store.complete_task_run(
                     group_openid=task.group_openid,
                     task_id=task.id,
@@ -504,10 +518,13 @@ class XiaoxiaClient(botpy.Client):
                     identity=identity,
                 )
                 await message.reply(content=answer)
+                self._remember_bot_reply(message.group_openid, answer, f"{source}:REPLY")
                 logger.info("handled @ request %s from %s", intent.get("action"), message.username)
             except Exception:
                 logger.exception("failed to generate or send reply")
-                await message.reply(content="小毛豆刚刚走神了，稍后再 @ 我一次试试。")
+                fallback = "小毛豆刚刚走神了，稍后再 @ 我一次试试。"
+                await message.reply(content=fallback)
+                self._remember_bot_reply(message.group_openid, fallback, f"{source}:FALLBACK")
 
     @staticmethod
     def _optional_str(value: Any) -> str | None:
@@ -834,9 +851,12 @@ class XiaoxiaClient(botpy.Client):
             limit=self.settings.search_max_results,
             provider=self.settings.search_provider,
             tavily_api_key=self.settings.tavily_api_key,
+            bocha_api_key=self.settings.bocha_api_key,
+            timeout=self.settings.search_timeout_seconds,
         )
         if not result.ok:
-            return result.error or "搜索失败了。"
+            logger.warning("web search failed: %s", result.error)
+            return "搜索没成功，我这边网络有点不给力，等会儿再试一次吧。"
         return await self.llm.generate_tool_reply(
             request=request,
             tool_name="web_search",

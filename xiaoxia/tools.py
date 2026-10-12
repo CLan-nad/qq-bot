@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import html
 import ipaddress
 import math
 import os
@@ -17,6 +18,21 @@ import httpx2
 
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) xiaoxia-qq-bot/0.2"
+
+# 服务器在境内，DuckDuckGo 系引擎基本连不上；Bing 网页端稳定且中文结果好，作为默认兜底。
+BING_SEARCH_URL = "https://www.bing.com/search"
+BING_SEARCH_FALLBACK_URL = "https://cn.bing.com/search"
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+_TAG_PATTERN = re.compile(r"<[^>]+>")
+
+
+def _clean_html_text(value: str) -> str:
+    text = _TAG_PATTERN.sub("", value)
+    text = html.unescape(text).replace("\u2002", " ").replace("\xa0", " ")
+    return re.sub(r"\s+", " ", text).strip()
 
 
 @dataclass
@@ -139,6 +155,8 @@ async def search_web(
     limit: int = 5,
     provider: str = "auto",
     tavily_api_key: str = "",
+    bocha_api_key: str = "",
+    timeout: float = 12.0,
 ) -> ToolResult:
     query = query.strip()
     if not query:
@@ -146,18 +164,49 @@ async def search_web(
 
     provider = (provider or "auto").lower()
     if provider == "auto":
-        provider = "tavily" if tavily_api_key else "duckduckgo"
+        if tavily_api_key:
+            chain = ["tavily"]
+        elif bocha_api_key:
+            chain = ["bocha"]
+        else:
+            chain = ["bing_web"]
+        if "bing_web" not in chain:
+            chain.append("bing_web")
+    else:
+        chain = [provider]
+        if provider != "bing_web":
+            chain.append("bing_web")
 
-    if provider == "tavily" and tavily_api_key:
-        return await _tavily_search(query, limit, tavily_api_key)
-    if provider == "duckduckgo":
-        return await _duckduckgo_search(query, limit)
-    return ToolResult(ok=False, error=f"不支持的搜索提供方：{provider}")
+    errors: list[str] = []
+    for name in chain:
+        if name == "tavily":
+            if not tavily_api_key:
+                errors.append("Tavily 未配置 key")
+                continue
+            result = await _tavily_search(query, limit, tavily_api_key, timeout)
+        elif name == "bocha":
+            if not bocha_api_key:
+                errors.append("博查未配置 key")
+                continue
+            result = await _bocha_search(query, limit, bocha_api_key, timeout)
+        elif name == "duckduckgo":
+            result = await _duckduckgo_search(query, limit, timeout)
+        elif name == "bing_web":
+            result = await _bing_web_search(query, limit, timeout)
+        else:
+            errors.append(f"不支持的搜索提供方：{name}")
+            continue
+
+        if result.ok and (result.data or result.output):
+            return result
+        errors.append(result.error or f"{name} 没有返回结果")
+
+    return ToolResult(ok=False, error="搜索失败：" + "；".join(errors))
 
 
-async def _tavily_search(query: str, limit: int, api_key: str) -> ToolResult:
+async def _tavily_search(query: str, limit: int, api_key: str, timeout: float) -> ToolResult:
     try:
-        async with httpx2.AsyncClient(timeout=30) as client:
+        async with httpx2.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 "https://api.tavily.com/search",
                 headers={"Authorization": f"Bearer {api_key}"},
@@ -185,15 +234,102 @@ async def _tavily_search(query: str, limit: int, api_key: str) -> ToolResult:
     return ToolResult(ok=True, output=str(payload.get("answer") or "").strip(), data=data)
 
 
-async def _duckduckgo_search(query: str, limit: int) -> ToolResult:
+async def _bocha_search(query: str, limit: int, api_key: str, timeout: float) -> ToolResult:
+    """博查搜索：中文结果质量好，境内直连稳定。"""
+    try:
+        async with httpx2.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                "https://api.bochaai.com/v1/web-search",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "query": query,
+                    "count": max(1, min(limit, 10)),
+                    "summary": True,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        return ToolResult(ok=False, error=f"博查搜索失败：{exc}")
+
+    pages = ((payload.get("data") or {}).get("webPages") or {}).get("value") or []
+    data = [
+        {
+            "title": item.get("name") or "",
+            "url": item.get("url") or "",
+            "snippet": item.get("summary") or item.get("snippet") or "",
+        }
+        for item in pages
+        if isinstance(item, dict)
+    ]
+    if not data:
+        return ToolResult(ok=False, error="博查没有返回可用结果")
+    return ToolResult(ok=True, data=data)
+
+
+async def _bing_web_search(query: str, limit: int, timeout: float) -> ToolResult:
+    """抓取 Bing 网页结果，不需要 key，是境内服务器上最稳的兜底方案。"""
+    errors: list[str] = []
+    for url in (BING_SEARCH_URL, BING_SEARCH_FALLBACK_URL):
+        try:
+            async with httpx2.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                response = await client.get(
+                    url,
+                    params={"q": query, "setlang": "zh-CN", "ensearch": "0"},
+                    headers={
+                        "User-Agent": BROWSER_USER_AGENT,
+                        "Accept-Language": "zh-CN,zh;q=0.9",
+                    },
+                )
+                response.raise_for_status()
+                page = response.text
+        except Exception as exc:
+            errors.append(f"{url} 请求失败：{exc}")
+            continue
+
+        data = _parse_bing_results(page, limit)
+        if data:
+            return ToolResult(ok=True, data=data)
+        errors.append(f"{url} 没有解析到结果")
+
+    return ToolResult(ok=False, error="Bing 搜索失败：" + "；".join(errors))
+
+
+def _parse_bing_results(page: str, limit: int) -> list[dict[str, str]]:
+    data: list[dict[str, str]] = []
+    for block in re.findall(r'<li class="[^"]*b_algo[^"]*".*?</li>', page, re.S):
+        url_match = re.search(r'<h2>.*?<a[^>]+href="([^"]+)"', block, re.S)
+        if not url_match:
+            continue
+        title_match = re.search(r"<h2>.*?<a[^>]*>(.*?)</a>", block, re.S)
+        snippet_match = re.search(r"<p[^>]*>(.*?)</p>", block, re.S)
+        data.append(
+            {
+                "title": _clean_html_text(title_match.group(1)) if title_match else "",
+                "url": html.unescape(url_match.group(1)),
+                "snippet": _clean_html_text(snippet_match.group(1)) if snippet_match else "",
+            }
+        )
+        if len(data) >= limit:
+            break
+    return data
+
+
+async def _duckduckgo_search(query: str, limit: int, timeout: float) -> ToolResult:
+    """保留的备选方案；境内网络经常超时，正常情况不会走到这里。"""
     def _run() -> list[dict[str, str]]:
         from ddgs import DDGS
 
-        with DDGS() as ddgs:
+        with DDGS(timeout=max(3.0, min(timeout, 8.0))) as ddgs:
             return list(ddgs.text(query, max_results=max(1, min(limit, 10))))
 
     try:
-        items = await asyncio.to_thread(_run)
+        items = await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout + 2)
+    except asyncio.TimeoutError:
+        return ToolResult(ok=False, error="DuckDuckGo 搜索超时")
     except Exception as exc:
         return ToolResult(ok=False, error=f"DuckDuckGo 搜索失败：{exc}")
 
@@ -205,6 +341,8 @@ async def _duckduckgo_search(query: str, limit: int) -> ToolResult:
         }
         for item in items
     ]
+    if not data:
+        return ToolResult(ok=False, error="DuckDuckGo 没有返回结果")
     return ToolResult(ok=True, data=data)
 
 

@@ -94,7 +94,7 @@ class DocumentParseTests(unittest.TestCase):
 
 class ToolExecutionTests(unittest.TestCase):
     def test_search_auto_uses_tavily_when_key_present(self) -> None:
-        async def fake_tavily(query, limit, key):
+        async def fake_tavily(query, limit, key, timeout):
             return ToolResult(ok=True, output="答案", data=[{"title": "T", "url": "u", "snippet": "s"}])
 
         original = tools._tavily_search
@@ -108,17 +108,74 @@ class ToolExecutionTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.output, "答案")
 
-    def test_search_falls_back_to_duckduckgo(self) -> None:
-        async def fake_ddg(query, limit):
-            return ToolResult(ok=True, data=[{"title": "T", "url": "u", "snippet": "s"}])
+    def test_search_auto_uses_bing_without_keys(self) -> None:
+        seen: list[str] = []
 
-        original = tools._duckduckgo_search
-        tools._duckduckgo_search = fake_ddg
+        async def fake_bing(query, limit, timeout):
+            seen.append(query)
+            return ToolResult(ok=True, data=[{"title": "B", "url": "u", "snippet": "s"}])
+
+        original = tools._bing_web_search
+        tools._bing_web_search = fake_bing
         try:
             result = asyncio.run(search_web("q", provider="auto", tavily_api_key=""))
         finally:
-            tools._duckduckgo_search = original
+            tools._bing_web_search = original
         self.assertTrue(result.ok)
+        self.assertEqual(seen, ["q"])
+
+    def test_search_falls_back_to_bing_when_api_fails(self) -> None:
+        async def fake_tavily(query, limit, key, timeout):
+            return ToolResult(ok=False, error="tavily down")
+
+        async def fake_bing(query, limit, timeout):
+            return ToolResult(ok=True, data=[{"title": "B", "url": "u", "snippet": "s"}])
+
+        original_tavily = tools._tavily_search
+        original_bing = tools._bing_web_search
+        tools._tavily_search = fake_tavily
+        tools._bing_web_search = fake_bing
+        try:
+            result = asyncio.run(search_web("q", provider="auto", tavily_api_key="k"))
+        finally:
+            tools._tavily_search = original_tavily
+            tools._bing_web_search = original_bing
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data[0]["title"], "B")
+
+    def test_search_reports_error_when_everything_fails(self) -> None:
+        async def fake_bing(query, limit, timeout):
+            return ToolResult(ok=False, error="boom")
+
+        original = tools._bing_web_search
+        tools._bing_web_search = fake_bing
+        try:
+            result = asyncio.run(search_web("q", provider="auto"))
+        finally:
+            tools._bing_web_search = original
+        self.assertFalse(result.ok)
+        self.assertIn("boom", result.error)
+
+    def test_bing_web_search_parses_results(self) -> None:
+        page = (
+            '<ol><li class="b_algo"><h2><a href="https://x.com/a">标题A</a></h2>'
+            "<p>摘要A</p></li>"
+            '<li class="b_algo"><h2><a href="https://x.com/b">标题B</a></h2>'
+            "<p>摘要B</p></li></ol>"
+        )
+        original = tools.httpx2.AsyncClient
+        transport = tools.httpx2.MockTransport(
+            lambda request: tools.httpx2.Response(200, text=page)
+        )
+        tools.httpx2.AsyncClient = lambda **kwargs: original(transport=transport, **kwargs)
+        try:
+            result = asyncio.run(tools._bing_web_search("q", 5, 5))
+        finally:
+            tools.httpx2.AsyncClient = original
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.data), 2)
+        self.assertEqual(result.data[0]["title"], "标题A")
+        self.assertEqual(result.data[0]["url"], "https://x.com/a")
 
     def test_fetch_page_rejects_private_host(self) -> None:
         result = asyncio.run(fetch_page("http://127.0.0.1/anything"))

@@ -83,6 +83,25 @@ class FeatureTests(unittest.TestCase):
             {"openid-CL", "openid-对象"},
         )
 
+    def test_bot_reply_enters_recent_context(self) -> None:
+        self._save("刚才让你搜东西你出故障了知道吗", username="CL")
+        self.assertTrue(
+            self.store.save_bot_message(
+                group_openid=GROUP,
+                content="搜索失败了，我这边网络连不上。",
+                timestamp="2026-10-13T00:27:00+08:00",
+            )
+        )
+        self._save("啥情况啊", username="CL")
+
+        context = self.store.format_recent_messages(GROUP, 10, 5000)
+        self.assertIn("小毛豆", context)
+        self.assertIn("搜索失败了", context)
+        # 机器人不能被当成第三位群成员
+        self.assertEqual(len(self.store.known_members(GROUP)), 1)
+        # 自己的回复也要能被历史检索到
+        self.assertEqual(len(self.store.search_messages(GROUP, "搜索失败")), 1)
+
     def test_task_lifecycle(self) -> None:
         task = self.store.create_task(
             group_openid=GROUP,
