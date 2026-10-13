@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import httpx2
 
+import xiaoxia.bot as bot_module
 import xiaoxia.images as images_module
 import xiaoxia.llm as llm_module
 from xiaoxia.images import (
@@ -17,6 +18,7 @@ from xiaoxia.images import (
     message_with_image_descriptions,
     message_with_unrecognized_images,
     needs_image_description,
+    normalize_face_tags,
     sniff_image_content_type,
     strip_image_placeholders,
     to_data_url,
@@ -43,6 +45,9 @@ SINGLE_IMAGE_RAW = {"attachments": [dict(IMAGE_RAW["attachments"][0])]}
 RED_PNG_BASE64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 )
+STICKER_TAG = '<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiW+Wkp+iDhl0ifQ==">'
+SMALL_FACE_TAG = '<faceType=1,faceId="267",ext="eyJ0ZXh0Ijoi5aS056eDIn0=">'
+EMPTY_FACE_TAG = '<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">'
 
 
 class _FakeCompletions:
@@ -97,9 +102,30 @@ class ImageHelperTests(unittest.TestCase):
     def test_needs_image_description(self) -> None:
         self.assertTrue(needs_image_description("[图片]"))
         self.assertTrue(needs_image_description("[image/jpeg]"))
+        self.assertTrue(needs_image_description(STICKER_TAG))
+        self.assertTrue(needs_image_description(SMALL_FACE_TAG))
         self.assertFalse(needs_image_description("[图片内容：一只猫]"))
         self.assertFalse(needs_image_description("[图片未识别]"))
         self.assertFalse(needs_image_description("[non-text message]"))
+        self.assertFalse(needs_image_description(normalize_face_tags(STICKER_TAG)))
+
+    def test_normalize_face_tags(self) -> None:
+        self.assertEqual(normalize_face_tags(STICKER_TAG), "[大胆]")
+        self.assertEqual(normalize_face_tags(SMALL_FACE_TAG), "头秃")
+        self.assertEqual(normalize_face_tags(EMPTY_FACE_TAG), "[表情]")
+        self.assertEqual(
+            normalize_face_tags('<faceType=6,faceId="0",ext="no!base64">'),
+            "[表情]",
+        )
+        self.assertEqual(normalize_face_tags(""), "")
+        self.assertEqual(normalize_face_tags("哈哈" + STICKER_TAG), "哈哈[大胆]")
+
+    def test_sticker_message_gets_image_description(self) -> None:
+        self.assertEqual(strip_image_placeholders(STICKER_TAG), "[大胆]")
+        merged = message_with_image_descriptions(
+            STICKER_TAG, ["一只白色垂耳兔闭着眼抱爪"]
+        )
+        self.assertEqual(merged, "[大胆]\n[图片内容：一只白色垂耳兔闭着眼抱爪]")
 
     def test_unrecognized_mark_stops_retry(self) -> None:
         marked = message_with_unrecognized_images("[image/jpeg]")
@@ -339,6 +365,98 @@ class VisionRetryTests(unittest.TestCase):
         )
         self.assertEqual(description, "a course timetable")
         self.assertEqual(flaky.calls, 2)
+
+
+class StickerDescribeTests(unittest.TestCase):
+    """表情包（<faceType=6,...> + 图片附件）要能被懒加载识别出来。"""
+
+    def setUp(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = ChatStore(str(Path(self.tmp.name) / "test.sqlite3"))
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+        asyncio.set_event_loop(None)
+        self.loop.close()
+
+    def _settings(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            vision_recent_messages=20,
+            vision_max_images_per_request=3,
+            vision_max_image_bytes=1024 * 1024,
+            allowed_group_openids=frozenset(),
+        )
+
+    def _save(self, message_id: str, content: str, raw: dict) -> None:
+        self.store.save_message(
+            message_id=message_id,
+            msg_seq="",
+            group_openid=GROUP,
+            member_openid="openid-CL",
+            username="CL",
+            role="member",
+            content=content,
+            timestamp="2026-10-13T16:56:04+08:00",
+            source="GROUP_MESSAGE_CREATE",
+            raw=raw,
+        )
+
+    def test_recent_sticker_message_gets_described(self) -> None:
+        raw = {
+            "attachments": [
+                {
+                    "content_type": "image/jpeg",
+                    "filename": "sticker.jpg",
+                    "url": "https://example.com/sticker.jpg",
+                }
+            ]
+        }
+        self._save("sticker-1", STICKER_TAG, raw)
+
+        async def describe_image(url, hint=""):
+            return "一只白色垂耳兔闭着眼抱爪"
+
+        client = bot_module.XiaoxiaClient(
+            settings=self._settings(),
+            store=self.store,
+            llm=SimpleNamespace(describe_image=describe_image),
+        )
+
+        async def fake_fetch(url, *, max_bytes):
+            return b"\xff\xd8\xff\xe0stub", "image/jpeg"
+
+        original_fetch = bot_module.fetch_image_bytes
+        bot_module.fetch_image_bytes = fake_fetch
+        try:
+            budget = asyncio.run(
+                client._describe_recent_images(GROUP, exclude_key="", budget=3)
+            )
+        finally:
+            bot_module.fetch_image_bytes = original_fetch
+
+        self.assertEqual(budget, 2)
+        self.assertEqual(
+            self.store.recent_messages(GROUP, 5)[0].content,
+            "[大胆]\n[图片内容：一只白色垂耳兔闭着眼抱爪]",
+        )
+
+    def test_small_face_message_without_attachment_is_left_alone(self) -> None:
+        self._save("face-1", SMALL_FACE_TAG, {})
+        client = bot_module.XiaoxiaClient(
+            settings=self._settings(),
+            store=self.store,
+            llm=SimpleNamespace(),
+        )
+        budget = asyncio.run(
+            client._describe_recent_images(GROUP, exclude_key="", budget=3)
+        )
+        self.assertEqual(budget, 3)
+        self.assertEqual(
+            self.store.recent_messages(GROUP, 5)[0].content, SMALL_FACE_TAG
+        )
 
 
 if __name__ == "__main__":

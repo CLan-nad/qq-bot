@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -20,6 +21,11 @@ SUPPORTED_IMAGE_TYPES = frozenset(
 
 # QQ 在纯图片消息里只给出占位文本，例如 "[图片]" 或 "[image/jpeg]"。
 IMAGE_PLACEHOLDER_PATTERN = re.compile(r"\[(?:图片|image/[A-Za-z0-9.+-]+)\]", re.IGNORECASE)
+
+# QQ 表情包（大表情，faceType=6）在消息体里是 <faceType=6,faceId="0",ext="..."> 标签，
+# 真正的图片放在 attachments 里；系统小表情（faceType=1）没有附件。ext 是 base64 的
+# JSON，里面的 text 字段是可读的表情名称，例如 [大胆]、[哈哈]。
+FACE_TAG_PATTERN = re.compile(r'<faceType=(\d+),faceId="(\d+)",ext="([^"]*)">')
 
 # 已经处理过的标记，避免对同一张图反复调用模型。
 IMAGE_DESCRIBED_MARKS = ("图片内容：", "图片未识别")
@@ -61,17 +67,18 @@ def image_attachments(raw: dict[str, Any]) -> list[ImageAttachment]:
 
 
 def strip_image_placeholders(content: str | None) -> str:
-    text = IMAGE_PLACEHOLDER_PATTERN.sub(" ", content or "")
+    text = normalize_face_tags(content or "")
+    text = IMAGE_PLACEHOLDER_PATTERN.sub(" ", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     return "\n".join(line.strip() for line in text.splitlines()).strip()
 
 
 def needs_image_description(content: str | None) -> bool:
-    """图片内容是否还没被识别过（用于避免重复调用视觉模型）。"""
+    """图片或表情包内容是否还没被识别过（用于避免重复调用视觉模型）。"""
     text = (content or "").strip()
     if any(mark in text for mark in IMAGE_DESCRIBED_MARKS):
         return False
-    return bool(IMAGE_PLACEHOLDER_PATTERN.search(text))
+    return bool(IMAGE_PLACEHOLDER_PATTERN.search(text) or FACE_TAG_PATTERN.search(text))
 
 
 def message_with_image_descriptions(content: str | None, descriptions: list[str]) -> str:
@@ -87,6 +94,30 @@ def message_with_unrecognized_images(content: str | None) -> str:
     parts = [text] if text else []
     parts.append(UNRECOGNIZED_IMAGE_MARK)
     return "\n".join(parts)
+
+
+def _decode_face_text(ext: str) -> str:
+    """解开 QQ 表情标签里的 ext，取出可读名称；失败时返回空串。"""
+    if not ext:
+        return ""
+    try:
+        padded = ext + "=" * (-len(ext) % 4)
+        payload = json.loads(base64.b64decode(padded).decode("utf-8", "ignore"))
+    except Exception:
+        return ""
+    if isinstance(payload, dict):
+        return str(payload.get("text") or "").strip()
+    return ""
+
+
+def normalize_face_tags(content: str | None) -> str:
+    """把 QQ 表情标签还原成可读文本，例如 <faceType=6,...> 变成 [大胆]。"""
+    if not content:
+        return ""
+    return FACE_TAG_PATTERN.sub(
+        lambda match: _decode_face_text(match.group(3)) or "[表情]",
+        content,
+    )
 
 
 def sniff_image_content_type(data: bytes) -> str | None:
