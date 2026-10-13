@@ -63,7 +63,7 @@ def load_settings() -> Settings:
         model=os.getenv("XIAOXIA_MODEL", "deepseek-chat"),
         allowed_group_openids=groups,
         db_path=os.getenv("XIAOXIA_DB_PATH", "data/xiaoxia.sqlite3"),
-        recent_messages=int(os.getenv("XIAOXIA_RECENT_MESSAGES", "200")),
+        recent_messages=int(os.getenv("XIAOXIA_RECENT_MESSAGES", "60")),
         max_context_chars=int(os.getenv("XIAOXIA_MAX_CONTEXT_CHARS", "24000")),
         reply_max_chars=int(os.getenv("XIAOXIA_REPLY_MAX_CHARS", "900")),
         timezone=os.getenv("XIAOXIA_TIMEZONE", "Asia/Shanghai"),

@@ -209,5 +209,14 @@ class FeatureTests(unittest.TestCase):
         parsed = XiaoxiaLLM._json_content('```json\n{"action":"chat"}\n```')
         self.assertEqual(parsed, {"action": "chat"})
 
+    def test_reply_prompt_keeps_focus_on_current_topic(self) -> None:
+        from xiaoxia.llm import SYSTEM_PROMPT
+
+        # 抑制“翻旧账 / 重复旧话题”的约束必须留在系统提示词里，
+        # 否则机器人每轮都会把长期记忆和历史旧事拎出来复述。
+        self.assertIn("平时不要主动翻旧账", SYSTEM_PROMPT)
+        self.assertIn("不要主动把旧话题", SYSTEM_PROMPT)
+        self.assertIn("不要重复自己", SYSTEM_PROMPT)
+
 if __name__ == "__main__":
     unittest.main()
