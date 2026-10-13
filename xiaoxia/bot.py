@@ -184,6 +184,11 @@ class XiaoxiaClient(botpy.Client):
                     attachment.filename or attachment.content_type,
                 )
                 description = ""
+            if not description.strip():
+                logger.warning(
+                    "image description empty: %s",
+                    attachment.filename or attachment.content_type,
+                )
             descriptions.append(description)
         return descriptions
 
@@ -229,6 +234,10 @@ class XiaoxiaClient(botpy.Client):
             descriptions = await self._describe_attachments(attachments)
             budget -= len(attachments)
             if not any(description.strip() for description in descriptions):
+                logger.warning(
+                    "image description empty for message %s, marking unrecognized",
+                    stored.message_key,
+                )
                 self.store.update_message_content(
                     group_openid,
                     stored.message_key,

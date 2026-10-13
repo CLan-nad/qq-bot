@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from typing import Any
 
 from openai import AsyncOpenAI
 
 from .config import Settings
 from .store import StoredMessage
+
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """你是 QQ 群里的“小毛豆”，一对情侣的私人感情辅助机器人。
@@ -92,6 +97,14 @@ VISION_SYSTEM_PROMPT = """你是 QQ 群聊里的图片识别助手，服务一�
 4. 只描述看得到的内容，不评价外貌，不编造，也不要输出与图片无关的建议。"""
 
 
+# The vision model spends part of its token budget on reasoning; a small cap let
+# dense images exhaust the budget before any text was produced, returning an empty
+# completion (finish_reason=length) that was then mistaken for an unreadable image.
+VISION_MAX_TOKENS = 2048
+VISION_DESCRIBE_ATTEMPTS = 3
+VISION_RETRY_DELAY_SECONDS = 1.0
+
+
 class XiaoxiaLLM:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -103,7 +116,7 @@ class XiaoxiaLLM:
             },
         )
 
-    async def _chat(
+    async def _chat_response(
         self,
         *,
         system_prompt: str,
@@ -112,7 +125,7 @@ class XiaoxiaLLM:
         max_tokens: int,
         json_mode: bool = False,
         model: str | None = None,
-    ) -> str:
+    ) -> Any:
         kwargs: dict[str, Any] = {
             "model": model or self.settings.model,
             "messages": [
@@ -124,7 +137,26 @@ class XiaoxiaLLM:
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
-        response = await self.client.chat.completions.create(**kwargs)
+        return await self.client.chat.completions.create(**kwargs)
+
+    async def _chat(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str | list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool = False,
+        model: str | None = None,
+    ) -> str:
+        response = await self._chat_response(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_mode=json_mode,
+            model=model,
+        )
         return (response.choices[0].message.content or "").strip()
 
     async def describe_image(self, image_url: str, *, hint: str = "") -> str:
@@ -137,14 +169,49 @@ class XiaoxiaLLM:
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": image_url}},
         ]
-        content = await self._chat(
-            system_prompt=VISION_SYSTEM_PROMPT,
-            user_prompt=user_content,
-            temperature=0.2,
-            max_tokens=700,
-            model=self.settings.vision_model,
-        )
-        return content[:500]
+        # The vision model occasionally returns an empty completion (reasoning budget
+        # exhausted or a transient hiccup). Retry a few times before giving up so a
+        # readable image is not permanently marked as unrecognized.
+        last_error: Exception | None = None
+        for attempt in range(1, VISION_DESCRIBE_ATTEMPTS + 1):
+            try:
+                response = await self._chat_response(
+                    system_prompt=VISION_SYSTEM_PROMPT,
+                    user_prompt=user_content,
+                    temperature=0.2,
+                    max_tokens=VISION_MAX_TOKENS,
+                    model=self.settings.vision_model,
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                logger.warning(
+                    "vision describe attempt %d/%d failed: %r",
+                    attempt,
+                    VISION_DESCRIBE_ATTEMPTS,
+                    exc,
+                )
+            else:
+                choice = response.choices[0]
+                content = (choice.message.content or "").strip()
+                if content:
+                    return content[:500]
+                logger.warning(
+                    "vision describe attempt %d/%d returned empty content "
+                    "(finish_reason=%s, usage=%s)",
+                    attempt,
+                    VISION_DESCRIBE_ATTEMPTS,
+                    getattr(choice, "finish_reason", None),
+                    getattr(response, "usage", None),
+                )
+            if attempt < VISION_DESCRIBE_ATTEMPTS:
+                await asyncio.sleep(VISION_RETRY_DELAY_SECONDS * attempt)
+        if last_error is not None:
+            logger.error(
+                "vision describe gave up after %d attempts: %r",
+                VISION_DESCRIBE_ATTEMPTS,
+                last_error,
+            )
+        return ""
 
     @staticmethod
     def _json_content(content: str) -> dict:

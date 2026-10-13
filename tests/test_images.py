@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import httpx2
 
 import xiaoxia.images as images_module
+import xiaoxia.llm as llm_module
 from xiaoxia.images import (
     fetch_image_bytes,
     image_attachments,
@@ -259,6 +260,85 @@ class ImageStoreTests(unittest.TestCase):
         self._save_image_message()
         self.assertFalse(self.store.update_message_content(GROUP, "missing", "[图片内容：x]"))
         self.assertFalse(self.store.update_message_content(GROUP, "", "[图片内容：x]"))
+
+
+class _ScriptedCompletions:
+    def __init__(self, contents: list[str]) -> None:
+        self.contents = list(contents)
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        index = min(len(self.calls) - 1, len(self.contents) - 1)
+        message = SimpleNamespace(content=self.contents[index])
+        choice = SimpleNamespace(message=message, finish_reason="stop")
+        return SimpleNamespace(choices=[choice], usage=None)
+
+
+def _scripted_llm(contents: list[str]) -> tuple[XiaoxiaLLM, _ScriptedCompletions]:
+    settings = SimpleNamespace(
+        llm_api_key="test-key",
+        llm_base_url="https://api.deepseek.com",
+        model="deepseek-chat",
+        vision_model="deepseek-flash",
+        reply_max_chars=900,
+    )
+    llm = XiaoxiaLLM(settings)
+    completions = _ScriptedCompletions(contents)
+    llm.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    return llm, completions
+
+
+class VisionRetryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        original = llm_module.VISION_RETRY_DELAY_SECONDS
+        llm_module.VISION_RETRY_DELAY_SECONDS = 0.0
+        self.addCleanup(setattr, llm_module, "VISION_RETRY_DELAY_SECONDS", original)
+
+    def test_describe_image_uses_bigger_token_budget(self) -> None:
+        self.assertGreater(llm_module.VISION_MAX_TOKENS, 700)
+
+    def test_describe_image_retries_after_empty_content(self) -> None:
+        llm, completions = _scripted_llm(["", "   ", "a cat on a keyboard"])
+        description = asyncio.run(
+            llm.describe_image("https://example.com/cat.jpg")
+        )
+        self.assertEqual(description, "a cat on a keyboard")
+        self.assertEqual(len(completions.calls), 3)
+        for call in completions.calls:
+            self.assertEqual(call["max_tokens"], llm_module.VISION_MAX_TOKENS)
+            self.assertEqual(call["model"], "deepseek-flash")
+
+    def test_describe_image_gives_up_after_max_attempts(self) -> None:
+        llm, completions = _scripted_llm([""])
+        description = asyncio.run(
+            llm.describe_image("https://example.com/cat.jpg")
+        )
+        self.assertEqual(description, "")
+        self.assertEqual(
+            len(completions.calls), llm_module.VISION_DESCRIBE_ATTEMPTS
+        )
+
+    def test_describe_image_retries_after_exception(self) -> None:
+        class _Flaky:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def create(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("boom")
+                message = SimpleNamespace(content="a course timetable")
+                return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+        llm, _ = _scripted_llm([""])
+        flaky = _Flaky()
+        llm.client = SimpleNamespace(chat=SimpleNamespace(completions=flaky))
+        description = asyncio.run(
+            llm.describe_image("https://example.com/a.jpg")
+        )
+        self.assertEqual(description, "a course timetable")
+        self.assertEqual(flaky.calls, 2)
 
 
 if __name__ == "__main__":
