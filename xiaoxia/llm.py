@@ -51,6 +51,7 @@ INTENT_SYSTEM_PROMPT = """你是小毛豆的意图解析器。你只输出一个
 - memory_search: 查询或搜索历史聊天/记忆
 - memory_forget: 删除某条记忆
 - calendar_query: 问某个节日是几号、最近有什么节日
+- bot_pref: 查看或修改这个群的偏好设置（要不要主动关心、多久一次等）
 - web_search: 需要联网搜索资料
 - web_fetch: 打开并阅读某个网页链接
 - document_read: 读取并解析用户发来的文档（文件附件或文档链接）
@@ -81,6 +82,13 @@ memory_list 输出 page（页码，从 1 开始）；用户说“第二页”就
 memory_search 输出 query，用适合检索的短关键词。
 memory_forget、memory_pin、memory_unpin 输出 memory_id 或 match。
 calendar_query 输出 query（节日名，如“中秋”）；只问“最近有什么节日”时 query 留空。
+bot_pref 输出 op（show 或 set）、key、value。能改的 key 只有这四个：
+- care_enabled：要不要在你们没 @ 我的时候主动关心情绪，value 用 true/false
+- care_daily_max：同一个人一天最多被主动关心几次，value 是数字
+- care_cooldown_minutes：同一个人两次主动关心之间至少隔几分钟，value 是数字
+- active_msg_daily_max：群里每天主动发消息的总上限，value 是数字
+“以后别主动安慰我们”“不用管我们情绪”“别再自己插话”= care_enabled false；“想被关心”“该安慰就安慰”= true。
+只是问“现在是怎么设置的”“看看群设置”时 op=show，不要瞎猜 key。
 person 优先使用明确显示名；用户说“我”时指当前触发者，说“她/他/对象/另一半”时指另一位成员。
 web_search 输出 query（适合搜索的短语）。
 这些说法通常意味着要联网：查一下、搜一下、帮我查、有依据吗、来源、出处、权威资料、是不是真的、最新消息、多少钱、天气、新闻、比分、汇率、几点。
@@ -118,6 +126,24 @@ VISION_SYSTEM_PROMPT = """你是 QQ 群聊里的图片识别助手，服务一�
 3. 如果是表情包或梗图，说明画面内容和大致情绪、笑点。
 4. 只描述看得到的内容，不评价外貌，不编造，也不要输出与图片无关的建议。"""
 
+
+CARE_SYSTEM_PROMPT = """你是 QQ 情侣群里的贴心助手“小毛豆”。群里有人刚说了句话，判断要不要主动接一句关心。
+只输出一个 JSON 对象：{"care": true 或 false, "text": "要说的话"}
+
+下面这些情况必须 care=false，宁可不说，也不要说错、说多：
+- 说的不是自己的状态，而是转述别人、吐槽第三方、聊新闻八卦
+- 平静的陈述或玩笑，比如「昨天三点睡，结果睡到中午」「加班到十点还挺爽」「考试考砸了哈哈哈哈」
+- 只是在问问题、讨论事情本身，没有抒发情绪
+- 这句话早就被别人接过了，上下文里已经有回应
+- 说的是几小时前的旧事，现在再提很怪
+- 明显在跟机器人说话、给机器人下指令
+
+care=true 时 text 的要求：
+- 25 字以内，一句话，像朋友在群里顺口接的一句，不要书面腔
+- 贴着他说的具体那件事说（说拉肚子就提补水、别吃冰的；说失眠就劝放下手机），不要泛泛的「抱抱」
+- 不诊断、不荐药、不说剂量；情况听起来严重就一句「要不要去看看医生」
+- 不要「我注意到你情绪不太好」「作为 AI」这类系统腔，不要说教，不要连问几个问题
+- 不要 @ 任何人，不要加引号，不要 emoji 堆砌"""
 
 # The vision model spends part of its token budget on reasoning; a small cap let
 # dense images exhaust the budget before any text was produced, returning an empty
@@ -248,6 +274,31 @@ class XiaoxiaLLM:
         if not isinstance(parsed, dict):
             raise ValueError("模型返回的 JSON 不是对象")
         return parsed
+
+    async def judge_care(self, *, content: str, recent_context: str = "") -> dict:
+        """判断这句话值不值得主动关心，顺带把要说的话写好。
+
+        这一层每条命中信号词的消息都会调一次，所以用便宜模型；出错一律当成「不关心」，
+        宁可不说话，也不能在群里瞎插嘴。
+        """
+        prompt = f"刚有人说的这句话：\n{content}\n"
+        if recent_context:
+            prompt += f"\n前面几句聊天（用来看这句话是不是早被接过、是不是在说旧事）：\n{recent_context}\n"
+        prompt += "\n只输出 JSON。"
+        try:
+            raw = await self._chat(
+                system_prompt=CARE_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                temperature=0.6,
+                max_tokens=200,
+                json_mode=True,
+                model=self.settings.care_model or self.settings.vision_model,
+            )
+            data = self._json_content(raw)
+        except Exception:
+            logger.warning("care judge skipped: %s", content[:40])
+            return {"care": False, "text": ""}
+        return {"care": bool(data.get("care")), "text": str(data.get("text") or "")}
 
     async def parse_intent(
         self,

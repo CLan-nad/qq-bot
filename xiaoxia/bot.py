@@ -22,6 +22,7 @@ from .calendar import (
     solar_to_lunar,
     upcoming_festivals,
 )
+from .care import matched_signals, normalize_care_text, should_ask_model
 from .config import Settings
 from .images import (
     ImageAttachment,
@@ -73,6 +74,17 @@ ACK_ACTIONS = frozenset(
 )
 TASK_SCHEDULE_TYPES = frozenset({"once", "daily", "weekly", "yearly", "lunar_yearly"})
 TEMPORARY_MEMORY_DAYS = 14
+
+# 没被 @ 时的主动关心，这几项可以在群里直接 @ 我改，优先级高于 .env。
+# (中文名, 类型, 对应的默认配置字段)
+GROUP_PREFS: dict[str, tuple[str, str, str]] = {
+    "care_enabled": ("主动关心", "bool", "care_enabled"),
+    "care_daily_max": ("每人每天被关心次数", "int", "care_daily_max"),
+    "care_cooldown_minutes": ("同一个人两次关心的间隔（分钟）", "int", "care_cooldown_minutes"),
+    "active_msg_daily_max": ("群里每天主动消息上限", "int", "active_msg_daily_max"),
+}
+# QQ 对主动消息的频控错误码前缀，撞上就当天收手。
+RATE_LIMIT_CODE = "40034"
 ACK_TEXT = "稍等，我查一下～"
 FALLBACK_TEXT = "小毛豆刚刚走神了，稍后再 @ 我一次试试。"
 
@@ -114,6 +126,8 @@ class XiaoxiaClient(botpy.Client):
         self.llm = llm
         self._reply_lock = asyncio.Lock()
         self._memory_lock = asyncio.Lock()
+        # 群 openid -> 被 QQ 频控关静音到哪天（只当天有效，重启即复位）
+        self._proactive_blocked_until: dict[str, str] = {}
         self._background_task: asyncio.Task[None] | None = None
 
     async def _bot_login(self, token: Token) -> None:
@@ -384,7 +398,8 @@ class XiaoxiaClient(botpy.Client):
                     finish=task.schedule_type == "once",
                 )
                 logger.info("sent scheduled task %s", task.id)
-            except Exception:
+            except Exception as exc:
+                self._note_rate_limit(task.group_openid, exc)
                 logger.exception("failed to send scheduled task %s", task.id)
                 self.store.complete_task_run(
                     group_openid=task.group_openid,
@@ -482,6 +497,129 @@ class XiaoxiaClient(botpy.Client):
         parts.extend(ChatStore.format_memory_cards(cards).splitlines())
         return "\n".join(parts)[: self.settings.max_context_chars]
 
+    # ---------- 没被 @ 时的主动关心 ----------
+
+    def _pref_int(self, group_openid: str, key: str, default: int) -> int:
+        raw = self.store.get_preference(group_openid, key)
+        if raw is None:
+            return default
+        try:
+            return int(str(raw).strip())
+        except ValueError:
+            logger.info("ignoring bad group preference %s=%r", key, raw)
+            return default
+
+    def _pref_bool(self, group_openid: str, key: str, default: bool) -> bool:
+        raw = self.store.get_preference(group_openid, key)
+        if raw is None:
+            return default
+        text = str(raw).strip().lower()
+        if text in {"1", "true", "yes", "on", "开", "要", "是"}:
+            return True
+        if text in {"0", "false", "no", "off", "关", "不要", "否"}:
+            return False
+        return default
+
+    def _note_rate_limit(self, group_openid: str, error: BaseException) -> bool:
+        """撞上 QQ 的主动消息频控就当天收手，别一直撞。"""
+        if RATE_LIMIT_CODE not in str(error):
+            return False
+        self._proactive_blocked_until[group_openid] = self._now().date().isoformat()
+        logger.warning("proactive messages muted for %s today: %s", group_openid, error)
+        return True
+
+    def _care_gate(self, group_openid: str, member_openid: str, now: datetime) -> bool:
+        """节流全过才值得去问模型：开关、频控、群总上限、每人次数、冷却。"""
+        if self._proactive_blocked_until.get(group_openid) == now.date().isoformat():
+            return False
+        if not self._pref_bool(group_openid, "care_enabled", self.settings.care_enabled):
+            return False
+        group_max = self._pref_int(
+            group_openid, "active_msg_daily_max", self.settings.active_msg_daily_max
+        )
+        person_max = self._pref_int(group_openid, "care_daily_max", self.settings.care_daily_max)
+        if group_max <= 0 or person_max <= 0:
+            return False
+        today_iso = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(
+            timespec="seconds"
+        )
+        if (
+            self.store.proactive_message_count(group_openid=group_openid, since_iso=today_iso)
+            >= group_max
+        ):
+            return False
+        if (
+            self.store.sent_care_count(
+                group_openid=group_openid, member_openid=member_openid, since_iso=today_iso
+            )
+            >= person_max
+        ):
+            return False
+        cooldown = self._pref_int(
+            group_openid, "care_cooldown_minutes", self.settings.care_cooldown_minutes
+        )
+        last = self.store.last_care_at(group_openid=group_openid, member_openid=member_openid)
+        if cooldown > 0 and last:
+            try:
+                last_at = datetime.fromisoformat(last)
+            except ValueError:
+                return True
+            if now - last_at < timedelta(minutes=cooldown):
+                return False
+        return True
+
+    async def _maybe_care(self, message: RichGroupMessage) -> None:
+        """有人说身体不舒服或情绪低落时，主动接一句关心。
+
+        两级判定：关键词预筛不花钱，命中才让便宜模型判断到底要不要说、说什么。
+        任何一步拿不准都不开口——在这个群里，安静比说错话好。
+        """
+        content = (message.content or "").strip()
+        if not should_ask_model(content):
+            return
+        group_openid = message.group_openid
+        member_openid = message.author.member_openid or ""
+        now = self._now()
+        if not self._care_gate(group_openid, member_openid, now):
+            logger.info("care throttled for %s", message.username)
+            return
+
+        message_key = ChatStore.message_key(message.id, message.msg_seq)
+        if not self.store.reserve_care_message(
+            message_key=message_key,
+            group_openid=group_openid,
+            member_openid=member_openid,
+            content=content,
+            created_at=now.isoformat(timespec="seconds"),
+        ):
+            return
+
+        recent = self.store.recent_messages(group_openid, 6)
+        try:
+            verdict = await self.llm.judge_care(
+                content=content,
+                recent_context=self._format_stored_messages(recent, 600),
+            )
+            if not verdict.get("care"):
+                return
+            text = normalize_care_text(str(verdict.get("text") or ""))
+            if not text:
+                return
+            await self.api.post_group_message(group_openid=group_openid, content=text)
+        except Exception as exc:
+            self._note_rate_limit(group_openid, exc)
+            logger.info("proactive care skipped: %s", exc)
+            return
+
+        self.store.mark_care_sent(message_key)
+        self._remember_bot_reply(group_openid, text, "BOT_CARE")
+        logger.info(
+            "proactive care for %s (%s): %s",
+            message.username,
+            ",".join(matched_signals(content)),
+            text,
+        )
+
     async def on_group_message_create(self, message: RichGroupMessage) -> None:
         if not self._group_allowed(message.group_openid):
             return
@@ -490,6 +628,11 @@ class XiaoxiaClient(botpy.Client):
 
         if self._bot_mention(message):
             await self._process_at_message(message, "GROUP_MESSAGE_CREATE")
+            return
+        try:
+            await self._maybe_care(message)
+        except Exception:
+            logger.exception("proactive care failed")
 
     async def on_group_at_message_create(self, message: RichGroupMessage) -> None:
         if not self._group_allowed(message.group_openid):
@@ -703,6 +846,8 @@ class XiaoxiaClient(botpy.Client):
             return self._handle_memory_forget(intent, message)
         if action == "calendar_query":
             return self._handle_calendar_query(intent)
+        if action == "bot_pref":
+            return self._handle_bot_pref(intent, message)
         if action == "memory_search":
             return await self._handle_memory_search(
                 intent=intent,
@@ -1048,6 +1193,80 @@ class XiaoxiaClient(botpy.Client):
         if not items:
             return "未来 30 天没有节日。"
         return "未来 30 天的节日：" + format_festivals(items, today=now.date())
+
+    # ---------- 群内偏好：群里说一句话就能改，优先级高于 .env ----------
+
+    def _default_pref(self, kind: str, attr: str) -> str:
+        value = getattr(self.settings, attr, None)
+        if kind == "bool":
+            return "开" if value else "关"
+        return str(value)
+
+    def _format_preferences(self, group_openid: str) -> str:
+        lines: list[str] = []
+        for key, (label, kind, attr) in GROUP_PREFS.items():
+            if kind == "bool":
+                shown = (
+                    "开"
+                    if self._pref_bool(group_openid, key, bool(getattr(self.settings, attr)))
+                    else "关"
+                )
+            else:
+                shown = str(
+                    self._pref_int(group_openid, key, int(getattr(self.settings, attr) or 0))
+                )
+            source = "群里改过" if self.store.get_preference(group_openid, key) is not None else "默认"
+            lines.append(f"· {label}：{shown}（{source}）")
+        tail = ""
+        if self._proactive_blocked_until.get(group_openid) == self._now().date().isoformat():
+            tail = "\n今天被 QQ 频控了，主动消息先自己停一天。"
+        return "这个群现在的设置：\n" + "\n".join(lines) + tail
+
+    def _handle_bot_pref(self, intent: dict, message: RichGroupMessage) -> str:
+        group_openid = message.group_openid
+        op = str(intent.get("op") or "show").strip().lower()
+        key = str(intent.get("key") or "").strip()
+
+        if op != "set" or not key:
+            return self._format_preferences(group_openid)
+        if key not in GROUP_PREFS:
+            return "这个群只能改这几项：" + "、".join(GROUP_PREFS) + "。"
+
+        label, kind, attr = GROUP_PREFS[key]
+        # 注意 False 和 0 都是合法值，不能当成“没填”。
+        raw_value = intent.get("value")
+        if isinstance(raw_value, bool):
+            raw = "true" if raw_value else "false"
+        elif raw_value is None:
+            raw = ""
+        else:
+            raw = str(raw_value).strip()
+        lowered = raw.lower()
+        if "default" in lowered or "默认" in raw or "恢复" in raw or "还原" in raw or "改回去" in raw:
+            self.store.clear_preference(group_openid, key)
+            return f"好，{label}恢复成默认值 {self._default_pref(kind, attr)}。"
+
+        if kind == "int":
+            try:
+                value = int(raw)
+            except ValueError:
+                return f"{label}得是个数字，比如「{label}改成 3」。"
+            if not 0 <= value <= 50:
+                return f"{label}只能在 0 到 50 之间，0 就是不再主动发。"
+            stored, shown = str(value), str(value)
+        else:
+            text = raw.lower()
+            if text in {"1", "true", "yes", "on", "开", "要", "是"}:
+                stored, shown = "true", "开"
+            elif text in {"0", "false", "no", "off", "关", "不要", "否"}:
+                stored, shown = "false", "关"
+            else:
+                return f"{label}要说开还是关，比如「以后别主动安慰我们」。"
+
+        self.store.set_preference(group_openid, key, stored)
+        if key == "care_enabled" and shown == "关":
+            return "好，那我不主动插话了，你们 @ 我随时都在。想恢复就说「要主动关心」。"
+        return f"记下了，这个群的{label}改为{shown}。"
 
     @staticmethod
     def _format_memory_cards(cards: list[MemoryCard]) -> str:

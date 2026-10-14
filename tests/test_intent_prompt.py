@@ -8,7 +8,13 @@ from __future__ import annotations
 import inspect
 import unittest
 
-from xiaoxia.llm import INTENT_SYSTEM_PROMPT, MEMORY_SYSTEM_PROMPT, SYSTEM_PROMPT, XiaoxiaLLM
+from xiaoxia.llm import (
+    CARE_SYSTEM_PROMPT,
+    INTENT_SYSTEM_PROMPT,
+    MEMORY_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    XiaoxiaLLM,
+)
 
 
 class IntentPromptTests(unittest.TestCase):
@@ -79,6 +85,37 @@ class SystemPromptTests(unittest.TestCase):
         self.assertIn("不下诊断结论", SYSTEM_PROMPT)
         self.assertIn("不推荐具体药品和剂量", SYSTEM_PROMPT)
         self.assertIn("建议去医院", SYSTEM_PROMPT)
+
+
+class GroupPrefPromptTests(unittest.TestCase):
+    def test_bot_pref_action_is_listed(self) -> None:
+        self.assertIn("bot_pref", INTENT_SYSTEM_PROMPT)
+
+    def test_only_the_four_tunable_keys_are_named(self) -> None:
+        for key in (
+            "care_enabled",
+            "care_daily_max",
+            "care_cooldown_minutes",
+            "active_msg_daily_max",
+        ):
+            self.assertIn(key, INTENT_SYSTEM_PROMPT)
+
+    def test_a_natural_way_of_turning_it_off_is_recognised(self) -> None:
+        self.assertIn("以后别主动安慰我们", INTENT_SYSTEM_PROMPT)
+
+
+class CarePromptTests(unittest.TestCase):
+    def test_the_stay_quiet_cases_are_written_down(self) -> None:
+        # 这几条是“宁可不说话”的判断依据，删掉任何一条都会变成在群里瞎插嘴。
+        for phrase in ("转述别人", "平静的陈述", "早就被别人接过", "几小时前的旧事", "跟机器人说话"):
+            self.assertIn(phrase, CARE_SYSTEM_PROMPT)
+
+    def test_the_care_line_is_short_and_not_a_doctor(self) -> None:
+        self.assertIn("25 字以内", CARE_SYSTEM_PROMPT)
+        self.assertIn("不诊断、不荐药", CARE_SYSTEM_PROMPT)
+
+    def test_ai_tone_is_banned(self) -> None:
+        self.assertIn("作为 AI", CARE_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

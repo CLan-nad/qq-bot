@@ -181,5 +181,74 @@ class StoreMigrationTests(unittest.TestCase):
             store.close()
 
 
+class CareTablesTests(unittest.TestCase):
+    """主动关心那两张表是启动时顺手建出来的，旧库不用停机迁移。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / "old2.sqlite3")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(OLD_SCHEMA)
+        conn.commit()
+        conn.close()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_tables_are_created_and_usable(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertNotIn("care_log", names)
+            self.assertNotIn("group_preferences", names)
+        finally:
+            conn.close()
+
+        store = ChatStore(self.db_path)
+        try:
+            key = "m-1:1"
+            first = store.reserve_care_message(
+                message_key=key,
+                group_openid=GROUP,
+                member_openid="openid",
+                content="睡不着",
+                created_at="2026-10-14T15:00:00+08:00",
+            )
+            self.assertTrue(first)
+            self.assertFalse(
+                store.reserve_care_message(
+                    message_key=key,
+                    group_openid=GROUP,
+                    member_openid="openid",
+                    content="睡不着",
+                    created_at="2026-10-14T15:00:00+08:00",
+                )
+            )
+
+            def sent_count() -> int:
+                return store.sent_care_count(
+                    group_openid=GROUP,
+                    member_openid="openid",
+                    since_iso="2026-10-14T00:00:00+08:00",
+                )
+
+            self.assertEqual(sent_count(), 0)
+            store.mark_care_sent(key)
+            self.assertEqual(sent_count(), 1)
+            self.assertEqual(
+                store.last_care_at(group_openid=GROUP, member_openid="openid"),
+                "2026-10-14T15:00:00+08:00",
+            )
+
+            store.set_preference(GROUP, "care_daily_max", "3")
+            self.assertEqual(store.get_preference(GROUP, "care_daily_max"), "3")
+            store.set_preference(GROUP, "care_daily_max", "1")
+            self.assertEqual(store.preferences(GROUP), {"care_daily_max": "1"})
+            self.assertTrue(store.clear_preference(GROUP, "care_daily_max"))
+            self.assertIsNone(store.get_preference(GROUP, "care_daily_max"))
+        finally:
+            store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

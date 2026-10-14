@@ -222,6 +222,26 @@ class ChatStore:
                     last_hit_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS care_log (
+                    message_key TEXT PRIMARY KEY,
+                    group_openid TEXT NOT NULL,
+                    member_openid TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    sent INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_care_log_member
+                    ON care_log(group_openid, member_openid, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS group_preferences (
+                    group_openid TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (group_openid, key)
+                );
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
                     content,
                     username,
@@ -1308,6 +1328,109 @@ class ChatStore:
             "memory_cards": memory_row["memory_cards"],
             "scheduled_tasks": task_row["scheduled_tasks"],
         }
+
+    # ---------- 主动关心：一条消息只准触发一次 ----------
+
+    def reserve_care_message(
+        self,
+        *,
+        message_key: str,
+        group_openid: str,
+        member_openid: str,
+        content: str,
+        created_at: str,
+    ) -> bool:
+        """给这条消息占坑；False 说明已经为它想过要不要关心了。
+
+        先占坑再问模型，这样同一条消息被 QQ 重推时不会重复关心。
+        """
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO care_log
+                    (message_key, group_openid, member_openid, content, sent, created_at)
+                VALUES (?, ?, ?, ?, 0, ?)
+                """,
+                (message_key, group_openid, member_openid, content, created_at),
+            )
+            return cursor.rowcount > 0
+
+    def mark_care_sent(self, message_key: str) -> None:
+        """这条消息确实发出去关心了；只有发出去的才算进频率预算。"""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE care_log SET sent = 1 WHERE message_key = ?",
+                (message_key,),
+            )
+
+    def sent_care_count(self, *, group_openid: str, member_openid: str, since_iso: str) -> int:
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS total FROM care_log
+            WHERE group_openid = ? AND member_openid = ? AND sent = 1 AND created_at >= ?
+            """,
+            (group_openid, member_openid, since_iso),
+        ).fetchone()
+        return int(row["total"])
+
+    def last_care_at(self, *, group_openid: str, member_openid: str) -> str | None:
+        """上一次真的发出关心是什么时候（没发出去的不算）。"""
+        row = self._conn.execute(
+            """
+            SELECT created_at FROM care_log
+            WHERE group_openid = ? AND member_openid = ? AND sent = 1
+            ORDER BY created_at DESC, message_key DESC LIMIT 1
+            """,
+            (group_openid, member_openid),
+        ).fetchone()
+        return str(row["created_at"]) if row else None
+
+    def proactive_message_count(self, *, group_openid: str, since_iso: str) -> int:
+        """今天已经自发过多少条（定时任务和主动关心共享这个预算）。"""
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS total FROM messages
+            WHERE group_openid = ? AND source IN ('BOT_TASK', 'BOT_CARE') AND timestamp >= ?
+            """,
+            (group_openid, since_iso),
+        ).fetchone()
+        return int(row["total"])
+
+    # ---------- 群内偏好：优先级高于 .env ----------
+
+    def get_preference(self, group_openid: str, key: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT value FROM group_preferences WHERE group_openid = ? AND key = ?",
+            (group_openid, key),
+        ).fetchone()
+        return str(row["value"]) if row else None
+
+    def set_preference(self, group_openid: str, key: str, value: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO group_preferences (group_openid, key, value, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(group_openid, key)
+                DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+                """,
+                (group_openid, key, value),
+            )
+
+    def preferences(self, group_openid: str) -> dict[str, str]:
+        rows = self._conn.execute(
+            "SELECT key, value FROM group_preferences WHERE group_openid = ? ORDER BY key",
+            (group_openid,),
+        ).fetchall()
+        return {str(row["key"]): str(row["value"]) for row in rows}
+
+    def clear_preference(self, group_openid: str, key: str) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM group_preferences WHERE group_openid = ? AND key = ?",
+                (group_openid, key),
+            )
+            return cursor.rowcount > 0
 
     def close(self) -> None:
         self._conn.close()

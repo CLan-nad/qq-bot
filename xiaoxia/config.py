@@ -30,6 +30,11 @@ class Settings:
     vision_max_image_bytes: int
     image_cache_enabled: bool
     image_cache_max_rows: int
+    care_enabled: bool
+    care_model: str
+    care_daily_max: int
+    care_cooldown_minutes: int
+    active_msg_daily_max: int
     ack_after_seconds: float
     search_provider: str
     tavily_api_key: str
@@ -85,6 +90,12 @@ def load_settings() -> Settings:
             "XIAOXIA_IMAGE_CACHE", "1"
         ).strip().lower() not in {"0", "false", "no"},
         image_cache_max_rows=int(os.getenv("XIAOXIA_IMAGE_CACHE_MAX_ROWS", "2000")),
+        care_enabled=os.getenv("XIAOXIA_CARE_ENABLED", "1").strip().lower()
+        not in {"0", "false", "no"},
+        care_model=os.getenv("XIAOXIA_CARE_MODEL", "").strip(),
+        care_daily_max=int(os.getenv("XIAOXIA_CARE_DAILY_MAX", "2")),
+        care_cooldown_minutes=int(os.getenv("XIAOXIA_CARE_COOLDOWN_MINUTES", "180")),
+        active_msg_daily_max=int(os.getenv("XIAOXIA_ACTIVE_MSG_DAILY_MAX", "6")),
         ack_after_seconds=float(os.getenv("XIAOXIA_ACK_AFTER_SECONDS", "6")),
         search_provider=os.getenv("XIAOXIA_SEARCH_PROVIDER", "auto").strip().lower(),
         tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
