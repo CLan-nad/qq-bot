@@ -78,6 +78,11 @@ QQ 开放平台选择 WebSocket 连接，并开启接收群消息。
 `pip install`；测试不通过直接中止；健康检查失败自动回滚上一个版本。推送和回滚版本
 记录在服务器的 `/var/lib/xiaoxia-deploy/`。
 
+服务器在国内，偶尔会遇到 `api.github.com` 通、但 `github.com` 的 git 通道超时，远端
+`git fetch origin` 拿不到新提交。为此 `deploy.ps1` 每次都会把同一分支的完整 bundle
+一并传到 `/tmp/xiaoxia-deploy-bundle.bundle`：走 origin 正常时不会用到它，fetch 失败时
+自动改从 bundle 补齐对象，日志里出现 `used offline bundle` 说明走了这条旁路。
+
 GitHub Actions（`.github/workflows/ci.yml`）在每次 push 和 PR 上跑 `compileall` 和全部
 单元测试，Python 3.11 / 3.12 各一次。
 

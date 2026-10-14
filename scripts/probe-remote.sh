@@ -44,7 +44,18 @@ line "git"
 printf 'HEAD=%s branch=%s\n' \
   "$($RUNAS git -C "$DIR" rev-parse HEAD 2>/dev/null)" \
   "$($RUNAS git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-$RUNAS git -C "$DIR" fetch -q origin || echo "WARN: fetch failed"
+# 与 deploy-remote.sh 一致：origin 连不上就退回离线 bundle，探测不该被网络卡住
+BUNDLE=/tmp/xiaoxia-deploy-bundle.bundle
+if ! $RUNAS git -C "$DIR" fetch -q origin; then
+  # 不猜 bundle 里的 ref 名，问它自己；优先取指向 TARGET 的那条
+  bref="$($RUNAS git -C "$DIR" bundle list-heads "$BUNDLE" 2>/dev/null | awk -v want="$TARGET" '$1 == want { print $2; exit }')"
+  [ -n "$bref" ] || bref="$($RUNAS git -C "$DIR" bundle list-heads "$BUNDLE" 2>/dev/null | awk 'NR == 1 { print $2 }')"
+  if [ -n "$bref" ] && $RUNAS git -C "$DIR" fetch -q "$BUNDLE" "$bref"; then
+    echo "WARN: origin unreachable, probed with the offline bundle"
+  else
+    echo "WARN: fetch failed (origin unreachable, no usable bundle)"
+  fi
+fi
 
 line "target rev $TARGET"
 if $RUNAS git -C "$DIR" cat-file -e "${TARGET}^{commit}" 2>/dev/null; then

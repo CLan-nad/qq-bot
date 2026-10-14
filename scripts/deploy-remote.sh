@@ -30,7 +30,36 @@ if [ ! -d "$DIR/.git" ]; then
   $RUNAS git -C "$DIR" reset -q --mixed "origin/$BRANCH"
 fi
 
-$RUNAS git -C "$DIR" fetch -q origin || { say fatal "git fetch failed"; exit 9; }
+# ---- fetch objects: origin first, offline bundle as the escape hatch ----
+# 服务器在国内，api.github.com 通、github.com 的 git 传输通道却经常超时，
+# 照原来的写法每次部署都要赌一次网络。deploy.ps1 会把同一分支的完整 bundle
+# 一起传上来；正常路径不碰它，只有 fetch 不动时才拿来顶上。
+BUNDLE=/tmp/xiaoxia-deploy-bundle.bundle
+# bundle 里记的 ref 名随本地怎么打包而变（refs/heads/main 或 refs/remotes/origin/main），
+# 所以不猜名字，直接问 bundle 自己要，优先取指向 TARGET 的那条。
+bundle_ref_for_target() {
+  $RUNAS git -C "$DIR" bundle list-heads "$BUNDLE" 2>/dev/null |
+    awk -v want="$TARGET" '$1 == want { print $2; exit }'
+}
+bundle_any_ref() {
+  $RUNAS git -C "$DIR" bundle list-heads "$BUNDLE" 2>/dev/null | awk 'NR == 1 { print $2 }'
+}
+fetch_from_bundle() {
+  [ -f "$BUNDLE" ] || return 1
+  local ref
+  ref="$(bundle_ref_for_target)"
+  [ -n "$ref" ] || ref="$(bundle_any_ref)"
+  [ -n "$ref" ] || return 1
+  $RUNAS git -C "$DIR" fetch -q "$BUNDLE" "$ref"
+}
+if $RUNAS git -C "$DIR" fetch -q origin; then
+  say fetch "objects from origin"
+elif fetch_from_bundle; then
+  say fetch "origin unreachable, used offline bundle"
+else
+  say fatal "git fetch failed and no usable bundle at $BUNDLE"
+  exit 9
+fi
 $RUNAS git -C "$DIR" cat-file -e "${TARGET}^{commit}" 2>/dev/null || {
   say fatal "target rev $TARGET not found on server"; exit 9; }
 
