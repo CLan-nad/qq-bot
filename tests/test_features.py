@@ -7,7 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from xiaoxia.llm import XiaoxiaLLM
-from xiaoxia.scheduling import advance_task, in_quiet_hours, parse_time_of_day, resolve_next_run
+from xiaoxia.scheduling import advance_task, parse_time_of_day, resolve_next_run
 from xiaoxia.store import ChatStore
 
 
@@ -202,8 +202,6 @@ class FeatureTests(unittest.TestCase):
             once_datetime="2027-02-06T09:00:00",
         )
         self.assertEqual(once.isoformat(), "2027-02-06T09:00:00+08:00")
-
-        self.assertTrue(in_quiet_hours(datetime(2026, 10, 13, 0, 1, tzinfo=tz), parse_time_of_day("23:30"), parse_time_of_day("07:00")))
 
     def test_json_extraction(self) -> None:
         parsed = XiaoxiaLLM._json_content('```json\n{"action":"chat"}\n```')

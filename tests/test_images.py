@@ -388,6 +388,8 @@ class StickerDescribeTests(unittest.TestCase):
             vision_max_images_per_request=3,
             vision_max_image_bytes=1024 * 1024,
             allowed_group_openids=frozenset(),
+            image_cache_enabled=False,
+            image_cache_max_rows=0,
         )
 
     def _save(self, message_id: str, content: str, raw: dict) -> None:

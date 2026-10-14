@@ -24,12 +24,13 @@ class Settings:
     memory_batch_messages: int
     memory_search_messages: int
     task_max_count: int
-    task_quiet_start: str
-    task_quiet_end: str
     vision_model: str
     vision_max_images_per_request: int
     vision_recent_messages: int
     vision_max_image_bytes: int
+    image_cache_enabled: bool
+    image_cache_max_rows: int
+    ack_after_seconds: float
     search_provider: str
     tavily_api_key: str
     bocha_api_key: str
@@ -72,8 +73,6 @@ def load_settings() -> Settings:
         memory_batch_messages=int(os.getenv("XIAOXIA_MEMORY_BATCH_MESSAGES", "80")),
         memory_search_messages=int(os.getenv("XIAOXIA_MEMORY_SEARCH_MESSAGES", "20")),
         task_max_count=int(os.getenv("XIAOXIA_TASK_MAX_COUNT", "20")),
-        task_quiet_start=os.getenv("XIAOXIA_TASK_QUIET_START", "23:30"),
-        task_quiet_end=os.getenv("XIAOXIA_TASK_QUIET_END", "07:00"),
         vision_model=os.getenv("XIAOXIA_VISION_MODEL", "deepseek-flash"),
         vision_max_images_per_request=int(
             os.getenv("XIAOXIA_VISION_MAX_IMAGES_PER_REQUEST", "3")
@@ -82,6 +81,11 @@ def load_settings() -> Settings:
         vision_max_image_bytes=int(
             os.getenv("XIAOXIA_VISION_MAX_IMAGE_BYTES", str(8 * 1024 * 1024))
         ),
+        image_cache_enabled=os.getenv(
+            "XIAOXIA_IMAGE_CACHE", "1"
+        ).strip().lower() not in {"0", "false", "no"},
+        image_cache_max_rows=int(os.getenv("XIAOXIA_IMAGE_CACHE_MAX_ROWS", "2000")),
+        ack_after_seconds=float(os.getenv("XIAOXIA_ACK_AFTER_SECONDS", "6")),
         search_provider=os.getenv("XIAOXIA_SEARCH_PROVIDER", "auto").strip().lower(),
         tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
         bocha_api_key=os.getenv("BOCHA_API_KEY", "").strip(),

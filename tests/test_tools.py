@@ -19,6 +19,18 @@ from xiaoxia.tools import (
 )
 
 
+async def _bocha_with_payload(payload: dict) -> ToolResult:
+    original = tools.httpx2.AsyncClient
+    transport = tools.httpx2.MockTransport(
+        lambda request: tools.httpx2.Response(200, json=payload)
+    )
+    tools.httpx2.AsyncClient = lambda **kwargs: original(transport=transport, **kwargs)
+    try:
+        return await tools._bocha_search("q", 5, "key", 5)
+    finally:
+        tools.httpx2.AsyncClient = original
+
+
 def _make_docx(paragraphs: list[str]) -> bytes:
     from docx import Document
 
@@ -108,74 +120,97 @@ class ToolExecutionTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.output, "答案")
 
-    def test_search_auto_uses_bing_without_keys(self) -> None:
+    def test_search_without_any_key_is_not_configured(self) -> None:
+        result = asyncio.run(search_web("q", provider="auto"))
+        self.assertFalse(result.ok)
+        self.assertIn("没有配置", result.error)
+
+    def test_search_never_fakes_success_without_provider(self) -> None:
+        # 显式指定提供方但没配 key，同样必须失败，不许出现 ok=True 的静默兜底。
+        result = asyncio.run(search_web("q", provider="bocha"))
+        self.assertFalse(result.ok)
+        self.assertIn("key", result.error)
+
+    def test_search_rejects_unknown_provider(self) -> None:
+        result = asyncio.run(search_web("q", provider="bing_web", bocha_api_key="k"))
+        self.assertFalse(result.ok)
+        self.assertIn("不支持", result.error)
+
+    def test_search_auto_prefers_bocha(self) -> None:
         seen: list[str] = []
 
-        async def fake_bing(query, limit, timeout):
+        async def fake_bocha(query, limit, key, timeout):
             seen.append(query)
             return ToolResult(ok=True, data=[{"title": "B", "url": "u", "snippet": "s"}])
 
-        original = tools._bing_web_search
-        tools._bing_web_search = fake_bing
+        original = tools._bocha_search
+        tools._bocha_search = fake_bocha
         try:
-            result = asyncio.run(search_web("q", provider="auto", tavily_api_key=""))
+            result = asyncio.run(
+                search_web("q", provider="auto", bocha_api_key="k", tavily_api_key="t")
+            )
         finally:
-            tools._bing_web_search = original
+            tools._bocha_search = original
         self.assertTrue(result.ok)
         self.assertEqual(seen, ["q"])
 
-    def test_search_falls_back_to_bing_when_api_fails(self) -> None:
+    def test_search_falls_back_from_bocha_to_tavily(self) -> None:
+        async def fake_bocha(query, limit, key, timeout):
+            return ToolResult(ok=False, error="bocha down")
+
         async def fake_tavily(query, limit, key, timeout):
-            return ToolResult(ok=False, error="tavily down")
+            return ToolResult(ok=True, data=[{"title": "T", "url": "u", "snippet": "s"}])
 
-        async def fake_bing(query, limit, timeout):
-            return ToolResult(ok=True, data=[{"title": "B", "url": "u", "snippet": "s"}])
-
+        original_bocha = tools._bocha_search
         original_tavily = tools._tavily_search
-        original_bing = tools._bing_web_search
+        tools._bocha_search = fake_bocha
         tools._tavily_search = fake_tavily
-        tools._bing_web_search = fake_bing
         try:
-            result = asyncio.run(search_web("q", provider="auto", tavily_api_key="k"))
+            result = asyncio.run(
+                search_web("q", provider="auto", bocha_api_key="k", tavily_api_key="t")
+            )
         finally:
+            tools._bocha_search = original_bocha
             tools._tavily_search = original_tavily
-            tools._bing_web_search = original_bing
         self.assertTrue(result.ok)
-        self.assertEqual(result.data[0]["title"], "B")
+        self.assertEqual(result.data[0]["title"], "T")
 
-    def test_search_reports_error_when_everything_fails(self) -> None:
-        async def fake_bing(query, limit, timeout):
+    def test_search_reports_error_when_every_provider_fails(self) -> None:
+        async def fake_bocha(query, limit, key, timeout):
             return ToolResult(ok=False, error="boom")
 
-        original = tools._bing_web_search
-        tools._bing_web_search = fake_bing
+        original = tools._bocha_search
+        tools._bocha_search = fake_bocha
         try:
-            result = asyncio.run(search_web("q", provider="auto"))
+            result = asyncio.run(search_web("q", provider="auto", bocha_api_key="k"))
         finally:
-            tools._bing_web_search = original
+            tools._bocha_search = original
         self.assertFalse(result.ok)
         self.assertIn("boom", result.error)
 
-    def test_bing_web_search_parses_results(self) -> None:
-        page = (
-            '<ol><li class="b_algo"><h2><a href="https://x.com/a">标题A</a></h2>'
-            "<p>摘要A</p></li>"
-            '<li class="b_algo"><h2><a href="https://x.com/b">标题B</a></h2>'
-            "<p>摘要B</p></li></ol>"
-        )
-        original = tools.httpx2.AsyncClient
-        transport = tools.httpx2.MockTransport(
-            lambda request: tools.httpx2.Response(200, text=page)
-        )
-        tools.httpx2.AsyncClient = lambda **kwargs: original(transport=transport, **kwargs)
-        try:
-            result = asyncio.run(tools._bing_web_search("q", 5, 5))
-        finally:
-            tools.httpx2.AsyncClient = original
+    def test_bocha_search_parses_results(self) -> None:
+        payload = {
+            "code": 200,
+            "data": {
+                "webPages": {
+                    "value": [
+                        {"name": "标题A", "url": "https://x/a", "summary": "摘要A"},
+                        {"name": "标题B", "url": "https://x/b", "snippet": "摘要B"},
+                    ]
+                }
+            },
+        }
+        result = asyncio.run(_bocha_with_payload(payload))
         self.assertTrue(result.ok)
         self.assertEqual(len(result.data), 2)
         self.assertEqual(result.data[0]["title"], "标题A")
-        self.assertEqual(result.data[0]["url"], "https://x.com/a")
+        self.assertEqual(result.data[1]["snippet"], "摘要B")
+
+    def test_bocha_search_empty_result_is_not_ok(self) -> None:
+        payload = {"code": 200, "data": {"webPages": {"value": []}}}
+        result = asyncio.run(_bocha_with_payload(payload))
+        self.assertFalse(result.ok)
+        self.assertIn("没有返回", result.error)
 
     def test_fetch_page_rejects_private_host(self) -> None:
         result = asyncio.run(fetch_page("http://127.0.0.1/anything"))

@@ -20,13 +20,6 @@ def parse_time_of_day(value: str | None) -> time | None:
     return time(hour, minute)
 
 
-def parse_quiet_time(value: str) -> time:
-    parsed = parse_time_of_day(value)
-    if parsed is None:
-        raise ValueError(f"Invalid quiet-hours time: {value}")
-    return parsed
-
-
 def parse_datetime(value: str, timezone: str) -> datetime:
     parsed = datetime.fromisoformat(value.strip())
     if parsed.tzinfo is None:
@@ -121,13 +114,6 @@ def advance_task(
         ) + timedelta(days=days_ahead)
 
     raise ValueError("暂不支持这种重复频率")
-
-
-def in_quiet_hours(value: datetime, start: time, end: time) -> bool:
-    current = value.time()
-    if start <= end:
-        return start <= current < end
-    return current >= start or current < end
 
 
 def iso_now(timezone: str) -> str:

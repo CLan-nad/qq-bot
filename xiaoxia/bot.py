@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import botpy
@@ -24,14 +26,9 @@ from .images import (
     to_data_url,
 )
 from .llm import XiaoxiaLLM
-from .scheduling import (
-    advance_task,
-    in_quiet_hours,
-    parse_datetime,
-    parse_quiet_time,
-    resolve_next_run,
-)
+from .scheduling import advance_task, parse_datetime, resolve_next_run
 from .store import ChatStore, MemoryCard, ScheduledTask, StoredMessage
+from .topics import format_topic, split_topic
 from .tools import (
     ToolResult,
     document_attachments,
@@ -62,6 +59,13 @@ ROLE_LABELS = {
     "admin": "管理员",
     "member": "成员",
 }
+
+# 这几类动作要调外部服务，通常要几秒到十几秒，先应一句「我查一下」比让人干等好。
+ACK_ACTIONS = frozenset(
+    {"web_search", "web_fetch", "document_read", "shell_run", "memory_search"}
+)
+ACK_TEXT = "稍等，我查一下～"
+FALLBACK_TEXT = "小毛豆刚刚走神了，稍后再 @ 我一次试试。"
 
 
 @dataclass(frozen=True)
@@ -175,7 +179,13 @@ class XiaoxiaClient(botpy.Client):
     ) -> list[str]:
         descriptions: list[str] = []
         for attachment in attachments:
-            image_ref = await self._image_reference(attachment)
+            image_ref, digest, byte_size, content_type = await self._image_reference(attachment)
+            use_cache = bool(digest) and self.settings.image_cache_enabled
+            cached = self.store.get_image_description(digest) if use_cache else ""
+            if cached:
+                logger.info("image description cache hit %s", digest[:12])
+                descriptions.append(cached)
+                continue
             try:
                 description = await self.llm.describe_image(image_ref, hint=hint)
             except Exception:
@@ -189,18 +199,31 @@ class XiaoxiaClient(botpy.Client):
                     "image description empty: %s",
                     attachment.filename or attachment.content_type,
                 )
+            elif use_cache:
+                # 空描述不写缓存，留下次重新识别的机会。
+                self.store.save_image_description(
+                    digest=digest,
+                    description=description,
+                    content_type=content_type,
+                    byte_size=byte_size,
+                    max_rows=self.settings.image_cache_max_rows,
+                )
             descriptions.append(description)
         return descriptions
 
-    async def _image_reference(self, attachment: ImageAttachment) -> str:
-        """优先自己取图并内联，失败时退回让模型直接下载原始链接。"""
+    async def _image_reference(self, attachment: ImageAttachment) -> tuple[str, str, int, str]:
+        """优先自己取图并内联，失败时退回让模型直接下载原始链接。
+
+        返回 (给视觉模型的引用, 字节的 sha256, 字节数, content_type)。
+        取图失败时 digest 为空串，表示这一次不参与描述缓存。
+        """
         fetched = await fetch_image_bytes(
             attachment.url,
             max_bytes=self.settings.vision_max_image_bytes,
         )
         if fetched is None:
             logger.info("image download failed, passing url through: %s", attachment.filename)
-            return attachment.url
+            return attachment.url, "", 0, attachment.content_type
         data, content_type = fetched
         logger.debug(
             "inlined image %s (%s bytes, %s)",
@@ -208,7 +231,8 @@ class XiaoxiaClient(botpy.Client):
             len(data),
             content_type,
         )
-        return to_data_url(data, content_type)
+        digest = hashlib.sha256(data).hexdigest()
+        return to_data_url(data, content_type), digest, len(data), content_type
 
     async def _describe_recent_images(
         self,
@@ -311,11 +335,6 @@ class XiaoxiaClient(botpy.Client):
 
     async def _send_due_tasks(self) -> None:
         now = self._now()
-        quiet_start = parse_quiet_time(self.settings.task_quiet_start)
-        quiet_end = parse_quiet_time(self.settings.task_quiet_end)
-        if in_quiet_hours(now, quiet_start, quiet_end):
-            return
-
         now_iso = now.isoformat(timespec="seconds")
         for task in self.store.due_tasks(now_iso):
             next_run = advance_task(
@@ -492,14 +511,11 @@ class XiaoxiaClient(botpy.Client):
             timestamp=message.timestamp or "",
             source=source,
         )
-        recent = self.store.format_recent_messages(
-            message.group_openid,
-            self.settings.recent_messages,
-            self.settings.max_context_chars,
-        )
+        topic, background, full_recent = self._topic_context(message.group_openid)
         identity = self._identity_context(message.group_openid, requester)
 
         async with self._reply_lock:
+            acked = False
             try:
                 bot_mention = self._bot_mention(message)
                 raw_request = (message.content or "").strip()
@@ -517,23 +533,103 @@ class XiaoxiaClient(botpy.Client):
                     current_time=self._now().isoformat(timespec="seconds"),
                     tasks_summary=ChatStore.format_tasks(self.store.tasks(message.group_openid)),
                     identity_context=identity.prompt(),
+                    topic_context=topic,
                 )
-                answer = await self._handle_intent(
-                    intent=intent,
+                acked = await self._answer_with_ack(
                     message=message,
+                    intent=intent,
                     requester=requester,
                     request=request,
-                    recent=recent,
+                    topic=topic,
+                    background=background,
+                    full_recent=full_recent,
                     identity=identity,
+                    source=source,
                 )
-                await message.reply(content=answer)
-                self._remember_bot_reply(message.group_openid, answer, f"{source}:REPLY")
                 logger.info("handled @ request %s from %s", intent.get("action"), message.username)
             except Exception:
                 logger.exception("failed to generate or send reply")
-                fallback = "小毛豆刚刚走神了，稍后再 @ 我一次试试。"
-                await message.reply(content=fallback)
-                self._remember_bot_reply(message.group_openid, fallback, f"{source}:FALLBACK")
+                await self._send_reply(
+                    message, FALLBACK_TEXT, 2 if acked else 1, f"{source}:FALLBACK"
+                )
+
+    def _topic_context(self, group_openid: str) -> tuple[str, str, str]:
+        """切成【当前话题】+【更早的背景】，另外留一份全量记录给历史检索兜底。"""
+        recent = self.store.recent_messages(group_openid, self.settings.recent_messages)
+        topic_slice = split_topic(
+            recent,
+            boundary_row_id=self.store.latest_summary_row_id(group_openid),
+        )
+        return (
+            format_topic(topic_slice.current, self.settings.max_context_chars),
+            format_topic(topic_slice.previous_tail, 4000),
+            format_topic(recent, self.settings.max_context_chars),
+        )
+
+    async def _send_reply(
+        self,
+        message: RichGroupMessage,
+        text: str,
+        seq: int,
+        source: str,
+    ) -> bool:
+        """按 msg_seq 回复群消息。同一条 msg_id 下 seq 不能重复，所以 ack 用 1、正文用 2。"""
+        try:
+            await self.api.post_group_message(
+                group_openid=message.group_openid,
+                msg_id=message.id,
+                msg_seq=seq,
+                content=text,
+            )
+        except Exception:
+            logger.exception("failed to send group reply, seq=%s", seq)
+            return False
+        self._remember_bot_reply(message.group_openid, text, source)
+        return True
+
+    async def _answer_with_ack(
+        self,
+        *,
+        message: RichGroupMessage,
+        intent: dict,
+        requester: StoredMessage,
+        request: str,
+        topic: str,
+        background: str,
+        full_recent: str,
+        identity: IdentityContext,
+        source: str,
+    ) -> bool:
+        """执行 intent，返回是否已经发过 ack（决定正式回复用哪个 msg_seq）。"""
+        action = str(intent.get("action") or "chat")
+        task = asyncio.create_task(
+            self._handle_intent(
+                intent=intent,
+                message=message,
+                requester=requester,
+                request=request,
+                topic=topic,
+                background=background,
+                full_recent=full_recent,
+                identity=identity,
+            )
+        )
+        seq = 1
+        acked = False
+        timeout = self.settings.ack_after_seconds
+        if action in ACK_ACTIONS and timeout > 0:
+            done, _pending = await asyncio.wait({task}, timeout=timeout)
+            if not done:
+                acked = await self._send_reply(message, ACK_TEXT, 1, f"{source}:ACK")
+                if acked:
+                    seq = 2
+        try:
+            answer = await task
+        except Exception:
+            logger.exception("failed to build reply for action %s", action)
+            answer = FALLBACK_TEXT
+        await self._send_reply(message, answer, seq, f"{source}:REPLY")
+        return acked
 
     @staticmethod
     def _optional_str(value: Any) -> str | None:
@@ -558,7 +654,9 @@ class XiaoxiaClient(botpy.Client):
         message: RichGroupMessage,
         requester: StoredMessage,
         request: str,
-        recent: str,
+        topic: str,
+        background: str,
+        full_recent: str,
         identity: IdentityContext,
     ) -> str:
         action = str(intent.get("action") or "chat")
@@ -579,7 +677,7 @@ class XiaoxiaClient(botpy.Client):
                 message=message,
                 requester=requester,
                 request=request,
-                recent=recent,
+                recent=full_recent,
                 identity=identity,
             )
         if action == "web_search":
@@ -596,7 +694,8 @@ class XiaoxiaClient(botpy.Client):
         return await self.llm.generate_reply(
             requester=requester,
             request=request,
-            recent_context=recent,
+            topic_context=topic,
+            background_context=background,
             memory_context=self._memory_context(message.group_openid),
             identity_context=identity.prompt(),
         )
@@ -627,15 +726,7 @@ class XiaoxiaClient(botpy.Client):
 
         if next_run <= now:
             return "这个时间已经过去了，要不要改成之后的时间？"
-        if in_quiet_hours(
-            next_run,
-            parse_quiet_time(self.settings.task_quiet_start),
-            parse_quiet_time(self.settings.task_quiet_end),
-        ):
-            return (
-                "这个时间在免打扰时段里。"
-                f"我默认 {self.settings.task_quiet_start} 到 {self.settings.task_quiet_end} 不主动发消息。"
-            )
+
         if self.store.active_task_count(message.group_openid) >= self.settings.task_max_count:
             return f"进行中的任务最多 {self.settings.task_max_count} 个，先取消一个再加吧。"
 
@@ -835,7 +926,7 @@ class XiaoxiaClient(botpy.Client):
         return await self.llm.generate_reply(
             requester=requester,
             request=request,
-            recent_context=recent,
+            topic_context=recent,
             memory_context=self._memory_context(message.group_openid),
             search_context="\n\n".join(search_parts),
             identity_context=identity.prompt(),
@@ -845,16 +936,21 @@ class XiaoxiaClient(botpy.Client):
     def _format_search_result(result: ToolResult) -> str:
         lines: list[str] = []
         if result.output:
-            lines.append("摘要：" + result.output)
+            lines.append("摘要：" + result.output[:300])
         for index, item in enumerate(result.data, 1):
             title = (item.get("title") or "").strip()
             url = (item.get("url") or "").strip()
             snippet = (item.get("snippet") or "").strip()
-            lines.append(f"{index}. {title}\n   {url}\n   {snippet}")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            site = urlparse(url).netloc if url else ""
+            suffix = f"（来源：{site}）" if site else ""
+            lines.append(f"{index}. {title}{suffix}\n   {url}\n   {snippet}")
         return "\n".join(lines)
 
     async def _handle_web_search(self, request: str, intent: dict) -> str:
         query = self._optional_str(intent.get("query")) or request
+        logger.info("web_search query=%r provider=%s", query, self.settings.search_provider)
         result = await search_web(
             query,
             limit=self.settings.search_max_results,
@@ -865,7 +961,10 @@ class XiaoxiaClient(botpy.Client):
         )
         if not result.ok:
             logger.warning("web search failed: %s", result.error)
-            return "搜索没成功，我这边网络有点不给力，等会儿再试一次吧。"
+            if "没有配置" in (result.error or ""):
+                return "我还没配好联网搜索，需要先在服务器上填 BOCHA_API_KEY，配好后就能查了。"
+            detail = (result.error or "未知错误").replace("联网搜索没有配置：", "")[:80]
+            return f"搜索服务这次没返回可用结果：{detail}，要不换个说法再让我查一次？"
         return await self.llm.generate_tool_reply(
             request=request,
             tool_name="web_search",

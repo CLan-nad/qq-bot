@@ -18,6 +18,7 @@ class StoredMessage:
     source: str
     message_key: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+    row_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,16 @@ class ChatStore:
                     summary TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(group_openid, start_row_id, end_row_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS image_descriptions (
+                    digest TEXT PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    content_type TEXT NOT NULL DEFAULT '',
+                    byte_size INTEGER NOT NULL DEFAULT 0,
+                    hits INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_hit_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -307,6 +318,70 @@ class ChatStore:
             )
         return cursor.rowcount == 1
 
+    def get_image_description(self, digest: str) -> str:
+        """命中缓存就返回上次的图片描述，并把命中计数加一。"""
+        if not digest:
+            return ""
+        row = self._conn.execute(
+            "SELECT description FROM image_descriptions WHERE digest = ?",
+            (digest,),
+        ).fetchone()
+        if row is None:
+            return ""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE image_descriptions"
+                " SET hits = hits + 1, last_hit_at = CURRENT_TIMESTAMP WHERE digest = ?",
+                (digest,),
+            )
+        return row["description"] or ""
+
+    def save_image_description(
+        self,
+        *,
+        digest: str,
+        description: str,
+        content_type: str = "",
+        byte_size: int = 0,
+        max_rows: int = 2000,
+    ) -> None:
+        text = (description or "").strip()
+        if not digest or not text:
+            return
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO image_descriptions (
+                    digest, description, content_type, byte_size, hits
+                ) VALUES (?, ?, ?, ?, 0)
+                ON CONFLICT(digest) DO UPDATE SET
+                    description = excluded.description,
+                    content_type = excluded.content_type,
+                    byte_size = excluded.byte_size,
+                    last_hit_at = CURRENT_TIMESTAMP
+                """,
+                (digest, text[:500], content_type, byte_size),
+            )
+            if max_rows > 0:
+                self._conn.execute(
+                    """
+                    DELETE FROM image_descriptions
+                    WHERE digest NOT IN (
+                        SELECT digest FROM image_descriptions
+                        ORDER BY last_hit_at DESC, hits DESC
+                        LIMIT ?
+                    )
+                    """,
+                    (max_rows,),
+                )
+
+    def image_cache_stats(self) -> dict[str, int]:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS entries, COALESCE(SUM(hits), 0) AS hits"
+            " FROM image_descriptions"
+        ).fetchone()
+        return {"entries": int(row["entries"]), "hits": int(row["hits"])}
+
     def recent_messages_with_raw(
         self,
         group_openid: str,
@@ -314,7 +389,7 @@ class ChatStore:
     ) -> list[StoredMessage]:
         rows = self._conn.execute(
             """
-            SELECT message_key, username, member_openid, role, content, timestamp, source, raw_json
+            SELECT row_id, message_key, username, member_openid, role, content, timestamp, source, raw_json
             FROM messages
             WHERE group_openid = ?
             ORDER BY row_id DESC
@@ -340,6 +415,7 @@ class ChatStore:
                     source=row["source"] or "",
                     message_key=row["message_key"] or "",
                     raw=raw,
+                    row_id=int(row["row_id"] or 0),
                 )
             )
         return messages
@@ -347,7 +423,7 @@ class ChatStore:
     def recent_messages(self, group_openid: str, limit: int) -> list[StoredMessage]:
         rows = self._conn.execute(
             """
-            SELECT username, member_openid, role, content, timestamp, source
+            SELECT row_id, username, member_openid, role, content, timestamp, source
             FROM messages
             WHERE group_openid = ?
             ORDER BY row_id DESC
@@ -363,6 +439,7 @@ class ChatStore:
                 content=row["content"] or "",
                 timestamp=row["timestamp"] or "",
                 source=row["source"] or "",
+                row_id=int(row["row_id"] or 0),
             )
             for row in reversed(rows)
         ]
@@ -636,7 +713,7 @@ class ChatStore:
         start_row_id = int(row["last_row_id"] or 0) + 1
         rows = self._conn.execute(
             """
-            SELECT username, member_openid, role, content, timestamp, source
+            SELECT row_id, username, member_openid, role, content, timestamp, source
             FROM messages
             WHERE group_openid = ? AND row_id >= ?
             ORDER BY row_id
@@ -654,6 +731,7 @@ class ChatStore:
                 content=row["content"] or "",
                 timestamp=row["timestamp"] or "",
                 source=row["source"] or "",
+                row_id=int(row["row_id"] or 0),
             )
             for row in rows
         ]
@@ -698,6 +776,15 @@ class ChatStore:
                         content,
                     ),
                 )
+
+    def latest_summary_row_id(self, group_openid: str) -> int:
+        """最近一次折叠进摘要的最后一行，用来给话题切分画一条硬边界。"""
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(end_row_id), 0) AS last_row_id"
+            " FROM conversation_summaries WHERE group_openid = ?",
+            (group_openid,),
+        ).fetchone()
+        return int(row["last_row_id"] or 0)
 
     def conversation_summaries(self, group_openid: str, limit: int = 5) -> list[str]:
         rows = self._conn.execute(

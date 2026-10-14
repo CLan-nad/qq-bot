@@ -30,6 +30,8 @@ SYSTEM_PROMPT = """你是 QQ 群里的“小毛豆”，一对情侣的私人感
 8. 只有用户明确追问“上一条/刚才/刚刚”时，才去回看对话历史或你自己上一条回复，不要凭空编造历史；平时不要主动翻旧账。
 9. 聚焦用户刚说的这一句：先把当前内容回清楚。除非用户主动提起，不要主动把旧话题、旧约定、旧情绪或长期记忆里的条目拎出来复述；历史和记忆只用来帮你理解语境，不是每轮都要拿出来说。
 10. 不要重复自己：这一轮没有新信息就简短自然地回应，别说“像上次那样”“还记得我们说过”这类硬扯旧事的话，也不要复述你上一条回复。
+11. 上下文分成【当前话题】和【更早的背景】两块：只回应【当前话题】。【更早的背景】是已经翻篇的话题，绝不主动提起、复述或延伸，除非用户明确点名要聊那件事。
+12. 涉及身体健康时不下诊断结论、不推荐具体药品和剂量，只给常识性的护理与观察建议；出现发烧、剧烈疼痛、症状持续不止、脱水、意识不清这类信号，直接建议去医院。
 """
 
 
@@ -70,6 +72,12 @@ memory_search 输出 query，用适合检索的短关键词。
 memory_forget 输出 memory_id 或 match。
 person 优先使用明确显示名；用户说“我”时指当前触发者，说“她/他/对象/另一半”时指另一位成员。
 web_search 输出 query（适合搜索的短语）。
+这些说法通常意味着要联网：查一下、搜一下、帮我查、有依据吗、来源、出处、权威资料、是不是真的、最新消息、多少钱、天气、新闻、比分、汇率、几点。
+检索词质量直接决定搜索结果，必须遵守：
+- query 要自包含：把“我/她/对象/上次/那个”这类指代，按【当前话题】里的实际内容补全成具体问题。例如上一句在说拉肚子，就写“腹泻 肚子疼 常见原因”。
+- 严禁把用户对回答形式的要求写进 query，“要有依据”“找权威来源”“别瞎编”“真的假的”“告诉我”“说服我”这类词一个都不能出现在 query 里。
+- query 用 2-5 个中文关键词，用空格分隔，不带标点和语气词。
+- 结合【当前话题】仍然判断不出该搜什么时，返回 {"action":"chat"}，不要硬猜检索词。
 web_fetch 输出 url；如果用户没给链接，就回退成 web_search。
 document_read 输出 url（有链接时填；没有就留空，解析当前消息里的文件附件）。
 shell_run 输出 command，且只能是单条命令或一段短脚本，不能包含 sudo。
@@ -236,6 +244,7 @@ class XiaoxiaLLM:
         current_time: str,
         tasks_summary: str,
         identity_context: str = "",
+        topic_context: str = "",
     ) -> dict:
         user_prompt = f"""当前时间：{current_time}
 
@@ -244,6 +253,9 @@ class XiaoxiaLLM:
 
 当前任务：
 {tasks_summary or "（无）"}
+
+【当前话题】（从早到晚，只用来还原指代，不要照抄进检索词）：
+{topic_context or "（无）"}
 
 用户消息：
 {request}
@@ -262,7 +274,8 @@ class XiaoxiaLLM:
         *,
         requester: StoredMessage,
         request: str,
-        recent_context: str,
+        topic_context: str,
+        background_context: str = "",
         memory_context: str = "",
         search_context: str = "",
         identity_context: str = "",
@@ -273,8 +286,13 @@ class XiaoxiaLLM:
 身份信息：
 {identity_context or "（未知）"}
 
-最近群聊记录（从早到晚）：
-{recent_context or "（暂无记录，机器人可能刚开启全量消息接收）"}
+【当前话题】（从早到晚）：
+{topic_context or "（暂无记录，机器人可能刚开启全量消息接收）"}
+"""
+        if background_context:
+            user_prompt += f"""
+【更早的背景】（已经翻篇的话题，只用来理解语气，不要主动提起）：
+{background_context}
 """
         if memory_context:
             user_prompt += f"""
@@ -313,6 +331,8 @@ class XiaoxiaLLM:
             system_prompt=(
                 "你是 QQ 群里的“小毛豆”。下面是一个工具的执行结果，请基于它回答用户的请求。"
                 "要求：直接输出正文；忠于工具结果，不编造；信息不足就明说；"
+                "结果和用户的问题明显无关、或者根本没有结果时，必须直说没找到相关资料，"
+                "不许拿无关内容凑答案；引用资料时写出来源站点名，方便对方自己核实。"
                 "列表类结果用短编号分点，不要输出 Markdown 标题或代码块。"
             ),
             user_prompt=user_prompt,
