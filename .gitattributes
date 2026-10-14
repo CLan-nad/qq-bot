@@ -1,0 +1,19 @@
+# 默认按内容判断文本，统一以 LF 入库
+* text=auto eol=lf
+
+# 远端 bash 脚本必须是 LF，否则服务器上 execvp 会报 $'\r': command not found
+*.sh text eol=lf
+*.service text eol=lf
+*.timer text eol=lf
+
+# Windows 端脚本用 CRLF，PowerShell / 记事本都更省心
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 不当文本处理
+*.png binary
+*.jpg binary
+*.gif binary
+*.sqlite3 binary
+*.pdf binary
