@@ -152,6 +152,13 @@ VISION_MAX_TOKENS = 2048
 VISION_DESCRIBE_ATTEMPTS = 3
 VISION_RETRY_DELAY_SECONDS = 1.0
 
+# 主动关心的判断走的是推理模型，思考过程也算进 max_tokens。生产实测：预算给 200 时
+# reasoning 能吃满 200 个 token，正文一个字都没输出（finish_reason=length、content 为空），
+# 于是这一层随机失灵——群里有人喊累喊疼，小毛豆却一声不吭，日志里只留下一句没头没尾的
+# “care judge skipped”。留出余量，再给一次重试机会。
+CARE_MAX_TOKENS = 1024
+CARE_JUDGE_ATTEMPTS = 2
+
 
 class XiaoxiaLLM:
     def __init__(self, settings: Settings) -> None:
@@ -285,18 +292,31 @@ class XiaoxiaLLM:
         if recent_context:
             prompt += f"\n前面几句聊天（用来看这句话是不是早被接过、是不是在说旧事）：\n{recent_context}\n"
         prompt += "\n只输出 JSON。"
-        try:
-            raw = await self._chat(
-                system_prompt=CARE_SYSTEM_PROMPT,
-                user_prompt=prompt,
-                temperature=0.6,
-                max_tokens=200,
-                json_mode=True,
-                model=self.settings.care_model or self.settings.vision_model,
-            )
-            data = self._json_content(raw)
-        except Exception:
-            logger.warning("care judge skipped: %s", content[:40])
+        model = self.settings.care_model or self.settings.vision_model
+        data: dict = {}
+        for attempt in range(1, CARE_JUDGE_ATTEMPTS + 1):
+            try:
+                raw = await self._chat(
+                    system_prompt=CARE_SYSTEM_PROMPT,
+                    user_prompt=prompt,
+                    temperature=0.6,
+                    max_tokens=CARE_MAX_TOKENS,
+                    json_mode=True,
+                    model=model,
+                )
+                if not (raw or "").strip():
+                    raise ValueError("模型返回空内容（推理 token 占满了预算）")
+                data = self._json_content(raw)
+                break
+            except Exception as exc:
+                logger.warning(
+                    "care judge attempt %s/%s failed (%s): %r",
+                    attempt,
+                    CARE_JUDGE_ATTEMPTS,
+                    content[:40],
+                    exc,
+                )
+        else:
             return {"care": False, "text": ""}
         return {"care": bool(data.get("care")), "text": str(data.get("text") or "")}
 

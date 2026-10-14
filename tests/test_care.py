@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from xiaoxia.bot import XiaoxiaClient
 from xiaoxia.care import matched_signals, normalize_care_text, should_ask_model
-from xiaoxia.llm import XiaoxiaLLM
+from xiaoxia.llm import CARE_JUDGE_ATTEMPTS, CARE_MAX_TOKENS, XiaoxiaLLM
 from xiaoxia.store import ChatStore
 
 
@@ -465,6 +465,47 @@ class JudgeCareModelTests(unittest.TestCase):
         llm._chat = fake_chat
         self.loop.run_until_complete(llm.judge_care(content="累了"))
         self.assertEqual(captured["model"], "ultra-cheap")
+
+    def test_budget_leaves_room_for_reasoning_tokens(self) -> None:
+        # 推理模型的 thinking 算进 max_tokens，预算太小会得到一条空正文，判断随机失灵。
+        captured: dict = {}
+
+        async def fake_chat(**kwargs):
+            captured.update(kwargs)
+            return '{"care": false}'
+
+        llm = self._llm()
+        llm._chat = fake_chat
+        self.loop.run_until_complete(llm.judge_care(content="累了"))
+        self.assertEqual(captured["max_tokens"], CARE_MAX_TOKENS)
+        self.assertGreaterEqual(CARE_MAX_TOKENS, 800)
+
+    def test_empty_answer_is_retried_once(self) -> None:
+        answers = iter(["", '{"care": true, "text": "先躺下，别刷手机了"}'])
+        calls: list[int] = []
+
+        async def fake_chat(**kwargs):
+            calls.append(1)
+            return next(answers)
+
+        llm = self._llm()
+        llm._chat = fake_chat
+        verdict = self.loop.run_until_complete(llm.judge_care(content="睡不着"))
+        self.assertTrue(verdict["care"])
+        self.assertEqual(len(calls), CARE_JUDGE_ATTEMPTS)
+
+    def test_gives_up_after_the_retries(self) -> None:
+        calls: list[int] = []
+
+        async def fake_chat(**kwargs):
+            calls.append(1)
+            raise RuntimeError("boom")
+
+        llm = self._llm()
+        llm._chat = fake_chat
+        verdict = self.loop.run_until_complete(llm.judge_care(content="累了"))
+        self.assertEqual(verdict, {"care": False, "text": ""})
+        self.assertEqual(len(calls), CARE_JUDGE_ATTEMPTS)
 
     def test_garbage_answer_is_treated_as_no_care(self) -> None:
         async def fake_chat(**kwargs):
