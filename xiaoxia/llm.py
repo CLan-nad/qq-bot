@@ -45,9 +45,12 @@ INTENT_SYSTEM_PROMPT = """你是小毛豆的意图解析器。你只输出一个
 - task_resume: 恢复任务
 - task_skip: 跳过下一次发送
 - memory_remember: 用户明确要求记住信息
-- memory_list: 查看已记住的信息
+- memory_list: 查看已记住的信息（分页）
+- memory_pin: 把某条记忆标成永久置顶，不许忘
+- memory_unpin: 取消某条记忆的置顶
 - memory_search: 查询或搜索历史聊天/记忆
 - memory_forget: 删除某条记忆
+- calendar_query: 问某个节日是几号、最近有什么节日
 - web_search: 需要联网搜索资料
 - web_fetch: 打开并阅读某个网页链接
 - document_read: 读取并解析用户发来的文档（文件附件或文档链接）
@@ -57,19 +60,27 @@ INTENT_SYSTEM_PROMPT = """你是小毛豆的意图解析器。你只输出一个
 
 task_create 输出字段：
 - title: 短标题
-- schedule_type: once/daily/weekly
+- schedule_type: once/daily/weekly/yearly/lunar_yearly
 - datetime: 单次任务，格式 YYYY-MM-DDTHH:MM:SS；用户给具体月日时，根据当前时间补全下一次发生的年份
 - time: 重复任务，格式 HH:MM
 - weekday: 每周任务，1=周一，7=周日
+- month: 每年任务的月。yearly 填公历月，lunar_yearly 填农历月（1-12，冬月=11、腊月=12）
+- day: 每年任务的日。yearly 填公历日，lunar_yearly 填农历日（初一=1，廿五=25）
+- leap_month: 只有明说闰月的农历生日才填 true，其余留空
+- remind_days_ahead: 要求“提前几天提醒/先提个醒”时填天数，否则留空
 - content: 固定发送文本；没有则为 null
 - prompt: 需要动态生成时的要求；没有则为 null
 content 和 prompt 至少一个不为 null。若任务是提醒，优先用 content；若任务是“发一个建议/话题”，用 prompt。
-用户只提到节日名称但没有给出具体日期时，不要猜测日期，按普通聊天处理并请对方补充具体日期。
+生日、纪念日、每年都要重复的事用 yearly；说法里带农历（农历生日、冬月初五、腊月廿三这类）用 lunar_yearly，month/day 填农历月日，不要自己换算成公历。
+需要知道某个节日具体是几号时，看“节日表”那一段，按表里的真实日期填，不要凭记忆猜。
 
 任务管理动作输出 task_id 或 match。用户明确说编号时用 task_id；说任务内容时用 match。
 memory_remember 输出 memories 数组，每项包含 kind、person、content。kind 可为 preference、fact、agreement、event、relationship。
+用户说“一定要记住/别忘了/这个记牢”时，那一项加 "pin": true；说“先记一下/临时的/过阵子就忘”时加 "temporary": true。
+memory_list 输出 page（页码，从 1 开始）；用户说“第二页”就填 2，没说就留空。
 memory_search 输出 query，用适合检索的短关键词。
-memory_forget 输出 memory_id 或 match。
+memory_forget、memory_pin、memory_unpin 输出 memory_id 或 match。
+calendar_query 输出 query（节日名，如“中秋”）；只问“最近有什么节日”时 query 留空。
 person 优先使用明确显示名；用户说“我”时指当前触发者，说“她/他/对象/另一半”时指另一位成员。
 web_search 输出 query（适合搜索的短语）。
 这些说法通常意味着要联网：查一下、搜一下、帮我查、有依据吗、来源、出处、权威资料、是不是真的、最新消息、多少钱、天气、新闻、比分、汇率、几点。
@@ -93,6 +104,7 @@ MEMORY_SYSTEM_PROMPT = """你是私人情侣群聊的长期记忆整理器。只
 每条聊天前面的显示名代表发送者。整理“我/她/他/对象”时，必须结合该条消息的发送者判断。
 memories 中的 person 使用明确显示名，不要只写“我/她/他”。
 不要记录密码、身份证号、银行卡号、住址门牌、医疗隐私或其他高风险敏感信息。
+已经在前面的置顶清单里出现过的内容，绝对不要再输出一次。
 没有长期价值的信息不要放入 memories。memories 每项字段：kind、person、content。
 kind 可为 preference、fact、agreement、event、relationship。"""
 
@@ -245,6 +257,7 @@ class XiaoxiaLLM:
         tasks_summary: str,
         identity_context: str = "",
         topic_context: str = "",
+        festival_context: str = "",
     ) -> dict:
         user_prompt = f"""当前时间：{current_time}
 
@@ -253,6 +266,9 @@ class XiaoxiaLLM:
 
 当前任务：
 {tasks_summary or "（无）"}
+
+节日表（未来 30 天的真实日期，创建任务和回答节日都以此为准）：
+{festival_context or "（近期无节日）"}
 
 【当前话题】（从早到晚，只用来还原指代，不要照抄进检索词）：
 {topic_context or "（无）"}
@@ -367,8 +383,12 @@ class XiaoxiaLLM:
         )
         return content[: self.settings.reply_max_chars]
 
-    async def process_memory_batch(self, message_context: str) -> dict:
-        user_prompt = f"""请整理这批聊天记录：
+    async def process_memory_batch(self, message_context: str, pinned: list[str] | None = None) -> dict:
+        pinned_lines = "\n".join(f"- {item}" for item in (pinned or [])) or "（无）"
+        user_prompt = f"""已经置顶记住的事实（不要重复输出这些）：
+{pinned_lines}
+
+请整理这批聊天记录：
 {message_context}
 """
         content = await self._chat(

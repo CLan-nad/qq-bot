@@ -6,4 +6,5 @@ html2text==2025.4.15
 pypdf==6.20.0
 python-docx==1.2.0
 openpyxl==3.1.5
+zhdate==0.1
 

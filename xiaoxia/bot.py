@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -15,6 +15,13 @@ import botpy
 from botpy.message import GroupMessage
 from botpy.robot import Token
 
+from .calendar import (
+    format_festivals,
+    lunar_label,
+    next_festival,
+    solar_to_lunar,
+    upcoming_festivals,
+)
 from .config import Settings
 from .images import (
     ImageAttachment,
@@ -26,7 +33,7 @@ from .images import (
     to_data_url,
 )
 from .llm import XiaoxiaLLM
-from .scheduling import advance_task, parse_datetime, resolve_next_run
+from .scheduling import advance_task, parse_datetime, resolve_next_run, schedule_label
 from .store import ChatStore, MemoryCard, ScheduledTask, StoredMessage
 from .topics import format_topic, split_topic
 from .tools import (
@@ -64,6 +71,8 @@ ROLE_LABELS = {
 ACK_ACTIONS = frozenset(
     {"web_search", "web_fetch", "document_read", "shell_run", "memory_search"}
 )
+TASK_SCHEDULE_TYPES = frozenset({"once", "daily", "weekly", "yearly", "lunar_yearly"})
+TEMPORARY_MEMORY_DAYS = 14
 ACK_TEXT = "稍等，我查一下～"
 FALLBACK_TEXT = "小毛豆刚刚走神了，稍后再 @ 我一次试试。"
 
@@ -343,6 +352,10 @@ class XiaoxiaClient(botpy.Client):
                 timezone=task.timezone,
                 time_of_day=task.time_of_day,
                 weekday=task.weekday,
+                month=task.month,
+                day=task.day,
+                leap_month=task.leap_month,
+                offset_days=task.offset_days,
             )
             next_run_iso = next_run.isoformat(timespec="seconds") if next_run else None
 
@@ -401,6 +414,10 @@ class XiaoxiaClient(botpy.Client):
 
     async def _compact_memories(self) -> None:
         async with self._memory_lock:
+            cutoff = (self._now() - timedelta(days=90)).isoformat(timespec="seconds")
+            purged = self.store.purge_expired_memories(cutoff)
+            if purged:
+                logger.info("purged %s expired temporary memories", purged)
             for group_openid in self.store.groups():
                 batch = self.store.pending_memory_batch(
                     group_openid,
@@ -413,7 +430,8 @@ class XiaoxiaClient(botpy.Client):
                     batch.messages,
                     self.settings.max_context_chars,
                 )
-                result = await self.llm.process_memory_batch(message_context)
+                pinned = self.store.pinned_memory_contents(group_openid)
+                result = await self.llm.process_memory_batch(message_context, pinned)
                 summary = str(result.get("summary") or "").strip()
                 raw_memories = result.get("memories")
                 memories = raw_memories if isinstance(raw_memories, list) else []
@@ -453,7 +471,13 @@ class XiaoxiaClient(botpy.Client):
 
     def _memory_context(self, group_openid: str) -> str:
         summaries = self.store.conversation_summaries(group_openid, limit=5)
-        cards = self.store.memory_cards(group_openid, limit=30)
+        # 注意：这里必须是 memory_cards_for_prompt，按“置顶+分类配额+最旧的优先”挑卡。
+        # 早先用 memory_cards(limit=30) 是 id 倒序，卡片一多，最早那批（真名、纪念日、
+        # 人设）就永远挤不进上下文，小毛豆会突然“不记得”最重要的事。
+        cards = self.store.memory_cards_for_prompt(
+            group_openid,
+            now_iso=self._now().isoformat(timespec="seconds"),
+        )
         parts = [f"[摘要] {summary}" for summary in summaries]
         parts.extend(ChatStore.format_memory_cards(cards).splitlines())
         return "\n".join(parts)[: self.settings.max_context_chars]
@@ -534,6 +558,10 @@ class XiaoxiaClient(botpy.Client):
                     tasks_summary=ChatStore.format_tasks(self.store.tasks(message.group_openid)),
                     identity_context=identity.prompt(),
                     topic_context=topic,
+                    festival_context=format_festivals(
+                        upcoming_festivals(self._now(), days=30),
+                        today=self._now().date(),
+                    ),
                 )
                 acked = await self._answer_with_ack(
                     message=message,
@@ -668,9 +696,13 @@ class XiaoxiaClient(botpy.Client):
         if action == "memory_remember":
             return self._handle_memory_remember(intent, message, identity)
         if action == "memory_list":
-            return self._handle_memory_list(message)
+            return self._handle_memory_list(intent, message)
+        if action in {"memory_pin", "memory_unpin"}:
+            return self._handle_memory_pin(intent, message, pinned=action == "memory_pin")
         if action == "memory_forget":
             return self._handle_memory_forget(intent, message)
+        if action == "calendar_query":
+            return self._handle_calendar_query(intent)
         if action == "memory_search":
             return await self._handle_memory_search(
                 intent=intent,
@@ -702,8 +734,8 @@ class XiaoxiaClient(botpy.Client):
 
     def _handle_task_create(self, intent: dict, message: RichGroupMessage) -> str:
         schedule_type = str(intent.get("schedule_type") or "").strip()
-        if schedule_type not in {"once", "daily", "weekly"}:
-            return "这任务我听懂了，但暂时只支持单次、每天和每周。"
+        if schedule_type not in TASK_SCHEDULE_TYPES:
+            return "这任务我听懂了，但暂时只支持单次、每天、每周、每年、农历每年这几种。"
 
         content = self._optional_str(intent.get("content"))
         prompt = self._optional_str(intent.get("prompt"))
@@ -712,14 +744,23 @@ class XiaoxiaClient(botpy.Client):
 
         title = self._optional_str(intent.get("title")) or (content or prompt or "定时任务")[:24]
         now = self._now()
+        time_of_day = self._optional_str(intent.get("time"))
+        weekday = self._int_field(intent.get("weekday"))
+        month = self._int_field(intent.get("month"))
+        day = self._int_field(intent.get("day"))
+        leap_month = bool(intent.get("leap_month"))
+        remind_days_ahead = max(0, self._int_field(intent.get("remind_days_ahead")) or 0)
         try:
             next_run = resolve_next_run(
                 schedule_type=schedule_type,
                 now=now,
                 timezone=self.settings.timezone,
                 once_datetime=self._optional_str(intent.get("datetime")),
-                time_of_day=self._optional_str(intent.get("time")),
-                weekday=self._int_field(intent.get("weekday")),
+                time_of_day=time_of_day,
+                weekday=weekday,
+                month=month,
+                day=day,
+                leap_month=leap_month,
             )
         except ValueError as exc:
             return f"任务时间有点问题：{exc}"
@@ -738,12 +779,90 @@ class XiaoxiaClient(botpy.Client):
             schedule_type=schedule_type,
             next_run_at=next_run.isoformat(timespec="seconds"),
             timezone=self.settings.timezone,
-            time_of_day=self._optional_str(intent.get("time")),
-            weekday=self._int_field(intent.get("weekday")),
+            time_of_day=time_of_day,
+            weekday=weekday,
             created_by_openid=message.author.member_openid or "",
             created_by_name=message.username,
+            month=month,
+            day=day,
+            leap_month=leap_month,
+            remind_days_ahead=remind_days_ahead,
         )
-        return f"已设置任务 {task.id}：{self._schedule_label(task)}，{task.title}。"
+        reply = f"已设置任务 {task.id}：{self._schedule_label(task)}，{task.title}。"
+        warm = self._create_warmup_task(
+            task=task,
+            schedule_type=schedule_type,
+            time_of_day=time_of_day,
+            weekday=weekday,
+            month=month,
+            day=day,
+            leap_month=leap_month,
+            remind_days_ahead=remind_days_ahead,
+            message=message,
+            now=now,
+        )
+        if warm is not None:
+            reply += f"\n还建了任务 {warm.id}：{self._schedule_label(warm)}提醒提前准备。"
+        return reply
+
+    def _create_warmup_task(
+        self,
+        *,
+        task: ScheduledTask,
+        schedule_type: str,
+        time_of_day: str | None,
+        weekday: int | None,
+        month: int | None,
+        day: int | None,
+        leap_month: bool,
+        remind_days_ahead: int,
+        message: RichGroupMessage,
+        now: datetime,
+    ) -> ScheduledTask | None:
+        """生日/纪念日提前 N 天先提个醒，当天那条留给主任务。"""
+        if remind_days_ahead <= 0 or schedule_type == "once":
+            return None
+        if self.store.active_task_count(message.group_openid) + 1 > self.settings.task_max_count:
+            logger.info("skipped warm-up task, task limit reached")
+            return None
+        try:
+            warm_run = resolve_next_run(
+                schedule_type=schedule_type,
+                now=now,
+                timezone=self.settings.timezone,
+                time_of_day=time_of_day,
+                weekday=weekday,
+                month=month,
+                day=day,
+                leap_month=leap_month,
+                offset_days=remind_days_ahead,
+            )
+        except ValueError:
+            logger.exception("failed to resolve warm-up task for %s", task.id)
+            return None
+        main_day = parse_datetime(task.next_run_at, task.timezone)
+        content = (
+            f"{task.title} 还有 {remind_days_ahead} 天，"
+            f"就是 {main_day.month}月{main_day.day}日，记得提前准备一下。"
+        )
+        return self.store.create_task(
+            group_openid=message.group_openid,
+            title=f"[预热] {task.title}",
+            content=content,
+            generation_prompt=None,
+            schedule_type=schedule_type,
+            next_run_at=warm_run.isoformat(timespec="seconds"),
+            timezone=self.settings.timezone,
+            time_of_day=time_of_day,
+            weekday=weekday,
+            created_by_openid=message.author.member_openid or "",
+            created_by_name=message.username,
+            month=month,
+            day=day,
+            leap_month=leap_month,
+            offset_days=remind_days_ahead,
+            linked_task_id=task.id,
+        )
 
     def _handle_task_action(self, intent: dict, message: RichGroupMessage) -> str:
         action = str(intent.get("action") or "")
@@ -786,6 +905,10 @@ class XiaoxiaClient(botpy.Client):
                     timezone=task.timezone,
                     time_of_day=task.time_of_day,
                     weekday=task.weekday,
+                    month=task.month,
+                    day=task.day,
+                    leap_month=task.leap_month,
+                    offset_days=task.offset_days,
                 )
                 self.store.set_task_next_run(
                     message.group_openid,
@@ -799,13 +922,7 @@ class XiaoxiaClient(botpy.Client):
 
     @staticmethod
     def _schedule_label(task: ScheduledTask) -> str:
-        if task.schedule_type == "once":
-            return f"单次 {task.next_run_at[:16].replace('T', ' ')}"
-        if task.schedule_type == "daily":
-            return f"每天 {task.time_of_day or ''}"
-        weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-        weekday = weekday_names[task.weekday - 1] if task.weekday and 1 <= task.weekday <= 7 else "每周"
-        return f"{weekday} {task.time_of_day or ''}"
+        return schedule_label(task)
 
     @staticmethod
     def _is_sensitive_memory(content: str) -> bool:
@@ -831,8 +948,12 @@ class XiaoxiaClient(botpy.Client):
         if not isinstance(raw_memories, list) or not raw_memories:
             return "要记住什么信息，可以更具体地说一次吗？"
 
+        # pin/temporary 既写在单条上，也允许整条指令一起说（“这条记住，别忘”）
+        intent_pin = bool(intent.get("pin"))
+        intent_temporary = bool(intent.get("temporary"))
         saved = 0
         skipped = 0
+        pinned_saved = 0
         for item in raw_memories:
             if not isinstance(item, dict):
                 skipped += 1
@@ -844,6 +965,14 @@ class XiaoxiaClient(botpy.Client):
             if self._is_sensitive_memory(content):
                 skipped += 1
                 continue
+            pin = intent_pin or bool(item.get("pin"))
+            temporary = intent_temporary or bool(item.get("temporary"))
+            scope = "temporary" if temporary else "permanent"
+            expires_at = (
+                (self._now() + timedelta(days=TEMPORARY_MEMORY_DAYS)).isoformat(timespec="seconds")
+                if temporary
+                else None
+            )
             self.store.add_memory_card(
                 group_openid=message.group_openid,
                 kind=self._optional_str(item.get("kind")) or "fact",
@@ -853,25 +982,77 @@ class XiaoxiaClient(botpy.Client):
                 ),
                 content=content,
                 source_message_id=message.id,
+                pinned=pin,
+                scope=scope,
+                expires_at=expires_at,
             )
             saved += 1
+            pinned_saved += 1 if pin else 0
 
+        if not saved:
+            return "这条信息比较敏感，我不保存。"
+        tail = "（已置顶★）" if pinned_saved and pinned_saved == saved else ""
         if saved and not skipped:
-            return f"记住了，共 {saved} 条。"
-        if saved:
-            return f"记住了 {saved} 条，另有 {skipped} 条涉及敏感信息，我没有保存。"
-        return "这条信息比较敏感，我不保存。"
+            return f"记住了，共 {saved} 条。{tail}"
+        return f"记住了 {saved} 条，另有 {skipped} 条涉及敏感信息，我没有保存。{tail}"
 
-    def _handle_memory_list(self, message: RichGroupMessage) -> str:
-        cards = self.store.memory_cards(message.group_openid, limit=30)
-        if not cards:
+    def _handle_memory_list(self, intent: dict, message: RichGroupMessage) -> str:
+        cards, current, pages, total = self.store.memory_cards_page(
+            message.group_openid,
+            now_iso=self._now().isoformat(timespec="seconds"),
+            page=max(1, self._int_field(intent.get("page")) or 1),
+        )
+        if not total:
             return "我现在还没有长期记忆。可以直接说：记住她不吃香菜。"
-        return "当前长期记忆：\n" + self._format_memory_cards(cards)
+        if not cards:
+            return f"记忆一共 {total} 条，只有 {pages} 页，最后一页说“第 {pages} 页记忆”。"
+        header = f"当前长期记忆（第{current}/{pages}页，共{total}条，★=永久）："
+        if current < pages:
+            header += f"\n想看更多就说“第 {current + 1} 页记忆”。"
+        return header + "\n" + self._format_memory_cards(cards)
+
+    def _handle_memory_pin(self, intent: dict, message: RichGroupMessage, *, pinned: bool) -> str:
+        cards = self.store.find_memory_cards(
+            message.group_openid,
+            memory_id=self._int_field(intent.get("memory_id")),
+            query=self._optional_str(intent.get("match")),
+        )
+        if not cards:
+            return "没有找到这条记忆。可以说“查看记忆”先看看编号。"
+        if len(cards) > 1:
+            return "匹配到多条记忆，请说编号：\n" + self._format_memory_cards(cards)
+
+        card = cards[0]
+        if not self.store.set_memory_pinned(message.group_openid, card.id, pinned):
+            return "这条记忆刚刚变动过，麻烦再说一次。"
+        verb = "置顶，以后不会忘" if pinned else "取消置顶"
+        return f"已{verb}记忆 {card.id}：{card.content}"
+
+    def _handle_calendar_query(self, intent: dict) -> str:
+        name = self._optional_str(intent.get("query"))
+        now = self._now()
+        if name:
+            found = next_festival(name, now)
+            if found is None:
+                return f"我没查到“{name}”是哪天，换个常见节日名试试，比如中秋、除夕、清明。"
+            day, festival = found
+            suffix = ""
+            lunar = solar_to_lunar(day)
+            if lunar:
+                suffix = f"，农历{lunar_label(lunar[0], lunar[1], leap=lunar[2])}"
+            return (
+                f"{festival}是 {day.year}年{day.month}月{day.day}日"
+                f"（星期{'一二三四五六日'[day.weekday()]}）{suffix}，还有 {(day - now.date()).days} 天。"
+            )
+        items = upcoming_festivals(now, days=30)
+        if not items:
+            return "未来 30 天没有节日。"
+        return "未来 30 天的节日：" + format_festivals(items, today=now.date())
 
     @staticmethod
     def _format_memory_cards(cards: list[MemoryCard]) -> str:
         return "\n".join(
-            f"{card.id}. [{card.kind}] {card.person}: {card.content}"
+            f"{card.id}. {'★' if card.pinned else ''}[{card.kind}] {card.person}: {card.content}"
             for card in cards
         )
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 import inspect
 import unittest
 
-from xiaoxia.llm import INTENT_SYSTEM_PROMPT, SYSTEM_PROMPT, XiaoxiaLLM
+from xiaoxia.llm import INTENT_SYSTEM_PROMPT, MEMORY_SYSTEM_PROMPT, SYSTEM_PROMPT, XiaoxiaLLM
 
 
 class IntentPromptTests(unittest.TestCase):
@@ -36,6 +36,37 @@ class IntentPromptTests(unittest.TestCase):
         params = inspect.signature(XiaoxiaLLM.generate_reply).parameters
         self.assertIn("topic_context", params)
         self.assertIn("background_context", params)
+
+class AnniversaryPromptTests(unittest.TestCase):
+    """生日/纪念日/农历这套要靠提示词里的字段说明才能真正被解析出来。"""
+
+    def test_yearly_schedules_are_described(self) -> None:
+        for field in ("yearly", "lunar_yearly", "month", "day", "leap_month", "remind_days_ahead"):
+            self.assertIn(field, INTENT_SYSTEM_PROMPT)
+        self.assertIn("冬月", INTENT_SYSTEM_PROMPT)
+
+    def test_no_longer_refuses_to_guess_festival_dates(self) -> None:
+        # 现在会把未来 30 天的真实节日表喂给意图模型，旧的那条“别猜，让人补日期”要删掉，
+        # 否则“除夕晚上提醒我们吃饺子”永远建不成任务。
+        self.assertNotIn("不要猜测日期", INTENT_SYSTEM_PROMPT)
+        self.assertIn("节日表", INTENT_SYSTEM_PROMPT)
+
+    def test_memory_actions_are_described(self) -> None:
+        for action in ("memory_pin", "memory_unpin", "calendar_query"):
+            self.assertIn(action, INTENT_SYSTEM_PROMPT)
+        for field in ('"pin": true', '"temporary": true', "memory_list 输出 page"):
+            self.assertIn(field, INTENT_SYSTEM_PROMPT)
+
+    def test_parse_intent_receives_festival_context(self) -> None:
+        params = inspect.signature(XiaoxiaLLM.parse_intent).parameters
+        self.assertIn("festival_context", params)
+        self.assertIn("节日表", inspect.getsource(XiaoxiaLLM.parse_intent))
+
+    def test_memory_batch_is_told_not_to_repeat_pinned_facts(self) -> None:
+        params = inspect.signature(XiaoxiaLLM.process_memory_batch).parameters
+        self.assertIn("pinned", params)
+        self.assertIn("不要重复输出这些", inspect.getsource(XiaoxiaLLM.process_memory_batch))
+        self.assertIn("绝对不要再输出一次", MEMORY_SYSTEM_PROMPT)
         self.assertNotIn("recent_context", params)
 
 

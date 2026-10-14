@@ -203,6 +203,64 @@ class FeatureTests(unittest.TestCase):
         )
         self.assertEqual(once.isoformat(), "2027-02-06T09:00:00+08:00")
 
+    def test_yearly_tasks_render_readable_labels(self) -> None:
+        main = self.store.create_task(
+            group_openid=GROUP,
+            title="纪念日",
+            content="三年了",
+            generation_prompt=None,
+            schedule_type="yearly",
+            next_run_at="2026-12-13T09:00:00+08:00",
+            timezone="Asia/Shanghai",
+            time_of_day="09:00",
+            weekday=None,
+            created_by_openid="openid",
+            created_by_name="CL",
+            month=12,
+            day=13,
+            remind_days_ahead=3,
+        )
+        warm = self.store.create_task(
+            group_openid=GROUP,
+            title="[预热] 纪念日",
+            content="还有 3 天",
+            generation_prompt=None,
+            schedule_type="yearly",
+            next_run_at="2026-12-10T09:00:00+08:00",
+            timezone="Asia/Shanghai",
+            time_of_day="09:00",
+            weekday=None,
+            created_by_openid="openid",
+            created_by_name="CL",
+            month=12,
+            day=13,
+            offset_days=3,
+            linked_task_id=main.id,
+        )
+        listing = ChatStore.format_tasks(self.store.tasks(GROUP))
+        self.assertIn("每年 12-13 09:00 | 纪念日", listing)
+        self.assertIn("提前 3 天 每年 12-13 09:00 | [预热] 纪念日", listing)
+        self.assertEqual(warm.linked_task_id, main.id)
+        self.assertEqual(main.remind_days_ahead, 3)
+
+    def test_lunar_task_label_uses_lunar_names(self) -> None:
+        task = self.store.create_task(
+            group_openid=GROUP,
+            title="农历生日",
+            content="生日快乐",
+            generation_prompt=None,
+            schedule_type="lunar_yearly",
+            next_run_at="2026-12-13T08:30:00+08:00",
+            timezone="Asia/Shanghai",
+            time_of_day="08:30",
+            weekday=None,
+            created_by_openid="openid",
+            created_by_name="CL",
+            month=11,
+            day=5,
+        )
+        self.assertIn("每年农历 冬月初五 08:30", ChatStore.format_tasks([task]))
+
     def test_json_extraction(self) -> None:
         parsed = XiaoxiaLLM._json_content('```json\n{"action":"chat"}\n```')
         self.assertEqual(parsed, {"action": "chat"})
