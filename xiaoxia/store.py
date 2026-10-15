@@ -936,9 +936,32 @@ class ChatStore:
         now_iso: str = "",
         page: int = 1,
         page_size: int = 12,
+        kind: str | None = None,
+        person: str | None = None,
+        pinned: bool | None = None,
+        match: str | None = None,
     ) -> tuple[list[MemoryCard], int, int, int]:
-        """分页列记忆，置顶优先、其余按 id 正序。返回 (本页, 当前页, 总页数, 总条数)。"""
+        """分页列记忆，置顶优先、其余按 id 正序。返回 (本页, 当前页, 总页数, 总条数)。
+
+        可选过滤：kind 精确匹配；person 先归一成群里统一的叫法再做包含匹配；
+        pinned=True 只看置顶、False 只看未置顶；match 对内容或 person 做包含匹配。
+        """
         live = self.live_memory_cards(group_openid, now_iso)
+        if kind:
+            live = [card for card in live if card.kind == kind]
+        if pinned is not None:
+            live = [card for card in live if bool(card.pinned) == pinned]
+        person_needle = self.canonical_person(group_openid, person) if person else ""
+        if person_needle:
+            live = [card for card in live if person_needle in (card.person or "")]
+        if match:
+            needle = match.strip().lower()
+            if needle:
+                live = [
+                    card
+                    for card in live
+                    if needle in card.content.lower() or needle in (card.person or "").lower()
+                ]
         ordered = sorted(live, key=lambda card: (not card.pinned, card.id))
         total = len(ordered)
         pages = max(1, (total + page_size - 1) // page_size)
@@ -1069,19 +1092,31 @@ class ChatStore:
         self,
         group_openid: str,
         *,
-        memory_id: int | None = None,
+        memory_id: int | list[int] | None = None,
         query: str | None = None,
     ) -> list[MemoryCard]:
         if memory_id is not None:
-            row = self._conn.execute(
+            # memory_id 可以是单个编号，也可以是一串编号（“把 3、7、12 一起置顶”）。
+            ids = memory_id if isinstance(memory_id, (list, tuple)) else [memory_id]
+            clean: list[int] = []
+            for item in ids:
+                try:
+                    clean.append(int(item))
+                except (TypeError, ValueError):
+                    continue
+            if not clean:
+                return []
+            placeholders = ",".join("?" for _ in clean)
+            rows = self._conn.execute(
                 f"""
                 SELECT {_MEMORY_COLUMNS}
                 FROM memory_cards
-                WHERE group_openid = ? AND id = ?
+                WHERE group_openid = ? AND id IN ({placeholders})
+                ORDER BY id
                 """,
-                (group_openid, memory_id),
-            ).fetchone()
-            return [self._card_from_row(row)] if row else []
+                (group_openid, *clean),
+            ).fetchall()
+            return [self._card_from_row(row) for row in rows]
 
         return self.search_memory_cards(group_openid, query or "")
 

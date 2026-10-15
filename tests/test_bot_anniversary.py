@@ -204,6 +204,80 @@ class BotAnniversaryTests(unittest.TestCase):
         self.assertIn("没有找到这条记忆", self.client._handle_memory_pin(
             {"match": "不存在的东西"}, _message(), pinned=True))
 
+    def _seed_memories(self, count: int = 5) -> list[int]:
+        ids = []
+        for index in range(1, count + 1):
+            card = self.store.add_memory_card(
+                group_openid=GROUP, kind="fact", person="两人", content=f"记忆{index:02d}"
+            )
+            ids.append(card.id if card else 0)
+        return ids
+
+    def _pinned_ids(self) -> set[int]:
+        return {card.id for card in self.store.memory_cards(GROUP) if card.pinned}
+
+    def test_memory_pin_batch_by_ids(self) -> None:
+        # 线上原话是“把 2、4 设为永久”，memory_id 是数组，老代码整条走空。
+        self._seed_memories()
+        reply = self.client._handle_memory_pin(
+            {"action": "memory_pin", "memory_id": [2, 4]}, _message(), pinned=True
+        )
+        self.assertIn("已置顶，以后不会忘2 条记忆", reply)
+        self.assertEqual(self._pinned_ids(), {2, 4})
+
+    def test_memory_pin_all(self) -> None:
+        self._seed_memories(3)
+        reply = self.client._handle_memory_pin({"all": True}, _message(), pinned=True)
+        self.assertIn("已置顶，以后不会忘全部 3 条记忆", reply)
+        self.assertEqual(self._pinned_ids(), {1, 2, 3})
+
+    def test_memory_forget_batch(self) -> None:
+        self._seed_memories(5)
+        reply = self.client._handle_memory_forget({"memory_id": [1, 3, 5]}, _message())
+        self.assertIn("已忘记3 条记忆", reply)
+        self.assertEqual({card.id for card in self.store.memory_cards(GROUP)}, {2, 4})
+
+    def test_memory_forget_all(self) -> None:
+        self._seed_memories(3)
+        reply = self.client._handle_memory_forget({"all": True}, _message())
+        self.assertIn("已忘记全部 3 条记忆", reply)
+        self.assertEqual(self.store.memory_cards(GROUP), [])
+
+    def test_memory_pin_match_multiple_asks_for_id(self) -> None:
+        # 只给内容关键词又命中多条时必须先让用户报编号，不能自作主张全改。
+        self.store.add_memory_card(group_openid=GROUP, kind="fact", person="她", content="她喜欢吃辣")
+        self.store.add_memory_card(group_openid=GROUP, kind="fact", person="她", content="她喜欢吃冰")
+        reply = self.client._handle_memory_pin({"match": "喜欢吃"}, _message(), pinned=True)
+        self.assertIn("匹配到多条记忆，请说编号", reply)
+        self.assertEqual(self._pinned_ids(), set())
+        # 报了编号就直接批量执行，不再追问。
+        reply = self.client._handle_memory_pin(
+            {"match": "喜欢吃", "memory_id": [1, 2]}, _message(), pinned=True
+        )
+        self.assertIn("已置顶，以后不会忘2 条记忆", reply)
+        self.assertEqual(self._pinned_ids(), {1, 2})
+
+    def test_memory_list_filters(self) -> None:
+        card = self.store.add_memory_card(
+            group_openid=GROUP, kind="preference", person="她", content="她不吃香菜"
+        )
+        self.store.add_memory_card(
+            group_openid=GROUP, kind="fact", person="两人", content="周三要值班"
+        )
+        self.store.set_memory_pinned(GROUP, card.id, True)
+
+        reply = self.client._handle_memory_list({"pinned": True}, _message())
+        self.assertIn("共1条", reply)
+        self.assertIn("不吃香菜", reply)
+        self.assertNotIn("周三要值班", reply)
+
+        reply = self.client._handle_memory_list({"kind": "fact"}, _message())
+        self.assertIn("周三要值班", reply)
+        self.assertNotIn("不吃香菜", reply)
+
+        reply = self.client._handle_memory_list({"match": "不存在的关键词"}, _message())
+        self.assertIn("没有符合这个筛选条件的记忆", reply)
+
     def test_calendar_query(self) -> None:
         named = self.client._handle_calendar_query({"query": "重阳"})
         self.assertIn("重阳节是 2026年10月18日", named)

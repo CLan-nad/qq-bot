@@ -89,6 +89,7 @@ content 和 prompt 至少一个不为 null。若任务是提醒，优先用 cont
 memory_remember 输出 memories 数组，每项包含 kind、person、content。kind 可为 preference、fact、agreement、event、relationship。
 用户说“一定要记住/别忘了/这个记牢”时，那一项加 "pin": true；说“先记一下/临时的/过阵子就忘”时加 "temporary": true。
 memory_list 输出 page（页码，从 1 开始）；用户说“第二页”就填 2，没说就留空。
+memory_list 还可以带筛选：只看置顶/永久的填 pinned=true，只看某一类填 kind（preference/fact/agreement/event/relationship），只看某个人的记忆填 person，按关键词筛填 match；没提到就都留空。
 memory_search 输出 query，用适合检索的短关键词。
 memory_forget、memory_pin、memory_unpin 输出 memory_id 或 match。
 memory_id 可以是数组，一次说好几个编号时全部填进去；说“全部/所有”时留空并加 "all": true。

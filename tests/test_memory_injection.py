@@ -165,6 +165,62 @@ class MemoryInjectionTests(unittest.TestCase):
         self.assertEqual(current, 3)
         self.assertEqual(len(last), 6)
 
+    def test_find_memory_cards_accepts_id_list(self) -> None:
+        # 用户说“把 3、7、12 一起设为永久”时，intent 里的 memory_id 是数组。
+        # 老代码只认单个 int，数组被当成“没给编号”，于是每次都答“没有找到这条记忆”。
+        self._fill(15)
+        cards = self.store.find_memory_cards(GROUP, memory_id=[3, 7, 12])
+        self.assertEqual([card.id for card in cards], [3, 7, 12])
+        self.assertEqual(
+            [card.id for card in self.store.find_memory_cards(GROUP, memory_id=7)], [7]
+        )
+        self.assertEqual(self.store.find_memory_cards(GROUP, memory_id=[]), [])
+        # 脏值（模型偶尔把编号写成字符串或塞 null）要丢掉，不能抛异常。
+        mixed = self.store.find_memory_cards(GROUP, memory_id=["7", None, 9999])
+        self.assertEqual([card.id for card in mixed], [7])
+
+    def test_memory_cards_page_filters(self) -> None:
+        self.store.add_memory_card(
+            group_openid=GROUP, kind="fact", person="小虾", content="她不吃香菜", pinned=True
+        )
+        self.store.add_memory_card(
+            group_openid=GROUP, kind="preference", person="小虾", content="她喜欢喝冰美式"
+        )
+        self.store.add_memory_card(
+            group_openid=GROUP, kind="fact", person="蔡乐", content="蔡乐周三要值班"
+        )
+
+        rows, _, _, total = self.store.memory_cards_page(GROUP, pinned=True)
+        self.assertEqual((total, [card.id for card in rows]), (1, [1]))
+
+        rows, _, _, total = self.store.memory_cards_page(GROUP, pinned=False)
+        self.assertEqual((total, sorted(card.id for card in rows)), (2, [2, 3]))
+
+        rows, _, _, total = self.store.memory_cards_page(GROUP, kind="fact")
+        self.assertEqual((total, sorted(card.id for card in rows)), (2, [1, 3]))
+
+        rows, _, _, total = self.store.memory_cards_page(GROUP, person="小虾")
+        self.assertEqual((total, sorted(card.id for card in rows)), (2, [1, 2]))
+
+        # match 走 INSTR 子串匹配（记忆卡没有 FTS 分词），中文子串能直接命中。
+        rows, _, _, total = self.store.memory_cards_page(GROUP, match="冰美式")
+        self.assertEqual((total, [card.id for card in rows]), (1, [2]))
+
+        rows, _, _, total = self.store.memory_cards_page(GROUP, match="小虾")
+        self.assertEqual((total, sorted(card.id for card in rows)), (2, [1, 2]))
+
+        rows, _, _, total = self.store.memory_cards_page(GROUP, match="没有这个内容")
+        self.assertEqual((total, rows), (0, []))
+
+    def test_person_filter_normalizes_alias(self) -> None:
+        # 群里统一过叫法之后，用旧叫法筛选也要查得到（先归一再匹配）。
+        self.store.add_memory_card(
+            group_openid=GROUP, kind="fact", person="二十四桥明月夜", content="她的真名叫小虾"
+        )
+        self.store.set_person_alias(GROUP, "二十四桥明月夜", "小虾")
+        rows, _, _, total = self.store.memory_cards_page(GROUP, person="二十四桥明月夜")
+        self.assertEqual((total, [card.person for card in rows]), (1, ["小虾"]))
+
 
 class PersonAliasTests(unittest.TestCase):
     def setUp(self) -> None:

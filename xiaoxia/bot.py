@@ -834,6 +834,39 @@ class XiaoxiaClient(botpy.Client):
         except (TypeError, ValueError):
             return None
 
+    def _memory_ids_field(self, value: Any) -> list[int] | None:
+        """intent 里的 memory_id 可能是单个编号，也可能是一串。统一成 int 列表。"""
+        if value is None:
+            return None
+        items = value if isinstance(value, (list, tuple)) else [value]
+        ids: list[int] = []
+        for item in items:
+            parsed = self._int_field(item)
+            if parsed is not None:
+                ids.append(parsed)
+        return ids or None
+
+    def _resolve_memory_targets(
+        self, intent: dict, message: RichGroupMessage
+    ) -> tuple[list[MemoryCard], bool]:
+        """拿出要操作的那批记忆，返回 (卡片, 是否是“全部”)。
+
+        支持三种说法：报编号（单个或一串）、报内容关键词（match）、说“全部/所有”。
+        早先只认单个 int，用户说“把这几条都设为永久”时 memory_id 是数组，
+        _int_field 直接返回 None，于是每次都答“没有找到这条记忆”。
+        """
+        group_openid = message.group_openid
+        if bool(intent.get("all")):
+            now_iso = self._now().isoformat(timespec="seconds")
+            return self.store.live_memory_cards(group_openid, now_iso), True
+        ids = self._memory_ids_field(intent.get("memory_id"))
+        if ids:
+            return self.store.find_memory_cards(group_openid, memory_id=ids), False
+        match = self._optional_str(intent.get("match"))
+        if match:
+            return self.store.find_memory_cards(group_openid, query=match), False
+        return [], False
+
     async def _handle_intent(
         self,
         *,
@@ -1174,12 +1207,25 @@ class XiaoxiaClient(botpy.Client):
         return f"记住了 {saved} 条，另有 {skipped} 条涉及敏感信息，我没有保存。{tail}"
 
     def _handle_memory_list(self, intent: dict, message: RichGroupMessage) -> str:
+        pinned_filter: bool | None = None
+        if intent.get("pinned") is not None:
+            pinned_filter = bool(intent.get("pinned"))
+        kind = self._optional_str(intent.get("kind"))
+        person = self._optional_str(intent.get("person"))
+        match = self._optional_str(intent.get("match"))
+        filtered = bool(kind or person or match or pinned_filter is not None)
         cards, current, pages, total = self.store.memory_cards_page(
             message.group_openid,
             now_iso=self._now().isoformat(timespec="seconds"),
             page=max(1, self._int_field(intent.get("page")) or 1),
+            kind=kind,
+            person=person,
+            pinned=pinned_filter,
+            match=match,
         )
         if not total:
+            if filtered:
+                return "没有符合这个筛选条件的记忆。"
             return "我现在还没有长期记忆。可以直接说：记住她不吃香菜。"
         if not cards:
             return f"记忆一共 {total} 条，只有 {pages} 页，最后一页说“第 {pages} 页记忆”。"
@@ -1189,21 +1235,26 @@ class XiaoxiaClient(botpy.Client):
         return header + "\n" + self._format_memory_cards(cards)
 
     def _handle_memory_pin(self, intent: dict, message: RichGroupMessage, *, pinned: bool) -> str:
-        cards = self.store.find_memory_cards(
-            message.group_openid,
-            memory_id=self._int_field(intent.get("memory_id")),
-            query=self._optional_str(intent.get("match")),
-        )
+        by_id = self._memory_ids_field(intent.get("memory_id"))
+        want_all = bool(intent.get("all"))
+        cards, is_all = self._resolve_memory_targets(intent, message)
         if not cards:
             return "没有找到这条记忆。可以说“查看记忆”先看看编号。"
-        if len(cards) > 1:
+        # 只有靠内容关键词匹配、又命中多条时才要用户报编号；报了编号或说“全部”就直接批量操作。
+        if not by_id and not want_all and len(cards) > 1:
             return "匹配到多条记忆，请说编号：\n" + self._format_memory_cards(cards)
 
-        card = cards[0]
-        if not self.store.set_memory_pinned(message.group_openid, card.id, pinned):
-            return "这条记忆刚刚变动过，麻烦再说一次。"
         verb = "置顶，以后不会忘" if pinned else "取消置顶"
-        return f"已{verb}记忆 {card.id}：{card.content}"
+        changed = sum(
+            1
+            for card in cards
+            if self.store.set_memory_pinned(message.group_openid, card.id, pinned)
+        )
+        if not changed:
+            return "这些记忆刚刚变动过，麻烦再说一次。"
+        if len(cards) == 1:
+            return f"已{verb}记忆 {cards[0].id}：{cards[0].content}"
+        return f"已{verb}{'全部 ' if is_all else ''}{changed} 条记忆。"
 
     def _handle_memory_alias(self, intent: dict, message: RichGroupMessage) -> str:
         """统一某个人在记忆里的叫法。
@@ -1355,21 +1406,24 @@ class XiaoxiaClient(botpy.Client):
         )
 
     def _handle_memory_forget(self, intent: dict, message: RichGroupMessage) -> str:
-        memory_id = self._int_field(intent.get("memory_id"))
-        match = self._optional_str(intent.get("match"))
-        cards = self.store.find_memory_cards(
-            message.group_openid,
-            memory_id=memory_id,
-            query=match,
-        )
+        by_id = self._memory_ids_field(intent.get("memory_id"))
+        want_all = bool(intent.get("all"))
+        cards, is_all = self._resolve_memory_targets(intent, message)
         if not cards:
             return "没有找到这条记忆。可以说“查看记忆”。"
-        if len(cards) > 1:
+        if not by_id and not want_all and len(cards) > 1:
             return "匹配到多条记忆，请说编号：\n" + self._format_memory_cards(cards)
 
-        card = cards[0]
-        self.store.delete_memory_card(message.group_openid, card.id)
-        return f"已忘记记忆 {card.id}：{card.content}"
+        deleted = sum(
+            1
+            for card in cards
+            if self.store.delete_memory_card(message.group_openid, card.id)
+        )
+        if not deleted:
+            return "这些记忆刚刚变动过，麻烦再说一次。"
+        if len(cards) == 1:
+            return f"已忘记记忆 {cards[0].id}：{cards[0].content}"
+        return f"已忘记{'全部 ' if is_all else ''}{deleted} 条记忆。"
 
     async def _handle_memory_search(
         self,
