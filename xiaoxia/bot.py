@@ -1635,6 +1635,8 @@ class XiaoxiaClient(botpy.Client):
             memory_context=self._memory_context(message.group_openid),
             search_context="\n\n".join(search_parts),
             identity_context=identity.prompt(),
+            # 这一轮确实检索过，得写清楚，否则模型会照着“（无）”说“我没查”。
+            executed_actions="在本地聊天记录和长期记忆里检索过（结果附在下面）",
         )
 
     @staticmethod

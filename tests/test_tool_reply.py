@@ -64,7 +64,7 @@ class GenerateToolReplyTests(unittest.TestCase):
             )
         )
         system_prompt = captured["system_prompt"]
-        # 必须走 SYSTEM_PROMPT 的人设（小毛豆 + 那 12 条原则），再叠加工具专属规则
+        # 必须走 SYSTEM_PROMPT 的人设（小毛豆 + 那十几条原则），再叠加工具专属规则
         self.assertTrue(system_prompt.startswith(SYSTEM_PROMPT))
         self.assertIn("小毛豆", system_prompt)
         self.assertIn("来源站点名", system_prompt)

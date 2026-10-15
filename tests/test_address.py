@@ -227,11 +227,11 @@ class PromptRuleTests(unittest.TestCase):
         self.assertIn("14. 称呼只是叫法，不是事实", SYSTEM_PROMPT)
 
     def test_tool_addendum_numbers_follow_the_main_rules(self) -> None:
-        # 主规则加到 14，工具补充规则必须顺延，不能两处都叫 13
-        self.assertIn("15. 忠于工具结果", TOOL_REPLY_ADDENDUM)
-        self.assertIn("18. 仍然是发进 QQ 群的一句话", TOOL_REPLY_ADDENDUM)
+        # 主规则加到 17，工具补充规则必须顺延，不能两处都叫 15
+        self.assertIn("18. 忠于工具结果", TOOL_REPLY_ADDENDUM)
+        self.assertIn("21. 仍然是发进 QQ 群的一句话", TOOL_REPLY_ADDENDUM)
         self.assertNotIn("13.", TOOL_REPLY_ADDENDUM)
-        self.assertNotIn("16. 仍然是", TOOL_REPLY_ADDENDUM)
+        self.assertNotIn("15. 忠于", TOOL_REPLY_ADDENDUM)
 
     def test_intent_prompt_describes_address_set(self) -> None:
         self.assertIn("- address_set:", INTENT_SYSTEM_PROMPT)
