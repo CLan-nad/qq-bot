@@ -418,7 +418,7 @@ class ChatStore:
         if not text:
             text = self._attachment_summary(raw)
         if not text:
-            text = "[non-text message]"
+            text = "[无文字内容]"
 
         display_name = (username or "").strip() or (member_openid or "unknown")[:12]
         with self._conn:

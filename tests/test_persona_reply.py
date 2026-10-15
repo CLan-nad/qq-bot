@@ -8,6 +8,7 @@ SYSTEM_PROMPT 里那套人设一个 token 都没参与——这就是「说话�
 from __future__ import annotations
 
 import asyncio
+import inspect
 import tempfile
 import unittest
 from datetime import datetime
@@ -16,6 +17,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from xiaoxia.bot import (
+    PERSONA_TOOL_LABELS,
     ActionResult,
     IdentityContext,
     XiaoxiaClient,
@@ -601,6 +603,267 @@ class AddendumTests(unittest.TestCase):
         self.assertIn("取消 / 暂停 / 恢复 / 跳过", ACTION_REPLY_ADDENDUM)
         self.assertIn("任务的时间和标题", ACTION_REPLY_ADDENDUM)
         self.assertIn("不许添加", ACTION_REPLY_ADDENDUM)
+
+
+def _pref_settings() -> SimpleNamespace:
+    """bot_pref 要读这四个默认值，少给一个字段异常会被 _persona_or_raw 吞掉。"""
+    return SimpleNamespace(
+        timezone="Asia/Shanghai",
+        max_context_chars=24000,
+        care_enabled=True,
+        care_daily_max=2,
+        care_cooldown_minutes=180,
+        active_msg_daily_max=6,
+    )
+
+
+class AliasAndPrefPersonaTests(unittest.TestCase):
+    """memory_alias / bot_pref 是最后两个「办成了事却直接回裸模板」的本地动作。
+
+    统一叫法、改群设置都是用户明确下的一条指令，办成之后回一句
+    「记下了，这个群的主动关心改为关。」——和已经修好的那 10 个动作比，
+    这两个明显还是后台日志的口气。规则不变：只润色成功路径，事实锁死。
+    """
+
+    def setUp(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = ChatStore(str(Path(self.tmp.name) / "alias-pref.sqlite3"))
+        self.identity = IdentityContext(requester=_member("CL"), partner=_member("小虾"))
+        self.client = XiaoxiaClient(
+            settings=_pref_settings(), store=self.store, llm=SimpleNamespace()
+        )
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+        asyncio.set_event_loop(None)
+        self.loop.close()
+
+    def test_alias_set_locks_the_canonical_name(self) -> None:
+        result = self.client._handle_memory_alias(
+            {"op": "set", "alias": ["罗晓霞"], "canonical": "小虾"}, _message()
+        )
+        self.assertTrue(result.persona)
+        self.assertIn("小虾", result.facts)
+
+    def test_alias_set_keeps_the_rewritten_count_as_a_fact(self) -> None:
+        self.client._handle_memory_remember(
+            {"memories": [{"kind": "fact", "person": "罗晓霞", "content": "不吃香菜"}]},
+            _message(),
+            self.identity,
+        )
+        result = self.client._handle_memory_alias(
+            {"op": "set", "alias": ["罗晓霞"], "canonical": "小虾"}, _message()
+        )
+        self.assertTrue(result.persona)
+        # 顺手改掉了几条旧记忆，是用户唯一能核对的数字，不能被润色掉
+        self.assertIn("1", result.facts)
+        self.assertIn("小虾", result.facts)
+
+    def test_alias_clear_is_wrapped_too(self) -> None:
+        self.client._handle_memory_alias(
+            {"op": "set", "alias": ["罗晓霞"], "canonical": "小虾"}, _message()
+        )
+        result = self.client._handle_memory_alias({"op": "clear", "alias": ["罗晓霞"]}, _message())
+        self.assertTrue(result.persona)
+        self.assertIn("罗晓霞", result.facts)
+
+    def test_alias_show_and_failures_stay_plain(self) -> None:
+        for intent in (
+            {"op": "show"},
+            {"op": "set", "canonical": "小虾"},
+            {"op": "set", "alias": ["小虾"], "canonical": "小虾"},
+            {"op": "clear", "alias": ["没人"]},
+        ):
+            result = self.client._handle_memory_alias(intent, _message())
+            self.assertFalse(getattr(result, "persona", False), intent)
+
+    def test_pref_set_locks_label_and_value(self) -> None:
+        result = self.client._handle_bot_pref(
+            {"op": "set", "key": "care_daily_max", "value": 3}, _message()
+        )
+        self.assertTrue(result.persona)
+        self.assertIn("每人每天被关心次数", result.facts)
+        self.assertIn("3", result.facts)
+
+    def test_turning_care_off_keeps_the_recovery_hint(self) -> None:
+        result = self.client._handle_bot_pref(
+            {"op": "set", "key": "care_enabled", "value": False}, _message()
+        )
+        self.assertTrue(result.persona)
+        self.assertIn("要主动关心", result.facts)
+
+    def test_restoring_the_default_locks_the_default_value(self) -> None:
+        self.client._handle_bot_pref(
+            {"op": "set", "key": "care_daily_max", "value": 5}, _message()
+        )
+        result = self.client._handle_bot_pref(
+            {"op": "set", "key": "care_daily_max", "value": "默认"}, _message()
+        )
+        self.assertTrue(result.persona)
+        self.assertIn("2", result.facts)
+
+    def test_pref_show_and_bad_values_stay_plain(self) -> None:
+        for intent in (
+            {"op": "show"},
+            {"op": "set", "key": "care_daily_max", "value": "很多"},
+            {"op": "set", "key": "care_daily_max", "value": 999},
+            {"op": "set", "key": "不存在的项", "value": 1},
+            {"op": "set", "key": "care_enabled", "value": "随便"},
+        ):
+            result = self.client._handle_bot_pref(intent, _message())
+            self.assertFalse(getattr(result, "persona", False), intent)
+
+    def test_both_actions_are_routed_through_the_persona_layer(self) -> None:
+        source = inspect.getsource(XiaoxiaClient._handle_intent)
+        for action in ("memory_alias", "bot_pref"):
+            self.assertIn(f"speak(self._handle_{action}", source)
+            self.assertIn(action, PERSONA_TOOL_LABELS)
+
+
+class AliasPrefEndToEndTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = ChatStore(str(Path(self.tmp.name) / "alias-e2e.sqlite3"))
+        self.identity = IdentityContext(requester=_member("CL"), partner=_member("小虾"))
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+        asyncio.set_event_loop(None)
+        self.loop.close()
+
+    def _intent(self, llm, intent: dict, request: str) -> str:
+        client = XiaoxiaClient(settings=_pref_settings(), store=self.store, llm=llm)
+        return self.loop.run_until_complete(
+            client._handle_intent(
+                intent=intent,
+                message=_message(),
+                requester=_member("CL"),
+                request=request,
+                topic=f"CL：{request}",
+                background="",
+                full_recent="",
+                identity=self.identity,
+            )
+        )
+
+    def test_alias_reply_gets_its_own_tool_label(self) -> None:
+        llm = FakeLLM(reply="好嘞，以后都叫她小虾～")
+        reply = self._intent(
+            llm,
+            {"action": "memory_alias", "op": "set", "alias": ["罗晓霞"], "canonical": "小虾"},
+            "以后把「罗晓霞」都叫「小虾」",
+        )
+        # calls 必须真有 1 条：_persona_or_raw 会吞异常静默回退，只看回复分不出来
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(llm.calls[0]["tool_name"], "统一某个人的叫法")
+        self.assertEqual(reply, "好嘞，以后都叫她小虾～")
+
+    def test_pref_reply_reaches_the_persona_layer(self) -> None:
+        llm = FakeLLM(reply="行，那我就不自己插话了，你们 @ 我随时在～想恢复就说「要主动关心」。")
+        reply = self._intent(
+            llm,
+            {"action": "bot_pref", "op": "set", "key": "care_enabled", "value": False},
+            "以后别主动安慰我们",
+        )
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(llm.calls[0]["tool_name"], "改这个群的设置")
+        self.assertEqual(reply, llm.reply)
+
+    def test_dropping_a_fact_falls_back_to_the_template(self) -> None:
+        llm = FakeLLM(reply="好啦，都听你的～")
+        reply = self._intent(
+            llm,
+            {"action": "bot_pref", "op": "set", "key": "care_daily_max", "value": 3},
+            "每人每天关心次数改成三次",
+        )
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(reply, "记下了，这个群的每人每天被关心次数改为3。")
+
+
+class FactToleranceTests(unittest.TestCase):
+    """事实闸要认得出「说短了但没说错」，同时照样拦住说错的。
+
+    真实模型实测：模板「记下了，这个群的每人每天被关心次数改为3。」，
+    模型回「好嘞，每人每天关心次数已经改成 3 次了。」——又对又像人话，
+    却因为那个全称名字没被一字不差抄下来而被判丢事实，白花一次调用退回模板。
+    """
+
+    def setUp(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = ChatStore(str(Path(self.tmp.name) / "tolerance.sqlite3"))
+        self.identity = IdentityContext(requester=_member("CL"), partner=_member("小虾"))
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+        asyncio.set_event_loop(None)
+        self.loop.close()
+
+    def _polish(self, template: str, facts: tuple[str, ...], model_says: str) -> str:
+        llm = FakeLLM(reply=model_says)
+        client = XiaoxiaClient(settings=_pref_settings(), store=self.store, llm=llm)
+        return self.loop.run_until_complete(
+            client._persona_or_raw(
+                "bot_pref",
+                ActionResult(template, persona=True, facts=facts),
+                "改一下群设置",
+                _message(),
+                self.identity,
+                "话题",
+            )
+        )
+
+    def test_shortened_pref_label_still_counts(self) -> None:
+        says = "好嘞，每人每天关心次数已经改成 3 次了。"
+        self.assertEqual(
+            self._polish(
+                "记下了，这个群的每人每天被关心次数改为3。", ("每人每天被关心次数", "3"), says
+            ),
+            says,
+        )
+
+    def test_spaces_do_not_break_a_number_fact(self) -> None:
+        # 模型爱在数字和单位之间加空格，「30 分钟」和「30分钟」必须是同一个事实
+        says = "好嘞，关心间隔改成 30 分钟了～"
+        self.assertEqual(
+            self._polish(
+                "记下了，这个群的同一个人两次关心的间隔（分钟）改为30。",
+                ("同一个人两次关心的间隔（分钟）", "30"),
+                says,
+            ),
+            says,
+        )
+
+    def test_a_wrong_number_is_still_rejected(self) -> None:
+        # 放宽只针对说法，不针对数值：改成 5 就是错的，必须退回模板
+        template = "记下了，这个群的每人每天被关心次数改为3。"
+        self.assertEqual(
+            self._polish(template, ("每人每天被关心次数", "3"), "好嘞，关心次数改成 5 次了。"),
+            template,
+        )
+
+    def test_talking_about_a_different_setting_is_still_rejected(self) -> None:
+        # 别名表是逐个事实挂的，不会让「说了别的设置」蒙混过关
+        template = "记下了，这个群的每人每天被关心次数改为3。"
+        self.assertEqual(
+            self._polish(template, ("每人每天被关心次数", "3"), "好嘞，主动消息上限改成 3 条了。"),
+            template,
+        )
+
+    def test_the_direction_gate_still_wins_over_tolerance(self) -> None:
+        template = "已取消任务 3：喝水。"
+        self.assertEqual(
+            self._polish(template, ("取消", "3", "喝水"), "任务 3 喝水我给它恢复了。"),
+            template,
+        )
 
 
 if __name__ == "__main__":

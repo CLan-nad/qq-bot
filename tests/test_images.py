@@ -106,7 +106,7 @@ class ImageHelperTests(unittest.TestCase):
         self.assertTrue(needs_image_description(SMALL_FACE_TAG))
         self.assertFalse(needs_image_description("[图片内容：一只猫]"))
         self.assertFalse(needs_image_description("[图片未识别]"))
-        self.assertFalse(needs_image_description("[non-text message]"))
+        self.assertFalse(needs_image_description("[无文字内容]"))
         self.assertFalse(needs_image_description(normalize_face_tags(STICKER_TAG)))
 
     def test_needs_image_description_falls_back_to_raw_attachments(self) -> None:

@@ -120,6 +120,8 @@ PERSONA_TOOL_LABELS: dict[str, str] = {
     "task_pause": "暂停定时提醒",
     "task_resume": "恢复定时提醒",
     "task_skip": "让定时提醒跳过下一次",
+    "memory_alias": "统一某个人的叫法",
+    "bot_pref": "改这个群的设置",
 }
 # 就是一句确认话，给太长反而啰嗦。
 PERSONA_REPLY_MAX_CHARS = 60
@@ -154,8 +156,38 @@ _DIRECTION_VARIANTS: dict[str, tuple[str, ...]] = {
 }
 
 
+# 群设置的中文名是给「看看群设置」那张表用的，写全称才准确；可确认话里模型一定
+# 会把它说短，实测两个长名字全被判成丢事实、白白退回模板。这里只放宽这几个长名字
+# 的比对。放宽的代价是「万一别名出现在别处」，那种情况只是多放过一次；
+# 收紧的代价是说对了的回复被打成错的，用户直接看到日志口气——两害相权取其轻。
+_FACT_ALIASES: dict[str, tuple[str, ...]] = {
+    "每人每天被关心次数": ("每人每天关心次数", "每天关心次数", "关心次数"),
+    "同一个人两次关心的间隔（分钟）": ("关心间隔", "两次关心的间隔", "间隔分钟数"),
+    "群里每天主动消息上限": ("主动消息上限", "每天主动消息", "主动消息条数"),
+}
+
+
+def _squash(text: str) -> str:
+    """中文里空格不承载语义，「30 分钟」和「30分钟」必须算同一个事实。"""
+    return "".join(text.split())
+
+
 def _fact_variants(fact: str) -> tuple[str, ...]:
-    return (fact, *_CN_DIGIT_VARIANTS.get(fact, ()), *_DIRECTION_VARIANTS.get(fact, ()))
+    return (
+        fact,
+        *_CN_DIGIT_VARIANTS.get(fact, ()),
+        *_DIRECTION_VARIANTS.get(fact, ()),
+        *_FACT_ALIASES.get(fact, ()),
+    )
+
+
+def _missing_facts(facts: Iterable[str], reply: str) -> list[str]:
+    haystack = _squash(reply)
+    return [
+        fact
+        for fact in facts
+        if not any(_squash(variant) in haystack for variant in _fact_variants(fact))
+    ]
 
 
 # 真实模型跑出来的翻车样本：模板是「已忘记记忆 2：不吃香菜」，模型回
@@ -197,6 +229,13 @@ DEDUP_CODE = "40054005"
 ACK_TEXT = "稍等，我查一下～"
 ACK_TEXT_CHAT = "我想想～"
 FALLBACK_TEXT = "小毛豆刚刚走神了，稍后再 @ 我一次试试。"
+
+# 只 @ 一下不说话，该怎么接？以前的答案是代码替它决定的：把空消息硬填成
+# 「你好，请介绍一下你能帮我们做什么。」，于是一天里连着四次空 @，每次都背回一份
+# 几乎一模一样的两百字功能清单——用户看到的不是机器人，是一段循环播放的说明书。
+# 现在只如实告诉模型「对方没带话」，接什么由它照【当前话题】自己定：
+# 绝大多数时候一句「在呢，怎么啦」就够了。行为规则写在 SYSTEM_PROMPT 第 4 条。
+EMPTY_AT_REQUEST = "（只 @ 了我，没带话）"
 # 被动回复的重试次数与间隔。ack 不走这套（它只是垫场，发不出去就算了）。
 SEND_ATTEMPTS = 3
 SEND_RETRY_DELAY_SECONDS = 0.4
@@ -872,7 +911,7 @@ class XiaoxiaClient(botpy.Client):
                 )
                 if descriptions:
                     request = message_with_image_descriptions(request, descriptions)
-                request = request or "你好，请介绍一下你能帮我们做什么。"
+                request = request or EMPTY_AT_REQUEST
 
                 intent = await self.llm.parse_intent(
                     request=request,
@@ -1135,13 +1174,13 @@ class XiaoxiaClient(botpy.Client):
         if action == "memory_forget":
             return await speak(self._handle_memory_forget(intent, message))
         if action == "memory_alias":
-            return self._handle_memory_alias(intent, message)
+            return await speak(self._handle_memory_alias(intent, message))
         if action == "address_set":
             return await speak(self._handle_address_set(intent, message, identity))
         if action == "calendar_query":
             return self._handle_calendar_query(intent)
         if action == "bot_pref":
-            return self._handle_bot_pref(intent, message)
+            return await speak(self._handle_bot_pref(intent, message))
         if action == "memory_search":
             return await self._handle_memory_search(
                 intent=intent,
@@ -1219,11 +1258,7 @@ class XiaoxiaClient(botpy.Client):
                 "persona reply for %s contradicted the result, fell back to template", action
             )
             return template
-        missing = [
-            fact
-            for fact in result.facts
-            if not any(variant in reply for variant in _fact_variants(fact))
-        ]
+        missing = _missing_facts(result.facts, reply)
         if missing:
             logger.info(
                 "persona reply for %s dropped facts %s, fell back to template",
@@ -1632,7 +1667,11 @@ class XiaoxiaClient(botpy.Client):
             cleared = [name for name in names if self.store.clear_person_alias(group_openid, name)]
             if not cleared:
                 return "这几个叫法我本来就没统一过：" + "、".join(names) + "。"
-            return "好，不再统一了：" + "、".join(cleared) + "。已经存下的记忆我没动。"
+            return ActionResult(
+                "好，不再统一了：" + "、".join(cleared) + "。已经存下的记忆我没动。",
+                persona=True,
+                facts=tuple(cleared),
+            )
 
         canonical = self._optional_str(intent.get("canonical"))
         if not canonical:
@@ -1643,7 +1682,13 @@ class XiaoxiaClient(botpy.Client):
 
         rewritten = sum(self.store.set_person_alias(group_openid, name, canonical) for name in names)
         tail = f"，已经记住的 {rewritten} 条也一起改过来了" if rewritten else ""
-        return f"好，以后「{'」「'.join(names)}」都统一叫「{canonical}」{tail}。"
+        # 改了几条是用户唯一能核对的数字，必须活着走出润色。被统一的旧叫法本身
+        # 不作硬性事实：模型说「以后都叫她小虾」同样准确，硬要求只会每次都退回模板。
+        return ActionResult(
+            f"好，以后「{'」「'.join(names)}」都统一叫「{canonical}」{tail}。",
+            persona=True,
+            facts=(canonical, *((str(rewritten),) if rewritten else ())),
+        )
 
     def _handle_address_set(
         self, intent: dict, message: RichGroupMessage, identity: IdentityContext
@@ -1758,7 +1803,11 @@ class XiaoxiaClient(botpy.Client):
         lowered = raw.lower()
         if "default" in lowered or "默认" in raw or "恢复" in raw or "还原" in raw or "改回去" in raw:
             self.store.clear_preference(group_openid, key)
-            return f"好，{label}恢复成默认值 {self._default_pref(kind, attr)}。"
+            return ActionResult(
+                f"好，{label}恢复成默认值 {self._default_pref(kind, attr)}。",
+                persona=True,
+                facts=(label, self._default_pref(kind, attr)),
+            )
 
         if kind == "int":
             try:
@@ -1779,8 +1828,15 @@ class XiaoxiaClient(botpy.Client):
 
         self.store.set_preference(group_openid, key, stored)
         if key == "care_enabled" and shown == "关":
-            return "好，那我不主动插话了，你们 @ 我随时都在。想恢复就说「要主动关心」。"
-        return f"记下了，这个群的{label}改为{shown}。"
+            # 「想恢复就说要主动关心」是这句话里唯一有用的操作提示，锁住别被润色掉。
+            return ActionResult(
+                "好，那我不主动插话了，你们 @ 我随时都在。想恢复就说「要主动关心」。",
+                persona=True,
+                facts=("要主动关心",),
+            )
+        return ActionResult(
+            f"记下了，这个群的{label}改为{shown}。", persona=True, facts=(label, shown)
+        )
 
     @staticmethod
     def _format_memory_cards(cards: list[MemoryCard]) -> str:
