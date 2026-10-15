@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from .images import normalize_face_tags
 from .scheduling import schedule_label
 
 
@@ -283,7 +284,8 @@ class ChatStore:
     def _migrate(self) -> None:
         """把旧库补到当前 schema：缺列就 ALTER TABLE ADD COLUMN，CHECK 约束过时重建任务表。
 
-        这里只做加法，不重写任何已有数据；每次启动都会跑，重复执行是安全的。
+        顺带把历史消息里残留的 QQ 表情标签解码成可读文本。除此之外只做加法，
+        不重写其它已有数据；每次启动都会跑，重复执行是安全的。
         """
         with self._conn:
             for table, columns in _ADDITIVE_COLUMNS.items():
@@ -302,6 +304,33 @@ class ChatStore:
             table_sql = str(row["sql"] or "") if row else ""
             if table_sql and "'yearly'" not in table_sql:
                 self._rebuild_tasks_table()
+
+        self._normalize_legacy_face_tags()
+
+    def _normalize_legacy_face_tags(self) -> int:
+        """把历史消息里存量的 <faceType=...> 乱码解码成 [表情名]。
+
+        这些标签在库里躺着的时候既进不了 FTS 检索，又会原样喂给模型当上下文。
+        只改写命中的行，重复执行安全。FTS 由 messages_fts_update 触发器同步。
+        """
+        rows = self._conn.execute(
+            "SELECT group_openid, message_key, content FROM messages"
+            " WHERE content LIKE '%<faceType=%'"
+        ).fetchall()
+        changed = 0
+        for row in rows:
+            cleaned = normalize_face_tags(row["content"])
+            if not cleaned or cleaned == row["content"]:
+                continue
+            with self._conn:
+                self._conn.execute(
+                    "UPDATE messages SET content = ? WHERE group_openid = ? AND message_key = ?",
+                    (cleaned, row["group_openid"], row["message_key"]),
+                )
+            changed += 1
+        if changed:
+            logger.info("migration: decoded face tags in %d stored messages", changed)
+        return changed
 
     def _rebuild_tasks_table(self) -> None:
         """SQLite 改不了 CHECK 约束，只能建新表、整表搬过去、再改名。id 保持不变。"""
@@ -353,7 +382,9 @@ class ChatStore:
             return False
 
         key = self.message_key(message_id, msg_seq)
-        text = (content or "").strip()
+        # 表情标签必须在入库前解码：库里的 content 就是模型每轮要读的上下文，
+        # 存成 <faceType=1,faceId="267",ext="..."> 等于让它读乱码。
+        text = normalize_face_tags(content).strip()
         if not text:
             text = self._attachment_summary(raw)
         if not text:

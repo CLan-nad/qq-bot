@@ -31,6 +31,7 @@ from .images import (
     message_with_image_descriptions,
     message_with_unrecognized_images,
     needs_image_description,
+    normalize_face_tags,
     to_data_url,
 )
 from .llm import XiaoxiaLLM
@@ -273,7 +274,9 @@ class XiaoxiaClient(botpy.Client):
         ):
             if budget <= 0:
                 break
-            if stored.message_key == exclude_key or not needs_image_description(stored.content):
+            if stored.message_key == exclude_key or not needs_image_description(
+                stored.content, stored.raw
+            ):
                 continue
             attachments = image_attachments(stored.raw)[:budget]
             if not attachments:
@@ -574,7 +577,7 @@ class XiaoxiaClient(botpy.Client):
         两级判定：关键词预筛不花钱，命中才让便宜模型判断到底要不要说、说什么。
         任何一步拿不准都不开口——在这个群里，安静比说错话好。
         """
-        content = (message.content or "").strip()
+        content = normalize_face_tags(message.content).strip()
         if not should_ask_model(content):
             return
         group_openid = message.group_openid
@@ -651,7 +654,7 @@ class XiaoxiaClient(botpy.Client):
         self._save_message(message, source)
 
         # 图片描述写回本地库，最近上下文、长期记忆、历史检索都能看到图片内容。
-        content = (message.content or "").strip()
+        content = normalize_face_tags(message.content).strip()
         descriptions: list[str] = []
         budget = self.settings.vision_max_images_per_request
         if budget > 0:
@@ -685,7 +688,7 @@ class XiaoxiaClient(botpy.Client):
             acked = False
             try:
                 bot_mention = self._bot_mention(message)
-                raw_request = (message.content or "").strip()
+                raw_request = normalize_face_tags(message.content).strip()
                 request = (
                     self._strip_bot_mention(raw_request, bot_mention)
                     if bot_mention

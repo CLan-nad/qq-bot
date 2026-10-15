@@ -25,7 +25,8 @@ IMAGE_PLACEHOLDER_PATTERN = re.compile(r"\[(?:图片|image/[A-Za-z0-9.+-]+)\]", 
 # QQ 表情包（大表情，faceType=6）在消息体里是 <faceType=6,faceId="0",ext="..."> 标签，
 # 真正的图片放在 attachments 里；系统小表情（faceType=1）没有附件。ext 是 base64 的
 # JSON，里面的 text 字段是可读的表情名称，例如 [大胆]、[哈哈]。
-FACE_TAG_PATTERN = re.compile(r'<faceType=(\d+),faceId="(\d+)",ext="([^"]*)">')
+# ext 在个别客户端上会整个缺失，所以做成可选；缺了就退化成 [表情]。
+FACE_TAG_PATTERN = re.compile(r'<faceType=(\d+),faceId="(\d+)"(?:,ext="([^"]*)")?\s*>')
 
 # 已经处理过的标记，避免对同一张图反复调用模型。
 IMAGE_DESCRIBED_MARKS = ("图片内容：", "图片未识别")
@@ -73,12 +74,20 @@ def strip_image_placeholders(content: str | None) -> str:
     return "\n".join(line.strip() for line in text.splitlines()).strip()
 
 
-def needs_image_description(content: str | None) -> bool:
-    """图片或表情包内容是否还没被识别过（用于避免重复调用视觉模型）。"""
+def needs_image_description(content: str | None, raw: dict[str, Any] | None = None) -> bool:
+    """图片或表情包内容是否还没被识别过（用于避免重复调用视觉模型）。
+
+    表情标签在入库时就已经解码成可读文本，光看 content 认不出「这条其实还带图」，
+    所以再用原始 payload 里的图片附件兜一次底。
+    """
     text = (content or "").strip()
     if any(mark in text for mark in IMAGE_DESCRIBED_MARKS):
         return False
-    return bool(IMAGE_PLACEHOLDER_PATTERN.search(text) or FACE_TAG_PATTERN.search(text))
+    if IMAGE_PLACEHOLDER_PATTERN.search(text) or FACE_TAG_PATTERN.search(text):
+        return True
+    if not isinstance(raw, dict):
+        return False
+    return bool(image_attachments(raw))
 
 
 def message_with_image_descriptions(content: str | None, descriptions: list[str]) -> str:
@@ -111,13 +120,21 @@ def _decode_face_text(ext: str) -> str:
 
 
 def normalize_face_tags(content: str | None) -> str:
-    """把 QQ 表情标签还原成可读文本，例如 <faceType=6,...> 变成 [大胆]。"""
+    """把 QQ 表情标签还原成可读文本，例如 <faceType=6,...> 变成 [大胆]。
+
+    系统小表情（faceType=1/3）解出来的名字不带方括号，这里统一补上，免得模型把
+    「头秃」「偷感」这种表情名当成句子里的普通词；解不出来就退化成 [表情]。
+    """
     if not content:
         return ""
-    return FACE_TAG_PATTERN.sub(
-        lambda match: _decode_face_text(match.group(3)) or "[表情]",
-        content,
-    )
+
+    def render(match: re.Match[str]) -> str:
+        name = _decode_face_text(match.group(3) or "")
+        if not name:
+            return "[表情]"
+        return name if name.startswith("[") else f"[{name}]"
+
+    return FACE_TAG_PATTERN.sub(render, content)
 
 
 def sniff_image_content_type(data: bytes) -> str | None:

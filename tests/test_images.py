@@ -109,16 +109,36 @@ class ImageHelperTests(unittest.TestCase):
         self.assertFalse(needs_image_description("[non-text message]"))
         self.assertFalse(needs_image_description(normalize_face_tags(STICKER_TAG)))
 
+    def test_needs_image_description_falls_back_to_raw_attachments(self) -> None:
+        # 表情标签入库前就解码了，content 里只剩 [大胆]，得靠 raw 认出这条还带图。
+        decoded = normalize_face_tags(STICKER_TAG)
+        self.assertEqual(decoded, "[大胆]")
+        self.assertTrue(needs_image_description(decoded, SINGLE_IMAGE_RAW))
+        self.assertFalse(needs_image_description(decoded, {}))
+        self.assertFalse(needs_image_description(decoded, None))
+        self.assertFalse(needs_image_description("[大胆]\n[图片内容：一只兔子]", SINGLE_IMAGE_RAW))
+        self.assertFalse(needs_image_description("[大胆]\n[图片未识别]", SINGLE_IMAGE_RAW))
+        # 纯文字消息不该被误判成待识别。
+        self.assertFalse(needs_image_description("今天好累[头秃]", {"attachments": []}))
+
     def test_normalize_face_tags(self) -> None:
         self.assertEqual(normalize_face_tags(STICKER_TAG), "[大胆]")
-        self.assertEqual(normalize_face_tags(SMALL_FACE_TAG), "头秃")
+        # 系统小表情解出来的名字没有方括号，统一补上，别让它混进句子里当普通词。
+        self.assertEqual(normalize_face_tags(SMALL_FACE_TAG), "[头秃]")
         self.assertEqual(normalize_face_tags(EMPTY_FACE_TAG), "[表情]")
         self.assertEqual(
             normalize_face_tags('<faceType=6,faceId="0",ext="no!base64">'),
             "[表情]",
         )
+        # ext 整个缺失时也要能兜住，不能把标签原样留在上下文里。
+        self.assertEqual(normalize_face_tags('<faceType=1,faceId="267">'), "[表情]")
+        self.assertEqual(normalize_face_tags('<faceType=1,faceId="267" >'), "[表情]")
         self.assertEqual(normalize_face_tags(""), "")
         self.assertEqual(normalize_face_tags("哈哈" + STICKER_TAG), "哈哈[大胆]")
+        self.assertEqual(
+            normalize_face_tags(SMALL_FACE_TAG + "今天好累" + SMALL_FACE_TAG),
+            "[头秃]今天好累[头秃]",
+        )
 
     def test_sticker_message_gets_image_description(self) -> None:
         self.assertEqual(strip_image_placeholders(STICKER_TAG), "[大胆]")
@@ -288,6 +308,65 @@ class ImageStoreTests(unittest.TestCase):
         self.assertFalse(self.store.update_message_content(GROUP, "", "[图片内容：x]"))
 
 
+class FaceTagStorageTests(unittest.TestCase):
+    """表情乱码既不能进库，也不能留在历史消息里。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / "face.sqlite3")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _save(self, store: ChatStore, content: str, *, message_id: str) -> None:
+        store.save_message(
+            message_id=message_id,
+            msg_seq="",
+            group_openid=GROUP,
+            member_openid="openid-CL",
+            username="CL",
+            role="member",
+            content=content,
+            timestamp="2026-10-14T21:00:00+08:00",
+            source="GROUP_MESSAGE_CREATE",
+            raw={},
+        )
+
+    def test_save_message_decodes_face_tags(self) -> None:
+        store = ChatStore(self.db_path)
+        try:
+            self._save(store, SMALL_FACE_TAG, message_id="face-1")
+            self._save(store, "好累啊" + STICKER_TAG, message_id="face-2")
+            contents = [m.content for m in store.recent_messages(GROUP, 10)]
+        finally:
+            store.close()
+        self.assertEqual(contents, ["[头秃]", "好累啊[大胆]"])
+
+    def test_legacy_rows_are_decoded_on_startup(self) -> None:
+        store = ChatStore(self.db_path)
+        # 绕过 save_message，模拟老版本直接存进去的乱码。
+        with store._conn:
+            store._conn.execute(
+                "INSERT INTO messages (message_key, message_id, msg_seq, group_openid,"
+                " member_openid, username, role, content, timestamp, source, raw_json)"
+                " VALUES ('legacy:1', 'legacy', '1', ?, 'openid-CL', 'CL', 'member', ?, '',"
+                " 'GROUP_MESSAGE_CREATE', '{}')",
+                (GROUP, "好累啊" + SMALL_FACE_TAG),
+            )
+        store.close()
+
+        reopened = ChatStore(self.db_path)
+        try:
+            contents = [m.content for m in reopened.recent_messages(GROUP, 10)]
+            self.assertEqual(contents, ["好累啊[头秃]"])
+            # FTS 索引由触发器同步，解码后的表情名要能被搜到。
+            self.assertEqual(len(reopened.search_messages(GROUP, "头秃")), 1)
+            # 再跑一次迁移必须是幂等的。
+            self.assertEqual(reopened._normalize_legacy_face_tags(), 0)
+        finally:
+            reopened.close()
+
+
 class _ScriptedCompletions:
     def __init__(self, contents: list[str]) -> None:
         self.contents = list(contents)
@@ -455,10 +534,9 @@ class StickerDescribeTests(unittest.TestCase):
         budget = asyncio.run(
             client._describe_recent_images(GROUP, exclude_key="", budget=3)
         )
+        # 系统小表情没有图片附件，不该浪费一次视觉调用；但入库时乱码已经解码成可读文本。
         self.assertEqual(budget, 3)
-        self.assertEqual(
-            self.store.recent_messages(GROUP, 5)[0].content, SMALL_FACE_TAG
-        )
+        self.assertEqual(self.store.recent_messages(GROUP, 5)[0].content, "[头秃]")
 
 
 if __name__ == "__main__":
