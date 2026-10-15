@@ -91,10 +91,39 @@ class SystemPromptTests(unittest.TestCase):
         self.assertIn("【更早的背景】", SYSTEM_PROMPT)
         self.assertIn("绝不主动提起", SYSTEM_PROMPT)
 
-    def test_rule_health_no_diagnosis(self) -> None:
-        self.assertIn("不下诊断结论", SYSTEM_PROMPT)
-        self.assertIn("不推荐具体药品和剂量", SYSTEM_PROMPT)
-        self.assertIn("建议去医院", SYSTEM_PROMPT)
+    def test_rule_health_clause_is_gone(self) -> None:
+        # 用户明确要求去掉「健康不下诊断/不荐药」那条，交给模型自己拿捏
+        self.assertNotIn("不下诊断结论", SYSTEM_PROMPT)
+        self.assertNotIn("不推荐具体药品和剂量", SYSTEM_PROMPT)
+
+    def test_rule_length_cap_is_gone(self) -> None:
+        # 「不超过 500 字」被要求去掉：需要长回答时别再自我截断
+        self.assertNotIn("不超过 500 字", SYSTEM_PROMPT)
+
+    def test_rule_playful_instead_of_dead_neutral(self) -> None:
+        # 打情骂俏、起哄点名让批谁，要顺着玩，不许端水
+        self.assertIn("打情骂俏", SYSTEM_PROMPT)
+        self.assertIn("顺着玩", SYSTEM_PROMPT)
+        self.assertIn("别端水", SYSTEM_PROMPT)
+        # 但真矛盾时的中立限定必须留着，否则变成无条件帮腔、火上浇油
+        self.assertIn("真起了矛盾", SYSTEM_PROMPT)
+        self.assertIn("不评判对错", SYSTEM_PROMPT)
+
+    def test_rule_intimacy_for_the_couple(self) -> None:
+        # 情侣私密调情要配合，不能保守地闭口不提
+        self.assertIn("成年情侣的私密空间", SYSTEM_PROMPT)
+        self.assertIn("别装听不懂", SYSTEM_PROMPT)
+        self.assertIn("别回避", SYSTEM_PROMPT)
+        self.assertIn("能擦边", SYSTEM_PROMPT)
+        # 安全阀：露骨内容不主动展开
+        self.assertIn("不主动展开", SYSTEM_PROMPT)
+
+    def test_persona_is_a_cute_hat_doudou(self) -> None:
+        # 大耳帽兜只是它的样子和脾气来源，这里它就叫小毛豆，不用游戏原名
+        self.assertIn("大耳帽兜", SYSTEM_PROMPT)
+        self.assertIn("就叫小毛豆", SYSTEM_PROMPT)
+        self.assertIn("不用游戏原名", SYSTEM_PROMPT)
+        self.assertIn("可爱、调皮", SYSTEM_PROMPT)
 
 
 class GroupPrefPromptTests(unittest.TestCase):

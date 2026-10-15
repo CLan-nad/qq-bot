@@ -72,14 +72,14 @@ class SystemPromptRuleTests(unittest.TestCase):
         # 17 条压到 7 条：4 条「别翻旧账」并成规则 4，3 条反幻觉补丁并成规则 7。
         # 这条断言是防止 prompt 再往回长——规则越多，人设越被淹没。
         self.assertEqual(numbers[-1], 7)
-        self.assertLessEqual(len(SYSTEM_PROMPT), 1250)
+        self.assertLessEqual(len(SYSTEM_PROMPT), 1400)
 
     def test_persona_still_outranks_the_bug_patches(self) -> None:
         # 压缩的目的：让「性格」在 prompt 里的分量压过历史补丁
         head = SYSTEM_PROMPT.index("你的性格")
         self.assertLess(head, SYSTEM_PROMPT.index("原则："))
         self.assertLess(head, SYSTEM_PROMPT.index("本轮实际执行的操作"))
-        for phrase in ("幽默、轻松、亲切", "不像客服，也不像助理", "只输出将直接发送到 QQ 群的正文"):
+        for phrase in ("可爱、调皮", "不像客服，也不像助理", "只输出将直接发送到 QQ 群的正文"):
             self.assertIn(phrase, SYSTEM_PROMPT)
 
     def test_tool_addendum_picks_up_where_the_main_rules_stop(self) -> None:
