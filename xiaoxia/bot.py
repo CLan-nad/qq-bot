@@ -92,8 +92,13 @@ GROUP_PREFS: dict[str, tuple[str, str, str]] = {
 }
 # QQ 对主动消息的频控错误码前缀，撞上就当天收手。
 RATE_LIMIT_CODE = "40034"
+# 同一条 msg_id 下 msg_seq 重复时报这个码，意思是「这个槽已经被占了」。
+DEDUP_CODE = "40054005"
 ACK_TEXT = "稍等，我查一下～"
 FALLBACK_TEXT = "小毛豆刚刚走神了，稍后再 @ 我一次试试。"
+# 被动回复的重试次数与间隔。ack 不走这套（它只是垫场，发不出去就算了）。
+SEND_ATTEMPTS = 3
+SEND_RETRY_DELAY_SECONDS = 0.4
 
 
 @dataclass(frozen=True)
@@ -777,24 +782,81 @@ class XiaoxiaClient(botpy.Client):
             format_topic(recent, self.settings.max_context_chars),
         )
 
+    @staticmethod
+    def _is_dedup_error(error: BaseException) -> bool:
+        return DEDUP_CODE in str(error)
+
+    async def _send_reply_proactive(
+        self, message: RichGroupMessage, text: str, source: str
+    ) -> bool:
+        """被动回复通道彻底不通时，退回主动消息兜底，至少让人看到一句回复。"""
+        try:
+            await self.api.post_group_message(group_openid=message.group_openid, content=text)
+        except Exception as exc:
+            self._note_rate_limit(message.group_openid, exc)
+            logger.exception("proactive fallback also failed, msg_id=%s", message.id)
+            return False
+        self._remember_bot_reply(message.group_openid, text, f"{source}:FALLBACK")
+        logger.info("group reply delivered via proactive fallback, msg_id=%s", message.id)
+        return True
+
     async def _send_reply(
         self,
         message: RichGroupMessage,
         text: str,
         seq: int,
         source: str,
+        *,
+        attempts: int = SEND_ATTEMPTS,
+        proactive_fallback: bool = True,
     ) -> bool:
-        """按 msg_seq 回复群消息。同一条 msg_id 下 seq 不能重复，所以 ack 用 1、正文用 2。"""
-        try:
-            await self.api.post_group_message(
-                group_openid=message.group_openid,
-                msg_id=message.id,
-                msg_seq=seq,
-                content=text,
-            )
-        except Exception:
-            logger.exception("failed to send group reply, seq=%s", seq)
-            return False
+        """按 msg_seq 回复群消息。同一条 msg_id 下 seq 不能重复，所以 ack 用 1、正文用 2。
+
+        发送失败不再直接放弃。线上出现过一次 40054005「消息被去重」：ack 那次请求
+        其实已经送到、只是本地报了异常，于是 acked=False、正文仍用 seq=1，
+        被 QQ 当成重复请求拒掉——用户看到的就是「@ 了没反应」。现在的处理是：
+        - 第一次就被判去重：这个 seq 槽被自己刚发的 ack 占了，换成 seq+1 重发正文；
+        - 重试时才被判去重：说明上一次其实已经发出去了，直接算投递成功，不再重复发；
+        - 其它错误按原 seq 重试，最多 attempts 次；
+        - 全部失败退回主动消息通道兜底（ack 不兜底，它发不出去无所谓）。
+        """
+        current = seq
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                await self.api.post_group_message(
+                    group_openid=message.group_openid,
+                    msg_id=message.id,
+                    msg_seq=current,
+                    content=text,
+                )
+            except Exception as exc:
+                if self._is_dedup_error(exc):
+                    if attempt > 1:
+                        logger.info("group reply already delivered, seq=%s", current)
+                        break
+                    logger.warning(
+                        "msg_seq %s already taken (ack landed?), resending as %s",
+                        current,
+                        current + 1,
+                    )
+                    current += 1
+                    continue
+                logger.warning(
+                    "failed to send group reply, attempt %s/%s, seq=%s: %s",
+                    attempt,
+                    max(1, attempts),
+                    current,
+                    exc,
+                )
+                if attempt < max(1, attempts):
+                    await asyncio.sleep(SEND_RETRY_DELAY_SECONDS)
+                    continue
+                if proactive_fallback:
+                    return await self._send_reply_proactive(message, text, source)
+                logger.error("giving up on group reply, seq=%s", current)
+                return False
+            self._remember_bot_reply(message.group_openid, text, source)
+            return True
         self._remember_bot_reply(message.group_openid, text, source)
         return True
 
@@ -831,7 +893,15 @@ class XiaoxiaClient(botpy.Client):
         if action in ACK_ACTIONS and timeout > 0:
             done, _pending = await asyncio.wait({task}, timeout=timeout)
             if not done:
-                acked = await self._send_reply(message, ACK_TEXT, 1, f"{source}:ACK")
+                # ack 只是垫场：发不出去就别重试也别兜底，把 seq=1 让给正文。
+                acked = await self._send_reply(
+                    message,
+                    ACK_TEXT,
+                    1,
+                    f"{source}:ACK",
+                    attempts=1,
+                    proactive_fallback=False,
+                )
                 if acked:
                     seq = 2
         try:
