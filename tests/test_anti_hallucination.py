@@ -10,7 +10,7 @@
 - 18:19:55 被问“你联网了吗”，答“没联网，我这边是纯本地模式”，
   18:22:25 下一轮又改口“联网了呀”。
 
-规则写在 SYSTEM_PROMPT 15/16/17，光靠自觉不够：模型看不到自己这轮干了什么，
+规则写在 SYSTEM_PROMPT 第 7 条（原来是 15/16/17 三条，压缩后合并），光靠自觉不够：模型看不到自己这轮干了什么，
 所以 generate_reply 每轮都把「本轮实际执行的操作」写进 user_prompt，没执行就明写“（无）”。
 """
 from __future__ import annotations
@@ -51,25 +51,36 @@ def _llm() -> XiaoxiaLLM:
 
 class SystemPromptRuleTests(unittest.TestCase):
     def test_claiming_success_requires_evidence(self) -> None:
-        self.assertIn("15. 说“已经办好”必须有凭据", SYSTEM_PROMPT)
+        self.assertIn("说“已经办好”必须有凭据", SYSTEM_PROMPT)
         for phrase in ("而且结果里明确写了成功", "就直说这次没做成", "绝不许先答应下来再说"):
             self.assertIn(phrase, SYSTEM_PROMPT)
 
     def test_no_invented_internals_and_no_blame_shifting(self) -> None:
-        self.assertIn("16. 不要猜、也不要编自己的内部实现", SYSTEM_PROMPT)
+        self.assertIn("不要猜、也不要编自己的内部实现", SYSTEM_PROMPT)
         # 这三句都是线上原话，必须被点名禁掉
         for phrase in ("后台没同步", "指令没匹配上", "结果被别的信息覆盖了", "后台的锅"):
             self.assertIn(phrase, SYSTEM_PROMPT)
 
     def test_capabilities_are_not_made_up(self) -> None:
-        self.assertIn("17. 你的能力以这一轮实际能用的功能为准", SYSTEM_PROMPT)
+        self.assertIn("你的能力也以这一轮实际能用的功能为准", SYSTEM_PROMPT)
         for phrase in ("纯本地模式", "没有联网权限", "不要下一轮又改口", "本轮实际执行的操作"):
             self.assertIn(phrase, SYSTEM_PROMPT)
 
     def test_rule_numbers_are_contiguous(self) -> None:
         numbers = _rule_numbers(SYSTEM_PROMPT)
         self.assertEqual(numbers, list(range(1, len(numbers) + 1)))
-        self.assertGreaterEqual(numbers[-1], 17)
+        # 17 条压到 7 条：4 条「别翻旧账」并成规则 4，3 条反幻觉补丁并成规则 7。
+        # 这条断言是防止 prompt 再往回长——规则越多，人设越被淹没。
+        self.assertEqual(numbers[-1], 7)
+        self.assertLessEqual(len(SYSTEM_PROMPT), 1250)
+
+    def test_persona_still_outranks_the_bug_patches(self) -> None:
+        # 压缩的目的：让「性格」在 prompt 里的分量压过历史补丁
+        head = SYSTEM_PROMPT.index("你的性格")
+        self.assertLess(head, SYSTEM_PROMPT.index("原则："))
+        self.assertLess(head, SYSTEM_PROMPT.index("本轮实际执行的操作"))
+        for phrase in ("幽默、轻松、亲切", "不像客服，也不像助理", "只输出将直接发送到 QQ 群的正文"):
+            self.assertIn(phrase, SYSTEM_PROMPT)
 
     def test_tool_addendum_picks_up_where_the_main_rules_stop(self) -> None:
         main = _rule_numbers(SYSTEM_PROMPT)

@@ -7,7 +7,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -34,7 +34,7 @@ from .images import (
     normalize_face_tags,
     to_data_url,
 )
-from .llm import XiaoxiaLLM
+from .llm import ACTION_REPLY_ADDENDUM, XiaoxiaLLM
 from .scheduling import advance_task, parse_datetime, resolve_next_run, schedule_label
 from .store import ChatStore, MemoryCard, ScheduledTask, StoredMessage
 from .topics import format_topic, split_topic
@@ -63,6 +63,26 @@ class RichGroupMessage(GroupMessage):
         self.raw = data
 
 
+class ActionResult(str):
+    """本地操作的模板回复，顺带记两件事：能不能交给模型润色、哪些事实必须原样保留。
+
+    继承 str 的全部意义在于：所有按字符串断言的调用方（包括测试）一点感觉都没有，
+    没标 persona 的地方行为和以前完全一样。
+    """
+
+    def __new__(
+        cls,
+        text: str,
+        *,
+        persona: bool = False,
+        facts: Iterable[str] = (),
+    ) -> "ActionResult":
+        self = super().__new__(cls, text)
+        self.persona = persona
+        self.facts = tuple(str(fact).strip() for fact in facts if str(fact).strip())
+        return self
+
+
 ROLE_LABELS = {
     "owner": "群主",
     "admin": "管理员",
@@ -83,6 +103,41 @@ TOOL_REPLY_MAX_CHARS: dict[str, int] = {
     "math_eval": 120,
     "shell_run": 600,
 }
+
+# 这几个本地操作以前直接回模板字符串，SYSTEM_PROMPT 里那套人设一个 token 都没参与，
+# 于是「以后叫我主人」换来一句冷冰冰的「好，以后就叫CL「主人」。」——死板的根源在这。
+# 现在把模板当「事实凭据」交给模型用人设说一遍。只有成功路径这么做：报错和
+# 「匹配到多条，请说编号」这类仍然原样返回，那些话必须精确可预测，
+# 模型一活泼就没人知道该报哪个编号了。
+PERSONA_TOOL_LABELS: dict[str, str] = {
+    "memory_remember": "记住信息",
+    "memory_pin": "把记忆标成永久置顶",
+    "memory_unpin": "取消记忆的永久置顶",
+    "address_set": "登记称呼",
+}
+# 就是一句确认话，给太长反而啰嗦。
+PERSONA_REPLY_MAX_CHARS = 60
+
+# 「记住了 2 条」被模型说成「这两条我都记牢啦」是最地道的中文。只按阿拉伯数字比对，
+# 会把这种说法判成「丢了事实」而退回模板，那这个功能在最常用的场景下等于白做。
+# 所以纯数字的事实同时接受中文写法。方向是放宽而不是收紧：万一「三」出现在
+# 别的地方（周三），也只是多放过一次，不会把对的回复打成错的。
+_CN_DIGIT_VARIANTS: dict[str, tuple[str, ...]] = {
+    "1": ("一",),
+    "2": ("二", "两"),
+    "3": ("三",),
+    "4": ("四",),
+    "5": ("五",),
+    "6": ("六",),
+    "7": ("七",),
+    "8": ("八",),
+    "9": ("九",),
+    "10": ("十",),
+}
+
+
+def _fact_variants(fact: str) -> tuple[str, ...]:
+    return (fact, *_CN_DIGIT_VARIANTS.get(fact, ()))
 
 # 没被 @ 时的主动关心，这几项可以在群里直接 @ 我改，优先级高于 .env。
 # (中文名, 类型, 对应的默认配置字段)
@@ -1017,17 +1072,38 @@ class XiaoxiaClient(botpy.Client):
         if action in {"task_list", "task_cancel", "task_pause", "task_resume", "task_skip"}:
             return self._handle_task_action(intent, message)
         if action == "memory_remember":
-            return self._handle_memory_remember(intent, message, identity)
+            return await self._persona_or_raw(
+                action,
+                self._handle_memory_remember(intent, message, identity),
+                request,
+                message,
+                identity,
+                topic,
+            )
         if action == "memory_list":
             return self._handle_memory_list(intent, message)
         if action in {"memory_pin", "memory_unpin"}:
-            return self._handle_memory_pin(intent, message, pinned=action == "memory_pin")
+            return await self._persona_or_raw(
+                action,
+                self._handle_memory_pin(intent, message, pinned=action == "memory_pin"),
+                request,
+                message,
+                identity,
+                topic,
+            )
         if action == "memory_forget":
             return self._handle_memory_forget(intent, message)
         if action == "memory_alias":
             return self._handle_memory_alias(intent, message)
         if action == "address_set":
-            return self._handle_address_set(intent, message, identity)
+            return await self._persona_or_raw(
+                action,
+                self._handle_address_set(intent, message, identity),
+                request,
+                message,
+                identity,
+                topic,
+            )
         if action == "calendar_query":
             return self._handle_calendar_query(intent)
         if action == "bot_pref":
@@ -1067,6 +1143,56 @@ class XiaoxiaClient(botpy.Client):
             memory_context=persona["memory_context"],
             identity_context=persona["identity_context"],
         )
+
+    async def _persona_or_raw(
+        self,
+        action: str,
+        result: str,
+        request: str,
+        message: RichGroupMessage,
+        identity: IdentityContext,
+        topic: str,
+    ) -> str:
+        """本地操作办成后，把模板文案交给模型用小毛豆的语气说一遍。
+
+        模板是事实凭据，模型只许改语气：facts 里的条数、编号、人名、称呼、置顶方向
+        缺一个就退回模板。最怕的就是为了活泼把「记住了 3 条」说成「都记下啦」，
+        数字一丢，用户根本没法核对到底存进去几条。
+        """
+        if not isinstance(result, ActionResult) or not result.persona:
+            return result
+        template = str(result)
+        try:
+            reply = await self.llm.generate_tool_reply(
+                request=request,
+                tool_name=PERSONA_TOOL_LABELS.get(action, action),
+                tool_output=template,
+                identity_context=identity.prompt(),
+                memory_context=self._memory_context(message.group_openid),
+                topic_context=topic,
+                max_chars=PERSONA_REPLY_MAX_CHARS,
+                addendum=ACTION_REPLY_ADDENDUM,
+            )
+        except Exception as exc:
+            # 一句确认话而已，模型挂了不该让整轮对话失败。
+            logger.warning("persona reply failed for %s: %s", action, exc)
+            return template
+        reply = (reply or "").strip()
+        if not reply:
+            return template
+        missing = [
+            fact
+            for fact in result.facts
+            if not any(variant in reply for variant in _fact_variants(fact))
+        ]
+        if missing:
+            logger.info(
+                "persona reply for %s dropped facts %s, fell back to template",
+                action,
+                missing,
+            )
+            return template
+        return reply
 
     def _handle_task_create(self, intent: dict, message: RichGroupMessage) -> str:
         schedule_type = str(intent.get("schedule_type") or "").strip()
@@ -1335,9 +1461,20 @@ class XiaoxiaClient(botpy.Client):
         if not saved:
             return "这条信息比较敏感，我不保存。"
         tail = "（已置顶★）" if pinned_saved and pinned_saved == saved else ""
+        # 只存进一条时不强制模型报数字，否则「记住啦～」这种最自然的说法会被判成丢事实、
+        # 永远退回模板——那等于这个功能在最常用的场景下白做。
+        facts = [] if saved == 1 and not skipped else [str(saved)]
+        if skipped:
+            facts.append(str(skipped))
+        if tail:
+            facts.append("置顶")
         if saved and not skipped:
-            return f"记住了，共 {saved} 条。{tail}"
-        return f"记住了 {saved} 条，另有 {skipped} 条涉及敏感信息，我没有保存。{tail}"
+            return ActionResult(f"记住了，共 {saved} 条。{tail}", persona=True, facts=facts)
+        return ActionResult(
+            f"记住了 {saved} 条，另有 {skipped} 条涉及敏感信息，我没有保存。{tail}",
+            persona=True,
+            facts=facts,
+        )
 
     def _handle_memory_list(self, intent: dict, message: RichGroupMessage) -> str:
         pinned_filter: bool | None = None
@@ -1385,9 +1522,20 @@ class XiaoxiaClient(botpy.Client):
         )
         if not changed:
             return "这些记忆刚刚变动过，麻烦再说一次。"
+        # 方向词是硬事实：pin 和 unpin 的模板只差两个字，模型一旦说反，
+        # 用户会以为标成永久了其实没有，所以「置顶 / 取消置顶」必须原样出现在回复里。
+        direction = "置顶" if pinned else "取消置顶"
         if len(cards) == 1:
-            return f"已{verb}记忆 {cards[0].id}：{cards[0].content}"
-        return f"已{verb}{'全部 ' if is_all else ''}{changed} 条记忆。"
+            return ActionResult(
+                f"已{verb}记忆 {cards[0].id}：{cards[0].content}",
+                persona=True,
+                facts=(direction, str(cards[0].id)),
+            )
+        return ActionResult(
+            f"已{verb}{'全部 ' if is_all else ''}{changed} 条记忆。",
+            persona=True,
+            facts=(direction, str(changed)),
+        )
 
     def _handle_memory_alias(self, intent: dict, message: RichGroupMessage) -> str:
         """统一某个人在记忆里的叫法。
@@ -1465,7 +1613,7 @@ class XiaoxiaClient(botpy.Client):
         if op == "clear":
             if not self.store.clear_person_address(group_openid, person):
                 return f"「{person}」本来就没定过称呼。"
-            return f"好，以后就直接叫{person}了。"
+            return ActionResult(f"好，以后就直接叫{person}了。", persona=True, facts=(person,))
 
         address = self._optional_str(intent.get("address"))
         if not address:
@@ -1473,7 +1621,10 @@ class XiaoxiaClient(botpy.Client):
         name = self.store.set_person_address(group_openid, person, address)
         if not name:
             return "这个称呼我没存下来，再说一次试试。"
-        return f"好，以后就叫{name}「{address.strip('「」“”')}」。"
+        clean = address.strip("「」“”")
+        # 只锁称呼本身，不锁显示名。模型很自然会说「好嘞主人～」而不再重复一遍「CL」，
+        # 逼它带上显示名，这句确认话就继续生硬——那等于白改。
+        return ActionResult(f"好，以后就叫{name}「{clean}」。", persona=True, facts=(clean,))
 
     def _handle_calendar_query(self, intent: dict) -> str:
         name = self._optional_str(intent.get("query"))
