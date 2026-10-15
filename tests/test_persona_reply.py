@@ -15,7 +15,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from xiaoxia.bot import ActionResult, IdentityContext, XiaoxiaClient
+from xiaoxia.bot import (
+    ActionResult,
+    IdentityContext,
+    XiaoxiaClient,
+    _contradicts_success,
+)
 from xiaoxia.llm import ACTION_REPLY_ADDENDUM
 from xiaoxia.store import ChatStore, StoredMessage
 
@@ -182,6 +187,45 @@ class PersonaOrRawTests(unittest.TestCase):
                 llm,
             ),
             template,
+        )
+
+    def test_reply_that_contradicts_the_result_falls_back(self) -> None:
+        # 真实模型跑出来的翻车样本：模板是「已忘记记忆 2：不吃香菜」，
+        # 模型回「第一条记忆没删成，实际删掉的是第 2 条」。
+        # 「删掉」「2」都在，子串校验照样放行，只有语义闸拦得住。
+        llm = FakeLLM(reply="第一条记忆没删成，实际删掉的是第 2 条。")
+        template = "已忘记记忆 2：不吃香菜"
+        self.assertEqual(
+            self._run(
+                "memory_forget",
+                ActionResult(template, persona=True, facts=("忘记", "2")),
+                llm,
+            ),
+            template,
+        )
+
+    def test_reply_that_asks_a_followup_falls_back(self) -> None:
+        # 事已经办完了，这时候反问「是不是这条」只会让人以为没办成
+        llm = FakeLLM(reply="记好啦，要不要顺便把不吃香菜也删掉？")
+        template = "已忘记记忆 2：不吃香菜"
+        self.assertEqual(
+            self._run(
+                "memory_forget",
+                ActionResult(template, persona=True, facts=("忘记", "2")),
+                llm,
+            ),
+            template,
+        )
+
+    def test_positive_wording_containing_mei_is_not_killed(self) -> None:
+        # 「一条都没漏」是好话，不能因为有个「没」就退回模板
+        self.assertFalse(_contradicts_success("好嘞，两条都记下啦，一条都没漏～"))
+        llm = FakeLLM(reply="好嘞，两条都记下啦，一条都没漏～")
+        self.assertEqual(
+            self._run(
+                "memory_remember", ActionResult("记住了，共 2 条。", persona=True, facts=("2",)), llm
+            ),
+            "好嘞，两条都记下啦，一条都没漏～",
         )
 
     def test_model_error_falls_back_to_the_template(self) -> None:

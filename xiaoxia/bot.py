@@ -158,6 +158,25 @@ def _fact_variants(fact: str) -> tuple[str, ...]:
     return (fact, *_CN_DIGIT_VARIANTS.get(fact, ()), *_DIRECTION_VARIANTS.get(fact, ()))
 
 
+# 真实模型跑出来的翻车样本：模板是「已忘记记忆 2：不吃香菜」，模型回
+# 「第一条记忆没删成，实际删掉的是第 2 条」。子串校验只看事实词在不在，
+# 「删掉」「2」都在，于是这句话顺利通过——可它把办成的事说成了没办成。
+# 语义反转比死板严重得多，所以再兜一道。只列真出现过的、语义明确的组合，
+# 不列单独的「没」：「一条都没漏」是好话，不该被误杀。
+_FAILURE_PHRASES = (
+    "没办成", "办不成", "没做成", "做不成", "没删成", "没存上", "没记住",
+    "没成功", "没设成", "没建成", "没标成", "没定上", "没改过来", "失败了",
+)
+
+
+def _contradicts_success(reply: str) -> bool:
+    """确认话里出现「其实没办成」或者反过来追问用户，都算跟执行结果打架。"""
+    if any(phrase in reply for phrase in _FAILURE_PHRASES):
+        return True
+    # 事情已经办完了，这时候反问「是不是这条」只会让人以为没办成
+    return reply.endswith(("？", "?"))
+
+
 def _persona_max_chars(template: str) -> int:
     """确认话默认 60 字够了；但带预热任务的模板本身就是两行，按 60 截断必然丢事实、
     必然退回模板，那这次模型调用等于白花。模板有多长就给多长，再留 30 字换语气。"""
@@ -1194,6 +1213,11 @@ class XiaoxiaClient(botpy.Client):
             return template
         reply = (reply or "").strip()
         if not reply:
+            return template
+        if _contradicts_success(reply):
+            logger.info(
+                "persona reply for %s contradicted the result, fell back to template", action
+            )
             return template
         missing = [
             fact
