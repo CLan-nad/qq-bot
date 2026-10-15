@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
@@ -145,6 +146,19 @@ _MEMORY_COLUMNS = (
     "id, kind, person, content, source_message_id, pinned, scope, expires_at, source_row_id"
 )
 
+# 记忆卡注入上下文的字符预算。实测 92 张卡正文一共才 2860 字，所以这个预算的作用
+# 是「正常情况下全塞进去，异常膨胀了才裁」，不是靠它省 token。
+MEMORY_PROMPT_MAX_CHARS = 6000
+MEMORY_PROMPT_MAX_CARDS = 160
+
+# 预算装不下时先丢哪一类：流水账（哪天抓了哪只宠物）最先丢，
+# 行为规则和身份类的卡最后才丢——被丢掉的那些正是模型天天违反的规则。
+MEMORY_KIND_PRIORITY = ("preference", "agreement", "relationship", "fact", "event")
+MEMORY_EPISODIC_KINDS = frozenset({"fact", "event"})
+
+# 判断「同一句话被抽了两遍」时忽略的标点空白。
+_MEMORY_NOISE = re.compile(r"[\s，。、；：,.;:!！?？~～“”\"'（）()【】\[\]《》—\-]+")
+
 
 class ChatStore:
     def __init__(self, db_path: str) -> None:
@@ -241,6 +255,14 @@ class ChatStore:
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (group_openid, key)
+                );
+
+                CREATE TABLE IF NOT EXISTS person_aliases (
+                    group_openid TEXT NOT NULL,
+                    alias TEXT NOT NULL,
+                    canonical TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (group_openid, alias)
                 );
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -745,6 +767,9 @@ class ChatStore:
         content = content.strip()
         if not content:
             return None
+        # 同一个人被记成「罗晓霞 / 二十四桥明月夜 / 小虾」三种写法时，模型会当成三个人，
+        # 称呼也就跟着乱。群里统一过叫法之后，新卡的 person 在写库前就归一。
+        person = self.canonical_person(group_openid, person)
         with self._conn:
             self._conn.execute(
                 """
@@ -818,43 +843,91 @@ class ChatStore:
         group_openid: str,
         *,
         now_iso: str = "",
-        total: int = 40,
-        per_kind: int = 6,
-        event_cards: int = 5,
+        max_chars: int = MEMORY_PROMPT_MAX_CHARS,
+        total: int = MEMORY_PROMPT_MAX_CARDS,
     ) -> list[MemoryCard]:
         """挑出要塞进模型上下文的记忆卡。
 
-        以前的做法是 memory_cards(limit=30)，而它 ORDER BY id DESC LIMIT 30，
-        于是最早的卡片永远进不了上下文（真名、纪念日、称呼、人设全在最前面那批里）。
-        现在：置顶全入，其余按 kind 分配额，同一个 kind 内从最旧和最新两端交替取，
-        最后按 id 正序输出，保证两端都不会被排序方向挤掉。
+        两个历史坑：
+        1. 最早是 memory_cards(limit=30)，而它 ORDER BY id DESC LIMIT 30，于是最早的
+           卡片（真名、纪念日、称呼、人设）永远进不了上下文。
+        2. 改成按 kind 配额之后，preference 只给 6 条，可群里实际攒了 25 条——被挤掉的
+           恰好是「别分点」「别引 4399」「讲话俏皮」这些行为规则，于是模型天天违反。
+        所以这里不再按 kind 配额，改成按字符预算装：置顶的全进，其余按「规则优先、
+        流水账靠后」排序依次装，装满为止。最后按 id 正序输出。
         """
         live = self.live_memory_cards(group_openid, now_iso)
         if not live:
             return []
 
-        picked = [card for card in live if card.pinned]
-        pinned_ids = {card.id for card in picked}
-        buckets: dict[str, list[MemoryCard]] = {}
-        for card in live:
-            if card.id not in pinned_ids:
-                buckets.setdefault(card.kind, []).append(card)
+        cards = self._dedupe_memory_cards(live)
+        pinned = [card for card in cards if card.pinned]
+        rest = sorted(
+            (card for card in cards if not card.pinned),
+            key=self._memory_prompt_rank,
+        )
 
-        for kind, cards in buckets.items():
-            quota = event_cards if kind == "event" else per_kind
-            left, right = 0, len(cards) - 1
-            take_left = True
-            while quota > 0 and left <= right and len(picked) < total:
-                picked.append(cards[left] if take_left else cards[right])
-                if take_left:
-                    left += 1
-                else:
-                    right -= 1
-                take_left = not take_left
-                quota -= 1
+        picked: list[MemoryCard] = []
+        used = 0
+        for card in pinned + rest:
+            if len(picked) >= total:
+                break
+            cost = self._memory_card_cost(card)
+            if used + cost > max_chars:
+                # 这张太长了就跳过，继续试后面更短的，把预算填满而不是直接截断。
+                continue
+            picked.append(card)
+            used += cost
 
         picked.sort(key=lambda card: card.id)
-        return picked[:total]
+        return picked
+
+    @staticmethod
+    def _memory_card_cost(card: MemoryCard) -> int:
+        # format_memory_cards 渲染成 "[置顶★][kind] person: content"，按这个长度估。
+        return len(card.content) + len(card.person) + len(card.kind) + 12
+
+    @staticmethod
+    def _memory_prompt_rank(card: MemoryCard) -> tuple[int, int]:
+        kind = card.kind if card.kind in MEMORY_KIND_PRIORITY else "fact"
+        priority = MEMORY_KIND_PRIORITY.index(kind)
+        # 流水账看新的（越近越相关），规则和身份看老的（那批是人设地基）。
+        return (priority, -card.id if kind in MEMORY_EPISODIC_KINDS else card.id)
+
+    @staticmethod
+    def _dedupe_memory_cards(cards: list[MemoryCard]) -> list[MemoryCard]:
+        """同一句话被抽取器存了好几遍时只留一张，置顶的那张优先。"""
+        chosen: dict[tuple[str, str], MemoryCard] = {}
+        for card in cards:
+            key = (card.person, _MEMORY_NOISE.sub("", card.content).lower())
+            if not key[1]:
+                continue
+            previous = chosen.get(key)
+            if previous is None or (card.pinned and not previous.pinned):
+                chosen[key] = card
+        return list(chosen.values())
+
+    def existing_memory_lines(
+        self,
+        group_openid: str,
+        *,
+        now_iso: str = "",
+        max_chars: int = MEMORY_PROMPT_MAX_CHARS,
+    ) -> list[str]:
+        """给记忆抽取器看的「已经记住了什么」清单，用来避免重复抽取。
+
+        以前只传置顶卡，而置顶卡常年是 0 张，等于完全没做去重，于是同一件事被抽了
+        三四遍（「不要分点」「不要引 4399」各存了两条），白占注入预算。
+        """
+        lines: list[str] = []
+        total = 0
+        for card in self.memory_cards_for_prompt(group_openid, now_iso=now_iso):
+            line = f"- [{card.kind}/{card.person}] {card.content}"
+            if total + len(line) + 1 > max_chars:
+                break
+            lines.append(line)
+            total += len(line) + 1
+        return lines
 
     def memory_cards_page(
         self,
@@ -897,6 +970,68 @@ class ChatStore:
             (group_openid, limit),
         ).fetchall()
         return [row["content"] for row in rows]
+
+    # ---------- 称呼归一：同一个人在记忆里只留一种写法 ----------
+
+    def person_aliases(self, group_openid: str) -> dict[str, str]:
+        rows = self._conn.execute(
+            "SELECT alias, canonical FROM person_aliases WHERE group_openid = ? ORDER BY alias",
+            (group_openid,),
+        ).fetchall()
+        return {str(row["alias"]): str(row["canonical"]) for row in rows}
+
+    def canonical_person(self, group_openid: str, person: str | None) -> str:
+        """把一个叫法翻译成群里统一过的叫法；没登记过就原样返回。"""
+        name = (person or "").strip()
+        if not name:
+            return name
+        aliases = self.person_aliases(group_openid)
+        seen: set[str] = set()
+        while name in aliases and name not in seen:
+            seen.add(name)
+            name = (aliases[name] or "").strip() or name
+        return name
+
+    def set_person_alias(self, group_openid: str, alias: str, canonical: str) -> int:
+        """登记 alias→canonical，并把已有记忆卡里的 person 一起改过来。返回改写条数。"""
+        alias = (alias or "").strip()
+        canonical = self.canonical_person(group_openid, canonical)
+        if not alias or not canonical or alias == canonical:
+            return 0
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO person_aliases (group_openid, alias, canonical)
+                VALUES (?, ?, ?)
+                ON CONFLICT(group_openid, alias) DO UPDATE SET
+                    canonical = excluded.canonical,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (group_openid, alias, canonical),
+            )
+            # 链条压平：原来 X→alias 的登记直接指到最终叫法，免得以后绕圈。
+            self._conn.execute(
+                "UPDATE person_aliases SET canonical = ? WHERE group_openid = ? AND canonical = ?",
+                (canonical, group_openid, alias),
+            )
+            cursor = self._conn.execute(
+                "UPDATE memory_cards SET person = ? WHERE group_openid = ? AND person = ?",
+                (canonical, group_openid, alias),
+            )
+        rewritten = int(cursor.rowcount or 0)
+        if rewritten:
+            logger.info(
+                "person alias %s -> %s rewrote %s memory cards", alias, canonical, rewritten
+            )
+        return rewritten
+
+    def clear_person_alias(self, group_openid: str, alias: str) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM person_aliases WHERE group_openid = ? AND alias = ?",
+                (group_openid, (alias or "").strip()),
+            )
+        return cursor.rowcount > 0
 
     def purge_expired_memories(self, cutoff_iso: str) -> int:
         """删掉过期很久的临时记忆（cutoff 之前就该失效的那些）。"""

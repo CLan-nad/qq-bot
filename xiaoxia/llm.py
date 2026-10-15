@@ -50,6 +50,7 @@ INTENT_SYSTEM_PROMPT = """你是小毛豆的意图解析器。你只输出一个
 - memory_unpin: 取消某条记忆的置顶
 - memory_search: 查询或搜索历史聊天/记忆
 - memory_forget: 删除某条记忆
+- memory_alias: 把同一个人的几种叫法统一成一个
 - calendar_query: 问某个节日是几号、最近有什么节日
 - bot_pref: 查看或修改这个群的偏好设置（要不要主动关心、多久一次等）
 - web_search: 需要联网搜索资料
@@ -81,6 +82,12 @@ memory_remember 输出 memories 数组，每项包含 kind、person、content。
 memory_list 输出 page（页码，从 1 开始）；用户说“第二页”就填 2，没说就留空。
 memory_search 输出 query，用适合检索的短关键词。
 memory_forget、memory_pin、memory_unpin 输出 memory_id 或 match。
+memory_id 可以是数组，一次说好几个编号时全部填进去；说“全部/所有”时留空并加 "all": true。
+memory_alias 输出 op（set/clear/show）、alias、canonical：
+- set：把 alias 统一成 canonical。alias 可以是字符串，也可以是数组，一次统一好几个叫法。
+  例如“以后把「A」和「B」都叫「C」”= op=set、alias=["A","B"]、canonical="C"。
+- clear：取消某个叫法的统一，alias 必填，canonical 留空。
+- show：只是问“现在叫法怎么统一的”，alias 和 canonical 都留空。
 calendar_query 输出 query（节日名，如“中秋”）；只问“最近有什么节日”时 query 留空。
 bot_pref 输出 op（show 或 set）、key、value。能改的 key 只有这四个：
 - care_enabled：要不要在你们没 @ 我的时候主动关心情绪，value 用 true/false
@@ -112,7 +119,8 @@ MEMORY_SYSTEM_PROMPT = """你是私人情侣群聊的长期记忆整理器。只
 每条聊天前面的显示名代表发送者。整理“我/她/他/对象”时，必须结合该条消息的发送者判断。
 memories 中的 person 使用明确显示名，不要只写“我/她/他”。
 不要记录密码、身份证号、银行卡号、住址门牌、医疗隐私或其他高风险敏感信息。
-已经在前面的置顶清单里出现过的内容，绝对不要再输出一次。
+已经在前面「现有记忆」清单里出现过的内容，绝对不要再输出一次，也不要换个说法重复输出。
+同一个人只允许有一种叫法：清单里 person 已经用过的写法必须原样沿用，不要改用真名、昵称或群显示名的另一种。
 没有长期价值的信息不要放入 memories。memories 每项字段：kind、person、content。
 kind 可为 preference、fact、agreement、event、relationship。"""
 
@@ -454,10 +462,17 @@ class XiaoxiaLLM:
         )
         return content[: self.settings.reply_max_chars]
 
-    async def process_memory_batch(self, message_context: str, pinned: list[str] | None = None) -> dict:
-        pinned_lines = "\n".join(f"- {item}" for item in (pinned or [])) or "（无）"
-        user_prompt = f"""已经置顶记住的事实（不要重复输出这些）：
-{pinned_lines}
+    async def process_memory_batch(
+        self, message_context: str, existing: list[str] | None = None
+    ) -> dict:
+        """把这批聊天记录压成摘要 + 长期记忆。
+
+        existing 是「已经记住的全部条目」，不只是置顶的那些——早先只传置顶清单，
+        而置顶常年是 0 张，等于没做去重，同一件事被抽了三四遍。
+        """
+        existing_lines = "\n".join(existing or []) or "（暂无）"
+        user_prompt = f"""现有记忆（这些已经记住了，不要重复输出这些，也不要换个说法再输出一遍）：
+{existing_lines}
 
 请整理这批聊天记录：
 {message_context}

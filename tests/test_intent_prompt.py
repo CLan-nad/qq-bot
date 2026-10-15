@@ -58,9 +58,12 @@ class AnniversaryPromptTests(unittest.TestCase):
         self.assertIn("节日表", INTENT_SYSTEM_PROMPT)
 
     def test_memory_actions_are_described(self) -> None:
-        for action in ("memory_pin", "memory_unpin", "calendar_query"):
+        for action in ("memory_pin", "memory_unpin", "memory_alias", "calendar_query"):
             self.assertIn(action, INTENT_SYSTEM_PROMPT)
         for field in ('"pin": true', '"temporary": true', "memory_list 输出 page"):
+            self.assertIn(field, INTENT_SYSTEM_PROMPT)
+        # memory_alias 要说清 op/alias/canonical，且 alias 可为数组一次统一多个
+        for field in ("canonical", 'alias=["A","B"]'):
             self.assertIn(field, INTENT_SYSTEM_PROMPT)
 
     def test_parse_intent_receives_festival_context(self) -> None:
@@ -68,11 +71,12 @@ class AnniversaryPromptTests(unittest.TestCase):
         self.assertIn("festival_context", params)
         self.assertIn("节日表", inspect.getsource(XiaoxiaLLM.parse_intent))
 
-    def test_memory_batch_is_told_not_to_repeat_pinned_facts(self) -> None:
+    def test_memory_batch_is_told_not_to_repeat_existing_facts(self) -> None:
         params = inspect.signature(XiaoxiaLLM.process_memory_batch).parameters
-        self.assertIn("pinned", params)
+        self.assertIn("existing", params)
         self.assertIn("不要重复输出这些", inspect.getsource(XiaoxiaLLM.process_memory_batch))
         self.assertIn("绝对不要再输出一次", MEMORY_SYSTEM_PROMPT)
+        self.assertIn("同一个人只允许有一种叫法", MEMORY_SYSTEM_PROMPT)
         self.assertNotIn("recent_context", params)
 
 

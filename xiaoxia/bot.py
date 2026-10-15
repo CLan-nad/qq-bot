@@ -448,8 +448,13 @@ class XiaoxiaClient(botpy.Client):
                     batch.messages,
                     self.settings.max_context_chars,
                 )
-                pinned = self.store.pinned_memory_contents(group_openid)
-                result = await self.llm.process_memory_batch(message_context, pinned)
+                # 传全部现存记忆做去重，不是只传置顶的——置顶常年是 0 张，
+                # 只传置顶等于没去重，同一件事会被抽好几遍。
+                existing = self.store.existing_memory_lines(
+                    group_openid,
+                    now_iso=self._now().isoformat(timespec="seconds"),
+                )
+                result = await self.llm.process_memory_batch(message_context, existing)
                 summary = str(result.get("summary") or "").strip()
                 raw_memories = result.get("memories")
                 memories = raw_memories if isinstance(raw_memories, list) else []
@@ -489,9 +494,10 @@ class XiaoxiaClient(botpy.Client):
 
     def _memory_context(self, group_openid: str) -> str:
         summaries = self.store.conversation_summaries(group_openid, limit=5)
-        # 注意：这里必须是 memory_cards_for_prompt，按“置顶+分类配额+最旧的优先”挑卡。
-        # 早先用 memory_cards(limit=30) 是 id 倒序，卡片一多，最早那批（真名、纪念日、
-        # 人设）就永远挤不进上下文，小毛豆会突然“不记得”最重要的事。
+        # 注意：这里必须是 memory_cards_for_prompt。早先用 memory_cards(limit=30) 是 id
+        # 倒序，卡片一多，最早那批（真名、纪念日、人设）就永远挤不进上下文；后来改成
+        # 按 kind 配额，preference 只给 6 条，又把「别分点」「讲话俏皮」这些行为规则挤掉了。
+        # 现在按字符预算装，正常情况下全部记忆都进上下文。
         cards = self.store.memory_cards_for_prompt(
             group_openid,
             now_iso=self._now().isoformat(timespec="seconds"),
@@ -847,6 +853,8 @@ class XiaoxiaClient(botpy.Client):
             return self._handle_memory_pin(intent, message, pinned=action == "memory_pin")
         if action == "memory_forget":
             return self._handle_memory_forget(intent, message)
+        if action == "memory_alias":
+            return self._handle_memory_alias(intent, message)
         if action == "calendar_query":
             return self._handle_calendar_query(intent)
         if action == "bot_pref":
@@ -1077,14 +1085,20 @@ class XiaoxiaClient(botpy.Client):
         keywords = ("密码", "身份证", "银行卡", "验证码", "门牌", "住址")
         return any(keyword in content for keyword in keywords)
 
-    @staticmethod
-    def _canonical_person(person: str | None, identity: IdentityContext) -> str:
+    def _canonical_person(
+        self,
+        person: str | None,
+        identity: IdentityContext,
+        group_openid: str,
+    ) -> str:
         value = (person or "").strip()
         if value in {"我", "本人", "自己", "当前用户", "用户", "你"}:
-            return identity.requester.username
-        if value in {"她", "他", "对象", "另一半", "伴侣", "对方", "你的对象"}:
-            return identity.partner.username if identity.partner else "两人"
-        return value or "两人"
+            value = identity.requester.username
+        elif value in {"她", "他", "对象", "另一半", "伴侣", "对方", "你的对象"}:
+            value = identity.partner.username if identity.partner else "两人"
+        value = value or "两人"
+        # 群里统一过叫法就用统一后的那个，别再往库里添第四种写法。
+        return self.store.canonical_person(group_openid, value)
 
     def _handle_memory_remember(
         self,
@@ -1127,6 +1141,7 @@ class XiaoxiaClient(botpy.Client):
                 person=self._canonical_person(
                     self._optional_str(item.get("person")),
                     identity,
+                    message.group_openid,
                 ),
                 content=content,
                 source_message_id=message.id,
@@ -1175,6 +1190,53 @@ class XiaoxiaClient(botpy.Client):
             return "这条记忆刚刚变动过，麻烦再说一次。"
         verb = "置顶，以后不会忘" if pinned else "取消置顶"
         return f"已{verb}记忆 {card.id}：{card.content}"
+
+    def _handle_memory_alias(self, intent: dict, message: RichGroupMessage) -> str:
+        """统一某个人在记忆里的叫法。
+
+        同一个人被记成「罗晓霞 / 二十四桥明月夜 / 小虾」时，模型会当成三个人，
+        称呼跟着乱。这里不写死任何名字，统一成什么全由群里 @ 我下指令决定。
+        """
+        group_openid = message.group_openid
+        op = str(intent.get("op") or "show").strip().lower()
+
+        if op not in {"set", "clear"}:
+            aliases = self.store.person_aliases(group_openid)
+            if not aliases:
+                return (
+                    "还没统一过叫法。想统一就说：以后把「A」和「B」都叫「C」，"
+                    "我会把已经记住的条目一起改过来。"
+                )
+            lines = "\n".join(f"· {alias} → {name}" for alias, name in sorted(aliases.items()))
+            return "现在统一过的叫法：\n" + lines
+
+        raw_alias = intent.get("alias")
+        if raw_alias is None:
+            raw_alias = intent.get("aliases")
+        if isinstance(raw_alias, list):
+            names = [str(item).strip() for item in raw_alias if str(item).strip()]
+        else:
+            text = str(raw_alias or "").strip()
+            names = [text] if text else []
+        if not names:
+            return "要统一哪个叫法？说清楚一点，比如：以后把「A」和「B」都叫「C」。"
+
+        if op == "clear":
+            cleared = [name for name in names if self.store.clear_person_alias(group_openid, name)]
+            if not cleared:
+                return "这几个叫法我本来就没统一过：" + "、".join(names) + "。"
+            return "好，不再统一了：" + "、".join(cleared) + "。已经存下的记忆我没动。"
+
+        canonical = self._optional_str(intent.get("canonical"))
+        if not canonical:
+            return "要统一成哪个叫法？比如：以后把「A」和「B」都叫「C」。"
+        names = [name for name in names if name != canonical]
+        if not names:
+            return f"「{canonical}」就是它自己，不用统一。"
+
+        rewritten = sum(self.store.set_person_alias(group_openid, name, canonical) for name in names)
+        tail = f"，已经记住的 {rewritten} 条也一起改过来了" if rewritten else ""
+        return f"好，以后「{'」「'.join(names)}」都统一叫「{canonical}」{tail}。"
 
     def _handle_calendar_query(self, intent: dict) -> str:
         name = self._optional_str(intent.get("query"))

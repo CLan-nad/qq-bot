@@ -214,6 +214,46 @@ class BotAnniversaryTests(unittest.TestCase):
         self.assertIn("双十一", listing)
         self.assertIn("没查到", self.client._handle_calendar_query({"query": "万圣节不存在"}))
 
+    def test_memory_alias_show_set_clear(self) -> None:
+        # 同一个人被记成「小虾/罗晓霞/二十四桥明月夜」时模型会当成三个人，称呼跟着乱。
+        # memory_alias 统一叫法，且不写死任何名字，统一成什么全由群里 @ 指令决定。
+        reply = self.client._handle_memory_alias({"action": "memory_alias"}, _message())
+        self.assertIn("还没统一过叫法", reply)
+
+        self.store.add_memory_card(
+            group_openid=GROUP, kind="fact", person="小虾", content="小虾爱吃辣"
+        )
+        reply = self.client._handle_memory_alias(
+            {
+                "action": "memory_alias",
+                "op": "set",
+                "alias": ["小虾", "罗晓霞"],
+                "canonical": "二十四桥明月夜",
+            },
+            _message(),
+        )
+        self.assertIn("都统一叫", reply)
+        self.assertIn("二十四桥明月夜", reply)
+        self.assertEqual(
+            [c.person for c in self.store.memory_cards(GROUP) if c.content == "小虾爱吃辣"],
+            ["二十四桥明月夜"],
+        )
+
+        reply = self.client._handle_memory_alias({"action": "memory_alias", "op": "show"}, _message())
+        self.assertIn("小虾 → 二十四桥明月夜", reply)
+
+        reply = self.client._handle_memory_alias(
+            {"action": "memory_alias", "op": "clear", "alias": "小虾"}, _message()
+        )
+        self.assertIn("不再统一了", reply)
+        self.assertEqual(self.store.canonical_person(GROUP, "小虾"), "小虾")
+
+    def test_memory_alias_needs_canonical(self) -> None:
+        reply = self.client._handle_memory_alias(
+            {"action": "memory_alias", "op": "set", "alias": "小虾"}, _message()
+        )
+        self.assertIn("要统一成哪个叫法", reply)
+
 
 if __name__ == "__main__":
     unittest.main()
