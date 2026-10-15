@@ -69,9 +69,11 @@ ROLE_LABELS = {
     "member": "成员",
 }
 
-# 这几类动作要调外部服务，通常要几秒到十几秒，先应一句「我查一下」比让人干等好。
+# 这几类动作要调外部服务，通常要几秒到十几秒，先应一句比让人干等好。
+# chat 也在里面：它是占比最高的一类，带图或模型排队时同样会卡十几秒，
+# 而 ack 只在超过 ack_after_seconds 才发，快的时候一条消息都不会多。
 ACK_ACTIONS = frozenset(
-    {"web_search", "web_fetch", "document_read", "shell_run", "memory_search"}
+    {"chat", "web_search", "web_fetch", "document_read", "shell_run", "memory_search"}
 )
 TASK_SCHEDULE_TYPES = frozenset({"once", "daily", "weekly", "yearly", "lunar_yearly"})
 TEMPORARY_MEMORY_DAYS = 14
@@ -95,6 +97,7 @@ RATE_LIMIT_CODE = "40034"
 # 同一条 msg_id 下 msg_seq 重复时报这个码，意思是「这个槽已经被占了」。
 DEDUP_CODE = "40054005"
 ACK_TEXT = "稍等，我查一下～"
+ACK_TEXT_CHAT = "我想想～"
 FALLBACK_TEXT = "小毛豆刚刚走神了，稍后再 @ 我一次试试。"
 # 被动回复的重试次数与间隔。ack 不走这套（它只是垫场，发不出去就算了）。
 SEND_ATTEMPTS = 3
@@ -153,6 +156,9 @@ class XiaoxiaClient(botpy.Client):
         self.llm = llm
         self._reply_lock = asyncio.Lock()
         self._memory_lock = asyncio.Lock()
+        # 后台补识别旧图片：正在跑的群 + 任务引用（防止被 GC 掉）
+        self._image_backfill_running: set[str] = set()
+        self._image_backfill_tasks: set[asyncio.Task] = set()
         # 群 openid -> 被 QQ 频控关静音到哪天（只当天有效，重启即复位）
         self._proactive_blocked_until: dict[str, str] = {}
         self._background_task: asyncio.Task[None] | None = None
@@ -230,6 +236,16 @@ class XiaoxiaClient(botpy.Client):
         descriptions: list[str] = []
         for attachment in attachments:
             image_ref, digest, byte_size, content_type = await self._image_reference(attachment)
+            if not image_ref:
+                # 图根本没下载下来。QQ 的 rkey 链接过一会儿就失效，把原始 url 丢给
+                # 视觉模型它同样打不开，只会白烧一次调用再拿回一个空描述。
+                # 直接留空，调用方会把这条消息标成 [图片未识别]，下次也不再重试。
+                logger.warning(
+                    "image download failed, skipping vision call: %s",
+                    attachment.filename or attachment.content_type,
+                )
+                descriptions.append("")
+                continue
             use_cache = bool(digest) and self.settings.image_cache_enabled
             cached = self.store.get_image_description(digest) if use_cache else ""
             if cached:
@@ -262,18 +278,18 @@ class XiaoxiaClient(botpy.Client):
         return descriptions
 
     async def _image_reference(self, attachment: ImageAttachment) -> tuple[str, str, int, str]:
-        """优先自己取图并内联，失败时退回让模型直接下载原始链接。
+        """自己取图并内联成 data url，交给视觉模型。
 
         返回 (给视觉模型的引用, 字节的 sha256, 字节数, content_type)。
-        取图失败时 digest 为空串，表示这一次不参与描述缓存。
+        下载失败时四个值里前三个都是空/0，调用方据此跳过视觉模型。
         """
         fetched = await fetch_image_bytes(
             attachment.url,
             max_bytes=self.settings.vision_max_image_bytes,
         )
         if fetched is None:
-            logger.info("image download failed, passing url through: %s", attachment.filename)
-            return attachment.url, "", 0, attachment.content_type
+            logger.info("image download failed: %s", attachment.filename)
+            return "", "", 0, attachment.content_type
         data, content_type = fetched
         logger.debug(
             "inlined image %s (%s bytes, %s)",
@@ -324,6 +340,31 @@ class XiaoxiaClient(botpy.Client):
             if enriched != stored.content:
                 self.store.update_message_content(group_openid, stored.message_key, enriched)
         return budget
+
+    def _queue_image_backfill(self, group_openid: str, *, exclude_key: str, budget: int) -> None:
+        """把旧图片的补识别丢到后台去跑，不卡在 @ 回复路径上。
+
+        它跟本轮回复没关系，却原来是同步 await 的：最多能串着识别好几张旧图，
+        每张都要下载 + 一次视觉模型调用，用户干等十几秒才看到回复。
+        同一个群同时只跑一份，免得两条消息挨着来就把额度重复烧一遍。
+        """
+        if budget <= 0 or group_openid in self._image_backfill_running:
+            return
+        self._image_backfill_running.add(group_openid)
+
+        async def run() -> None:
+            try:
+                await self._describe_recent_images(
+                    group_openid, exclude_key=exclude_key, budget=budget
+                )
+            except Exception:
+                logger.exception("image backfill failed for %s", group_openid)
+            finally:
+                self._image_backfill_running.discard(group_openid)
+
+        task = asyncio.create_task(run())
+        self._image_backfill_tasks.add(task)
+        task.add_done_callback(self._image_backfill_tasks.discard)
 
     def _now(self) -> datetime:
         return datetime.now(ZoneInfo(self.settings.timezone))
@@ -708,11 +749,7 @@ class XiaoxiaClient(botpy.Client):
                     if enriched != content:
                         self.store.update_message_content(message.group_openid, key, enriched)
                     content = enriched
-            await self._describe_recent_images(
-                message.group_openid,
-                exclude_key=key,
-                budget=budget,
-            )
+            self._queue_image_backfill(message.group_openid, exclude_key=key, budget=budget)
 
         requester = StoredMessage(
             username=message.username,
@@ -896,7 +933,7 @@ class XiaoxiaClient(botpy.Client):
                 # ack 只是垫场：发不出去就别重试也别兜底，把 seq=1 让给正文。
                 acked = await self._send_reply(
                     message,
-                    ACK_TEXT,
+                    ACK_TEXT_CHAT if action == "chat" else ACK_TEXT,
                     1,
                     f"{source}:ACK",
                     attempts=1,

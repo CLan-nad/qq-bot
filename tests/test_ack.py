@@ -1,6 +1,8 @@
 """慢任务的「先应一句」：超过 ack_after_seconds 没结果就先发 ack，正文用 msg_seq=2。
 
 QQ 同一条 msg_id 下 msg_seq 不能重复，ack 占 1、正文必须用 2，否则正文会被拒。
+chat 也在 ack 名单里（带图或模型排队时同样卡十几秒），但它垫的那句是「我想想～」
+而不是「稍等，我查一下～」——闲聊回一句「我查一下」读着像在敷衍。
 """
 from __future__ import annotations
 
@@ -9,7 +11,7 @@ import unittest
 from types import SimpleNamespace
 
 import xiaoxia.bot as bot_module
-from xiaoxia.bot import ACK_TEXT, XiaoxiaClient
+from xiaoxia.bot import ACK_TEXT, ACK_TEXT_CHAT, XiaoxiaClient
 
 
 def _client(ack_after_seconds: float = 0.05):
@@ -137,6 +139,42 @@ class AckTests(unittest.TestCase):
     def test_ack_actions_cover_slow_tools(self) -> None:
         for action in ("web_search", "web_fetch", "document_read", "shell_run", "memory_search"):
             self.assertIn(action, bot_module.ACK_ACTIONS)
+
+    def test_slow_chat_acks_with_thinking_text(self) -> None:
+        client, message, sent = _client()
+
+        async def slow():
+            await asyncio.sleep(0.2)
+            return "在的～"
+
+        acked = asyncio.run(client._answer_with_ack(**_args(client, message, "chat", slow)))
+        self.assertTrue(acked)
+        self.assertEqual(sent, [(1, ACK_TEXT_CHAT), (2, "在的～")])
+
+    def test_chat_ack_wording_differs_from_tool_ack(self) -> None:
+        self.assertIn("chat", bot_module.ACK_ACTIONS)
+        self.assertNotEqual(ACK_TEXT_CHAT, ACK_TEXT)
+
+    def test_slow_chat_ack_failure_leaves_seq_one_for_answer(self) -> None:
+        client, message, sent = _client()
+        calls = {"n": 0}
+
+        async def post_group_message(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # 只让 ack 那一次失败，正文仍然可以占 seq=1
+                raise RuntimeError("rate limited")
+            sent.append((kwargs["msg_seq"], kwargs["content"]))
+
+        client.api = SimpleNamespace(post_group_message=post_group_message)
+
+        async def slow():
+            await asyncio.sleep(0.1)
+            return "在的～"
+
+        acked = asyncio.run(client._answer_with_ack(**_args(client, message, "chat", slow)))
+        self.assertFalse(acked)
+        self.assertEqual(sent, [(1, "在的～")])
 
 
 if __name__ == "__main__":
