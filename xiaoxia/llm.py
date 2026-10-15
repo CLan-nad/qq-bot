@@ -35,6 +35,15 @@ SYSTEM_PROMPT = """你是 QQ 群里的“小毛豆”，一对情侣的私人感
 """
 
 
+TOOL_REPLY_ADDENDUM = """
+
+补充规则（你刚调用了一个工具，它的执行结果附在用户消息末尾）：
+13. 忠于工具结果，不编造；结果里没有的信息就说不知道，信息不足时坦率说明。
+14. 工具结果和当前请求明显无关、或者根本没有结果时，必须直说没找到相关资料，不许拿无关内容凑答案。
+15. 引用资料时写出来源站点名，方便对方自己核实。
+16. 仍然是发进 QQ 群的一句话：口语、简洁、像小毛豆在说话，不要写成报告；除非用户明确要清单，不要分点堆砌，也不要输出 Markdown 标题或代码块。"""
+
+
 INTENT_SYSTEM_PROMPT = """你是小毛豆的意图解析器。你只输出一个 JSON 对象，不输出 Markdown、解释或其他文本。
 
 可选 action：
@@ -337,11 +346,15 @@ class XiaoxiaLLM:
         identity_context: str = "",
         topic_context: str = "",
         festival_context: str = "",
+        memory_context: str = "",
     ) -> dict:
         user_prompt = f"""当前时间：{current_time}
 
 身份信息：
 {identity_context or "（未知）"}
+
+长期记忆（只用来还原指代和统一称呼，不要照抄进检索词）：
+{memory_context or "（无）"}
 
 当前任务：
 {tasks_summary or "（无）"}
@@ -414,27 +427,44 @@ class XiaoxiaLLM:
         tool_name: str,
         tool_output: str,
         tool_error: str = "",
+        identity_context: str = "",
+        memory_context: str = "",
+        topic_context: str = "",
+        max_chars: int | None = None,
     ) -> str:
-        """把工具执行结果整理成一条适合发到群里的回复。"""
-        user_prompt = f"""用户请求：{request}
+        """把工具执行结果整理成一条适合发到群里的回复。
 
+        以前这里用一段临时 system prompt，绕过了 SYSTEM_PROMPT，也没有记忆/身份/话题，
+        于是 web_search/web_fetch 的回复全是分点堆来源、不像小毛豆、还乱称呼（#599/#704/#733）。
+        现在和普通回复走同一套人设（SYSTEM_PROMPT），只在末尾叠加 TOOL_REPLY_ADDENDUM
+        那几条工具专属规则；身份/记忆/话题一并传入，称呼才不会乱。
+        """
+        user_prompt = f"""当前请求：{request}
+
+身份信息：
+{identity_context or "（未知）"}
+
+【当前话题】（从早到晚）：
+{topic_context or "（无）"}
+"""
+        if memory_context:
+            user_prompt += f"""
+长期记忆（从早到晚）：
+{memory_context}
+"""
+        user_prompt += f"""
 工具：{tool_name}
 执行结果：
 {tool_output or tool_error or "（无输出）"}
 """
         content = await self._chat(
-            system_prompt=(
-                "你是 QQ 群里的“小毛豆”。下面是一个工具的执行结果，请基于它回答用户的请求。"
-                "要求：直接输出正文；忠于工具结果，不编造；信息不足就明说；"
-                "结果和用户的问题明显无关、或者根本没有结果时，必须直说没找到相关资料，"
-                "不许拿无关内容凑答案；引用资料时写出来源站点名，方便对方自己核实。"
-                "列表类结果用短编号分点，不要输出 Markdown 标题或代码块。"
-            ),
+            system_prompt=SYSTEM_PROMPT + TOOL_REPLY_ADDENDUM,
             user_prompt=user_prompt,
             temperature=0.4,
             max_tokens=900,
         )
-        return content[: self.settings.reply_max_chars]
+        limit = self.settings.reply_max_chars if max_chars is None else max_chars
+        return content[:limit]
 
     async def generate_task_message(
         self,

@@ -38,6 +38,12 @@ class IntentPromptTests(unittest.TestCase):
         params = inspect.signature(XiaoxiaLLM.parse_intent).parameters
         self.assertIn("topic_context", params)
 
+    def test_parse_intent_takes_memory_context(self) -> None:
+        # 意图解析也要看长期记忆，才能把指代补全、把称呼统一，写出自包含的检索词。
+        params = inspect.signature(XiaoxiaLLM.parse_intent).parameters
+        self.assertIn("memory_context", params)
+        self.assertIn("长期记忆", inspect.getsource(XiaoxiaLLM.parse_intent))
+
     def test_generate_reply_splits_topic_and_background(self) -> None:
         params = inspect.signature(XiaoxiaLLM.generate_reply).parameters
         self.assertIn("topic_context", params)

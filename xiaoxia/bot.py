@@ -76,6 +76,12 @@ ACK_ACTIONS = frozenset(
 TASK_SCHEDULE_TYPES = frozenset({"once", "daily", "weekly", "yearly", "lunar_yearly"})
 TEMPORARY_MEMORY_DAYS = 14
 
+# 工具回复限长：计算类只给答案不该长篇，命令输出给个中等上限；检索/网页/文档走默认回复上限。
+TOOL_REPLY_MAX_CHARS: dict[str, int] = {
+    "math_eval": 120,
+    "shell_run": 600,
+}
+
 # 没被 @ 时的主动关心，这几项可以在群里直接 @ 我改，优先级高于 .env。
 # (中文名, 类型, 对应的默认配置字段)
 GROUP_PREFS: dict[str, tuple[str, str, str]] = {
@@ -714,6 +720,7 @@ class XiaoxiaClient(botpy.Client):
                         upcoming_festivals(self._now(), days=30),
                         today=self._now().date(),
                     ),
+                    memory_context=self._memory_context(message.group_openid),
                 )
                 acked = await self._answer_with_ack(
                     message=message,
@@ -868,24 +875,31 @@ class XiaoxiaClient(botpy.Client):
                 recent=full_recent,
                 identity=identity,
             )
+        # 工具回复也要接人设：把身份/记忆/话题一并带过去，否则检索类回复全是分点堆来源、
+        # 不像小毛豆、还会把两个人叫混。
+        persona = {
+            "identity_context": identity.prompt(),
+            "memory_context": self._memory_context(message.group_openid),
+            "topic_context": topic,
+        }
         if action == "web_search":
-            return await self._handle_web_search(request, intent)
+            return await self._handle_web_search(request, intent, **persona)
         if action == "web_fetch":
-            return await self._handle_web_fetch(request, intent)
+            return await self._handle_web_fetch(request, intent, **persona)
         if action == "document_read":
-            return await self._handle_document_read(request, intent, message)
+            return await self._handle_document_read(request, intent, message, **persona)
         if action == "shell_run":
-            return await self._handle_shell_run(request, intent)
+            return await self._handle_shell_run(request, intent, **persona)
         if action == "math_eval":
-            return await self._handle_math_eval(request, intent)
+            return await self._handle_math_eval(request, intent, **persona)
 
         return await self.llm.generate_reply(
             requester=requester,
             request=request,
             topic_context=topic,
             background_context=background,
-            memory_context=self._memory_context(message.group_openid),
-            identity_context=identity.prompt(),
+            memory_context=persona["memory_context"],
+            identity_context=persona["identity_context"],
         )
 
     def _handle_task_create(self, intent: dict, message: RichGroupMessage) -> str:
@@ -1413,7 +1427,15 @@ class XiaoxiaClient(botpy.Client):
             lines.append(f"{index}. {title}{suffix}\n   {url}\n   {snippet}")
         return "\n".join(lines)
 
-    async def _handle_web_search(self, request: str, intent: dict) -> str:
+    async def _handle_web_search(
+        self,
+        request: str,
+        intent: dict,
+        *,
+        identity_context: str = "",
+        memory_context: str = "",
+        topic_context: str = "",
+    ) -> str:
         query = self._optional_str(intent.get("query")) or request
         logger.info("web_search query=%r provider=%s", query, self.settings.search_provider)
         result = await search_web(
@@ -1434,12 +1456,29 @@ class XiaoxiaClient(botpy.Client):
             request=request,
             tool_name="web_search",
             tool_output=self._format_search_result(result),
+            identity_context=identity_context,
+            memory_context=memory_context,
+            topic_context=topic_context,
         )
 
-    async def _handle_web_fetch(self, request: str, intent: dict) -> str:
+    async def _handle_web_fetch(
+        self,
+        request: str,
+        intent: dict,
+        *,
+        identity_context: str = "",
+        memory_context: str = "",
+        topic_context: str = "",
+    ) -> str:
         url = self._optional_str(intent.get("url"))
         if not url:
-            return await self._handle_web_search(request, intent)
+            return await self._handle_web_search(
+                request,
+                intent,
+                identity_context=identity_context,
+                memory_context=memory_context,
+                topic_context=topic_context,
+            )
         result = await fetch_page(url, max_chars=self.settings.web_fetch_max_chars)
         if not result.ok:
             return result.error or "网页读取失败。"
@@ -1447,6 +1486,9 @@ class XiaoxiaClient(botpy.Client):
             request=request,
             tool_name="web_fetch",
             tool_output=result.output,
+            identity_context=identity_context,
+            memory_context=memory_context,
+            topic_context=topic_context,
         )
 
     async def _handle_document_read(
@@ -1454,6 +1496,10 @@ class XiaoxiaClient(botpy.Client):
         request: str,
         intent: dict,
         message: RichGroupMessage,
+        *,
+        identity_context: str = "",
+        memory_context: str = "",
+        topic_context: str = "",
     ) -> str:
         url = self._optional_str(intent.get("url"))
         filename = ""
@@ -1476,9 +1522,20 @@ class XiaoxiaClient(botpy.Client):
             request=request,
             tool_name="document_read",
             tool_output=result.output,
+            identity_context=identity_context,
+            memory_context=memory_context,
+            topic_context=topic_context,
         )
 
-    async def _handle_shell_run(self, request: str, intent: dict) -> str:
+    async def _handle_shell_run(
+        self,
+        request: str,
+        intent: dict,
+        *,
+        identity_context: str = "",
+        memory_context: str = "",
+        topic_context: str = "",
+    ) -> str:
         if not self.settings.shell_enabled:
             return "本地命令执行目前是关闭的。"
         command = self._optional_str(intent.get("command"))
@@ -1498,9 +1555,21 @@ class XiaoxiaClient(botpy.Client):
             tool_name="shell_run",
             tool_output=result.output,
             tool_error=result.error,
+            identity_context=identity_context,
+            memory_context=memory_context,
+            topic_context=topic_context,
+            max_chars=TOOL_REPLY_MAX_CHARS.get("shell_run"),
         )
 
-    async def _handle_math_eval(self, request: str, intent: dict) -> str:
+    async def _handle_math_eval(
+        self,
+        request: str,
+        intent: dict,
+        *,
+        identity_context: str = "",
+        memory_context: str = "",
+        topic_context: str = "",
+    ) -> str:
         expression = self._optional_str(intent.get("expression")) or request
         result = eval_math(expression)
         if not result.ok:
@@ -1509,6 +1578,10 @@ class XiaoxiaClient(botpy.Client):
             request=request,
             tool_name="math_eval",
             tool_output=result.output,
+            identity_context=identity_context,
+            memory_context=memory_context,
+            topic_context=topic_context,
+            max_chars=TOOL_REPLY_MAX_CHARS.get("math_eval"),
         )
 
     async def on_group_msg_receive(self, event) -> None:
