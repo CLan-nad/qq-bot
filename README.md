@@ -30,6 +30,9 @@
 @小毛豆 每年 12 月 13 日 09:00 提醒我们纪念日，提前 3 天先提个醒
 @小毛豆 每年农历冬月初五 08:30 给她过生日
 @小毛豆 记住她的真名叫小虾，一定要记住
+@小毛豆 以后把「罗晓霞」和「小虾」都统一叫「二十四桥明月夜」
+@小毛豆 以后叫我「主人」，叫他「小虾」
+@小毛豆 你现在怎么称呼我们
 @小毛豆 查看记忆
 @小毛豆 第二页记忆
 @小毛豆 中秋是几号
@@ -85,6 +88,24 @@ QQ 开放平台选择 WebSocket 连接，并开启接收群消息。
 
 GitHub Actions（`.github/workflows/ci.yml`）在每次 push 和 PR 上跑 `compileall` 和全部
 单元测试，Python 3.11 / 3.12 各一次。
+
+### 换群之后把记忆搬过去
+
+记忆卡、称呼、叫法统一、群偏好、定时任务、对话摘要都以 `group_openid` 为键。QQ 换群或
+重建群会拿到一个全新的 openid，机器人在新群里等于彻底失忆（「查看记忆」会回「我现在还没有
+长期记忆」）。这时用 `scripts/migrate_group.py` 把旧群的数据搬过去：
+
+```bash
+cd /opt/xiaoxia
+sudo -u xiaoxia .venv/bin/python scripts/migrate_group.py --db data/xiaoxia.sqlite3 --list
+sudo -u xiaoxia .venv/bin/python scripts/migrate_group.py --db data/xiaoxia.sqlite3 \
+    --from <旧群openid> --to <新群openid> --dry-run   # 先看清楚会搬多少
+# 去掉 --dry-run 才真正写库，写库前自动留一份 .bak-migrate-<时间戳> 快照
+```
+
+只搬还活着的数据：已完成/已删除的任务不搬，聊天消息不搬（`message_key` 全局唯一，搬过去
+只会撞键，新群的上下文从它自己的消息攒起），主动关心的节流账本不搬（免得白占新群额度）。
+脚本可以重复执行，不会搬出重复条目；搬完不用重启服务，机器人每轮都是现查库。
 
 ## 隐私
 
