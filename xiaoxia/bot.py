@@ -5,7 +5,7 @@ import hashlib
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -100,20 +100,35 @@ FALLBACK_TEXT = "小毛豆刚刚走神了，稍后再 @ 我一次试试。"
 class IdentityContext:
     requester: StoredMessage
     partner: StoredMessage | None
+    # 显示名 -> 群里登记过的称呼。没登记过就是空 dict，照旧用显示名。
+    addresses: dict[str, str] = field(default_factory=dict)
 
-    @staticmethod
-    def _label(member: StoredMessage) -> str:
+    def _address(self, member: StoredMessage) -> str:
+        return self.addresses.get((member.username or "").strip(), "")
+
+    def _label(self, member: StoredMessage) -> str:
         role = ROLE_LABELS.get(member.role, member.role or "成员")
-        return f"{member.username}（{role}）"
+        address = self._address(member)
+        name = f"{member.username}，请叫「{address}」" if address else str(member.username)
+        return f"{name}（{role}）"
 
     def prompt(self) -> str:
         partner = self._label(self.partner) if self.partner else "暂时未识别"
-        return (
-            f"当前触发者：{self._label(self.requester)}\n"
-            f"另一位聊天成员：{partner}\n"
-            "身份要求：当前触发者用“你”指代，另一位用显示名或“你对象”指代。"
+        lines = [
+            f"当前触发者：{self._label(self.requester)}",
+            f"另一位聊天成员：{partner}",
+        ]
+        # 称呼写死在身份块里，模型才不会一会儿叫显示名、一会儿自己编昵称。
+        rules = "；".join(
+            f"{name} → 「{address}」" for name, address in self.addresses.items() if address
+        )
+        if rules:
+            lines.append(f"称呼要求（他们自己定的，每一轮都要照做）：{rules}。")
+        lines.append(
+            "身份要求：当前触发者用“你”指代，另一位用他的称呼或“你对象”指代。"
             "最近记录中的“我”以每条消息开头的显示名为准，不要把两人的经历或偏好混在一起。"
         )
+        return "\n".join(lines)
 
 
 class XiaoxiaClient(botpy.Client):
@@ -333,7 +348,16 @@ class XiaoxiaClient(botpy.Client):
                 ),
                 None,
             )
-        return IdentityContext(requester=requester, partner=partner)
+        # 称呼先归一再取：显示名是老叫法（比如「小虾」）时也能查到登记过的称呼。
+        addresses: dict[str, str] = {}
+        for member in [*members, requester]:
+            name = (member.username or "").strip()
+            if not name or name in addresses:
+                continue
+            address = self.store.address_for(group_openid, name)
+            if address:
+                addresses[name] = address
+        return IdentityContext(requester=requester, partner=partner, addresses=addresses)
 
     async def on_ready(self) -> None:
         stats = self.store.stats()
@@ -895,6 +919,8 @@ class XiaoxiaClient(botpy.Client):
             return self._handle_memory_forget(intent, message)
         if action == "memory_alias":
             return self._handle_memory_alias(intent, message)
+        if action == "address_set":
+            return self._handle_address_set(intent, message, identity)
         if action == "calendar_query":
             return self._handle_calendar_query(intent)
         if action == "bot_pref":
@@ -1302,6 +1328,45 @@ class XiaoxiaClient(botpy.Client):
         rewritten = sum(self.store.set_person_alias(group_openid, name, canonical) for name in names)
         tail = f"，已经记住的 {rewritten} 条也一起改过来了" if rewritten else ""
         return f"好，以后「{'」「'.join(names)}」都统一叫「{canonical}」{tail}。"
+
+    def _handle_address_set(
+        self, intent: dict, message: RichGroupMessage, identity: IdentityContext
+    ) -> str:
+        """登记「以后该怎么叫某个人」。
+
+        称呼是人设的一部分，代码里不写死任何一个；叫什么、叫谁，全由群里 @ 我下指令决定。
+        """
+        group_openid = message.group_openid
+        op = str(intent.get("op") or "show").strip().lower()
+
+        if op not in {"set", "clear"}:
+            addresses = self.store.person_addresses(group_openid)
+            if not addresses:
+                return "还没定过称呼。想定就直接说：以后叫我「主人」，叫他「小虾主人」。"
+            lines = "\n".join(
+                f"· {name} → 「{address}」" for name, address in sorted(addresses.items())
+            )
+            return "现在定好的称呼：\n" + lines
+
+        person = self._optional_str(intent.get("person"))
+        if not person:
+            # “以后叫我X”这种没说清是谁的，默认就是当前触发者。
+            person = (identity.requester.username or message.username or "").strip()
+        if not person:
+            return "你想让我怎么称呼谁？说清楚一点，比如：以后叫他「小虾主人」。"
+
+        if op == "clear":
+            if not self.store.clear_person_address(group_openid, person):
+                return f"「{person}」本来就没定过称呼。"
+            return f"好，以后就直接叫{person}了。"
+
+        address = self._optional_str(intent.get("address"))
+        if not address:
+            return "想让我怎么称呼？把称呼说出来，比如：以后叫我「主人」。"
+        name = self.store.set_person_address(group_openid, person, address)
+        if not name:
+            return "这个称呼我没存下来，再说一次试试。"
+        return f"好，以后就叫{name}「{address.strip('「」“”')}」。"
 
     def _handle_calendar_query(self, intent: dict) -> str:
         name = self._optional_str(intent.get("query"))

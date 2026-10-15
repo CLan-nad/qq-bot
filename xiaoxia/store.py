@@ -265,6 +265,14 @@ class ChatStore:
                     PRIMARY KEY (group_openid, alias)
                 );
 
+                CREATE TABLE IF NOT EXISTS person_addresses (
+                    group_openid TEXT NOT NULL,
+                    person TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (group_openid, person)
+                );
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
                     content,
                     username,
@@ -1041,6 +1049,20 @@ class ChatStore:
                 "UPDATE memory_cards SET person = ? WHERE group_openid = ? AND person = ?",
                 (canonical, group_openid, alias),
             )
+            # 称呼登记跟着人走：老叫法上定过的称呼搬到新叫法名下（新叫法已有就保留新的）。
+            self._conn.execute(
+                """
+                INSERT INTO person_addresses (group_openid, person, address)
+                SELECT ?, ?, address FROM person_addresses
+                WHERE group_openid = ? AND person = ?
+                ON CONFLICT(group_openid, person) DO NOTHING
+                """,
+                (group_openid, canonical, group_openid, alias),
+            )
+            self._conn.execute(
+                "DELETE FROM person_addresses WHERE group_openid = ? AND person = ?",
+                (group_openid, alias),
+            )
         rewritten = int(cursor.rowcount or 0)
         if rewritten:
             logger.info(
@@ -1053,6 +1075,58 @@ class ChatStore:
             cursor = self._conn.execute(
                 "DELETE FROM person_aliases WHERE group_openid = ? AND alias = ?",
                 (group_openid, (alias or "").strip()),
+            )
+        return cursor.rowcount > 0
+
+    # ---------- 称呼：机器人该怎么叫某个人 ----------
+    #
+    # 称呼属于人设，代码里不写死任何一个：叫什么、叫谁，全由群里 @ 我下指令决定。
+    # 存的时候先把 person 归一，这样「小虾」和「二十四桥明月夜」不会各存一份。
+
+    def person_addresses(self, group_openid: str) -> dict[str, str]:
+        rows = self._conn.execute(
+            "SELECT person, address FROM person_addresses WHERE group_openid = ? ORDER BY person",
+            (group_openid,),
+        ).fetchall()
+        return {str(row["person"]): str(row["address"]) for row in rows}
+
+    def address_for(self, group_openid: str, person: str | None) -> str:
+        """拿到该怎么称呼这个人；没登记过就返回空串。"""
+        name = self.canonical_person(group_openid, person)
+        if not name:
+            return ""
+        row = self._conn.execute(
+            "SELECT address FROM person_addresses WHERE group_openid = ? AND person = ?",
+            (group_openid, name),
+        ).fetchone()
+        return str(row["address"]) if row else ""
+
+    def set_person_address(self, group_openid: str, person: str, address: str) -> str:
+        """登记「以后这么叫他」。返回实际落库的人名（已归一），没存成返回空串。"""
+        name = self.canonical_person(group_openid, person)
+        address = (address or "").strip().strip("「」“”\"'")
+        if not name or not address:
+            return ""
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO person_addresses (group_openid, person, address)
+                VALUES (?, ?, ?)
+                ON CONFLICT(group_openid, person) DO UPDATE SET
+                    address = excluded.address,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (group_openid, name, address),
+            )
+        logger.info("person address set: %s -> %s", name, address)
+        return name
+
+    def clear_person_address(self, group_openid: str, person: str) -> bool:
+        name = self.canonical_person(group_openid, person)
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM person_addresses WHERE group_openid = ? AND person = ?",
+                (group_openid, name),
             )
         return cursor.rowcount > 0
 
