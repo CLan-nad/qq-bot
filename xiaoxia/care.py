@@ -35,8 +35,21 @@ BODY_PARTS = (
 )
 PAIN_WORDS = ("疼", "痛", "难受", "不舒服", "恶", "吐", "泻", "抽筋", "发颤", "没力气")
 
-_MAX_CONTENT_CHARS = 80
+# 以前卡在 80 字，正好把「今天开会被领导当众说方案没重点，回来一路都在想
+# 是不是我真的不行」这种真倾诉整段挡在门外——而它才是最该接一句的那种。
+# 放宽到 200：长到不像一句话的（转帖、长文）仍然不进模型。
+_MAX_CONTENT_CHARS = 200
 _MIN_CONTENT_CHARS = 2
+
+# 主动关心只跑在「没 @ 小毛豆」的消息上，这里再兜一道：句子里点名在叫我的，
+# 让路给主流程。名字只用来判断「是不是在叫我」，不是写死的人设。
+BOT_MENTION_NAMES = ("小毛豆",)
+
+
+def _targets_bot(text: str) -> bool:
+    if "@" not in text and "<@" not in text:
+        return False
+    return any(name in text for name in BOT_MENTION_NAMES)
 
 
 def matched_signals(content: str) -> tuple[str, ...]:
@@ -66,8 +79,10 @@ def should_ask_model(content: str) -> bool:
         return False
     if "http://" in text or "https://" in text or "www." in text.lower():
         return False
-    if "@" in text:
-        # 明确在 @ 别人（@小毛豆 那种走主流程），不是在抒发情绪。
+    if _targets_bot(text):
+        # 以前只要句子里有个「@」就一票否决，结果「@CL 我今天真的好累」这种
+        # 明确在倾诉的话也被挡在门外。真正该让路的只有 @ 小毛豆 本身；
+        # @ 别人值不值得接一句，交给第二道闸门（模型）判断。
         return False
     if text.startswith("[") and text.endswith("]"):
         return False

@@ -133,6 +133,12 @@ class SignalGateTests(CareBase):
                 self.care(_message(content, mid=content[:4]))
         self.assertEqual(self.llm.calls, [])
 
+    def test_at_someone_else_no_longer_blocks_care(self) -> None:
+        # 以前句子里有个「@」就一票否决，「@CL 我今天真的好累」这种真倾诉也被挡掉。
+        # 该让路的只有 @ 小毛豆 本身（那条走主流程）。
+        self.assertTrue(should_ask_model("@CL 我今天真的好累"))
+        self.assertFalse(should_ask_model("@小毛豆 我今天真的好累"))
+
     def test_body_and_mood_signals_hit(self) -> None:
         self.assertTrue(should_ask_model("中午吃了冰的 肚子好疼"))
         self.assertTrue(should_ask_model("emo了 被导师骂了一顿"))
@@ -145,8 +151,14 @@ class SignalGateTests(CareBase):
         self.assertIn("头痛", matched_signals("吹空调吹的 头有点痛"))
         self.assertTrue(should_ask_model("吹空调吹的 头有点痛"))
 
+    def test_a_long_venting_paragraph_reaches_the_model(self) -> None:
+        # 80 字的上限正好把一整段倾诉挡在门外，而那才是最该接一句的话
+        text = "今天开会被领导当众说方案没重点，回来一路都在想是不是我真的不行，翻来覆去睡不着"
+        self.assertGreater(len(text), 30)
+        self.assertTrue(should_ask_model(text))
+
     def test_very_long_forward_is_ignored(self) -> None:
-        self.assertFalse(should_ask_model("睡不着" + "啊" * 90))
+        self.assertFalse(should_ask_model("睡不着" + "啊" * 210))
 
 
 class CareFlowTests(CareBase):

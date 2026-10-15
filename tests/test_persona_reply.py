@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from xiaoxia.bot import ActionResult, IdentityContext, XiaoxiaClient
 from xiaoxia.llm import ACTION_REPLY_ADDENDUM
@@ -19,6 +21,23 @@ from xiaoxia.store import ChatStore, StoredMessage
 
 
 GROUP = "test-group"
+NOW = datetime(2026, 10, 15, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+
+def _task_settings() -> SimpleNamespace:
+    return SimpleNamespace(
+        timezone="Asia/Shanghai", max_context_chars=24000, task_max_count=20
+    )
+
+
+def _task_message() -> SimpleNamespace:
+    # 建任务要写 created_by，比记忆那几个 handler 多要一个 author
+    return SimpleNamespace(
+        group_openid=GROUP,
+        id="msg-1",
+        username="CL",
+        author=SimpleNamespace(member_openid="openid-CL"),
+    )
 
 
 def _member(username: str, role: str = "member") -> StoredMessage:
@@ -364,10 +383,179 @@ class IntentEndToEndTests(unittest.TestCase):
         self.assertEqual(llm.calls, [])
 
 
+class TaskPersonaTests(unittest.TestCase):
+    """定时任务和删记忆的确认话，以前最像后台日志：「已设置任务 3：每天 09:00，喝水。」"""
+
+    def setUp(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = ChatStore(str(Path(self.tmp.name) / "tasks.sqlite3"))
+        self.identity = IdentityContext(
+            requester=_member("CL"), partner=_member("二十四桥明月夜")
+        )
+        self.client = XiaoxiaClient(
+            settings=_task_settings(), store=self.store, llm=SimpleNamespace()
+        )
+        self.client._now = lambda: NOW
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+        asyncio.set_event_loop(None)
+        self.loop.close()
+
+    def _client_with(self, llm) -> XiaoxiaClient:
+        client = XiaoxiaClient(settings=_task_settings(), store=self.store, llm=llm)
+        client._now = lambda: NOW
+        return client
+
+    def _create(self, **extra):
+        intent = {
+            "action": "task_create",
+            "schedule_type": "daily",
+            "time": "09:00",
+            "content": "喝水",
+            "title": "喝水",
+        }
+        intent.update(extra)
+        return self.client._handle_task_create(intent, _task_message())
+
+    def _act(self, action: str, task_id: int):
+        return self.client._handle_task_action(
+            {"action": action, "task_id": task_id}, _task_message()
+        )
+
+    def test_create_success_locks_id_time_and_title(self) -> None:
+        result = self._create()
+        self.assertTrue(result.persona)
+        task = self.store.tasks(GROUP)[0]
+        self.assertIn(str(task.id), result.facts)
+        self.assertIn(self.client._schedule_label(task), result.facts)
+        self.assertIn("喝水", result.facts)
+
+    def test_warmup_task_is_locked_too(self) -> None:
+        # 预热任务也是一条真任务，编号和时间同样不许被模型说糊
+        result = self._create(
+            schedule_type="yearly", month=12, day=13, remind_days_ahead=3
+        )
+        tasks = {task.title: task for task in self.store.tasks(GROUP)}
+        self.assertIn("[预热] 喝水", tasks)
+        for task in tasks.values():
+            self.assertIn(str(task.id), result.facts)
+            self.assertIn(self.client._schedule_label(task), result.facts)
+        # 模板本身两行，预算必须跟着放开，否则必然被截断→必然退回模板→白花一次调用
+        self.assertGreaterEqual(len(str(result)), 60)
+
+    def test_cancel_pause_resume_skip_carry_their_direction(self) -> None:
+        self._create()
+        task = self.store.tasks(GROUP)[0]
+        for action, direction in (
+            ("task_pause", "暂停"),
+            ("task_resume", "恢复"),
+            ("task_skip", "跳过"),
+            ("task_cancel", "取消"),
+        ):
+            result = self._act(action, task.id)
+            self.assertTrue(result.persona, action)
+            self.assertIn(direction, result.facts)
+            self.assertIn(str(task.id), result.facts)
+        self.assertEqual(self.store.tasks(GROUP), [])
+
+    def test_task_list_stays_a_plain_table(self) -> None:
+        self._create()
+        result = self._act("task_list", 0)
+        self.assertFalse(getattr(result, "persona", False))
+
+    def test_task_failures_stay_plain(self) -> None:
+        bad_create = self.client._handle_task_create(
+            {"action": "task_create", "schedule_type": "monthly", "content": "x"},
+            _task_message(),
+        )
+        self.assertFalse(getattr(bad_create, "persona", False))
+        empty_create = self.client._handle_task_create(
+            {"action": "task_create", "schedule_type": "daily"}, _task_message()
+        )
+        self.assertFalse(getattr(empty_create, "persona", False))
+        missing = self._act("task_cancel", 99999)
+        self.assertFalse(getattr(missing, "persona", False))
+        self.assertIn("没有找到这个任务", missing)
+
+    def test_forget_carries_the_direction(self) -> None:
+        self.client._handle_memory_remember(
+            {"memories": [{"kind": "fact", "person": "CL", "content": "喜欢吃辣"}]},
+            _task_message(),
+            self.identity,
+        )
+        card = self.store.memory_cards(GROUP)[0]
+        result = self.client._handle_memory_forget({"memory_id": [card.id]}, _task_message())
+        self.assertTrue(result.persona)
+        self.assertIn("忘记", result.facts)
+        self.assertIn(str(card.id), result.facts)
+
+    def test_flipped_task_direction_falls_back(self) -> None:
+        # 把「取消」说成「恢复」，用户会以为提醒还在跑——比死板严重得多
+        llm = FakeLLM(reply="好啦，3 号已经恢复运行了～")
+        template = "已取消任务 3：喝水。"
+        reply = self.loop.run_until_complete(
+            self._client_with(llm)._persona_or_raw(
+                "task_cancel",
+                ActionResult(template, persona=True, facts=("取消", "3", "喝水")),
+                "把喝水的提醒取消",
+                _task_message(),
+                self.identity,
+                "话题",
+            )
+        )
+        self.assertEqual(reply, template)
+
+    def test_direction_synonym_is_accepted(self) -> None:
+        # 「撤掉啦」是最自然的中文，方向也没说反，不该被判成丢事实
+        llm = FakeLLM(reply="好嘞，3 号喝水的提醒给你撤掉啦～")
+        reply = self.loop.run_until_complete(
+            self._client_with(llm)._persona_or_raw(
+                "task_cancel",
+                ActionResult("已取消任务 3：喝水。", persona=True, facts=("取消", "3", "喝水")),
+                "把喝水的提醒取消",
+                _task_message(),
+                self.identity,
+                "话题",
+            )
+        )
+        self.assertEqual(reply, "好嘞，3 号喝水的提醒给你撤掉啦～")
+
+    def test_create_goes_through_the_persona_layer(self) -> None:
+        llm = FakeLLM(reply="好嘞，1 号建好了：每天 09:00 叫你喝水～")
+        reply = self.loop.run_until_complete(
+            self._client_with(llm)._handle_intent(
+                intent={
+                    "action": "task_create",
+                    "schedule_type": "daily",
+                    "time": "09:00",
+                    "content": "喝水",
+                    "title": "喝水",
+                },
+                message=_task_message(),
+                requester=_member("CL"),
+                request="每天九点提醒我喝水",
+                topic="CL：每天九点提醒我喝水",
+                background="",
+                full_recent="",
+                identity=self.identity,
+            )
+        )
+        self.assertEqual(reply, "好嘞，1 号建好了：每天 09:00 叫你喝水～")
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(llm.calls[0]["tool_name"], "创建定时提醒")
+        self.assertEqual(self.store.tasks(GROUP)[0].title, "喝水")
+
+
 class AddendumTests(unittest.TestCase):
     def test_it_locks_facts_and_forbids_extra_promises(self) -> None:
         self.assertIn("事实一个字都不许改", ACTION_REPLY_ADDENDUM)
         self.assertIn("置顶 / 取消置顶", ACTION_REPLY_ADDENDUM)
+        self.assertIn("取消 / 暂停 / 恢复 / 跳过", ACTION_REPLY_ADDENDUM)
+        self.assertIn("任务的时间和标题", ACTION_REPLY_ADDENDUM)
         self.assertIn("不许添加", ACTION_REPLY_ADDENDUM)
 
 

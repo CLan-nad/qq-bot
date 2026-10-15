@@ -113,7 +113,13 @@ PERSONA_TOOL_LABELS: dict[str, str] = {
     "memory_remember": "记住信息",
     "memory_pin": "把记忆标成永久置顶",
     "memory_unpin": "取消记忆的永久置顶",
+    "memory_forget": "删除记忆",
     "address_set": "登记称呼",
+    "task_create": "创建定时提醒",
+    "task_cancel": "取消定时提醒",
+    "task_pause": "暂停定时提醒",
+    "task_resume": "恢复定时提醒",
+    "task_skip": "让定时提醒跳过下一次",
 }
 # 就是一句确认话，给太长反而啰嗦。
 PERSONA_REPLY_MAX_CHARS = 60
@@ -136,8 +142,26 @@ _CN_DIGIT_VARIANTS: dict[str, tuple[str, ...]] = {
 }
 
 
+# 任务和记忆的方向词同理：模板之间只差两个字，模型说反了用户会以为提醒还在跑，
+# 所以方向必须锁。但「撤掉」「删了」这种同义说法是最自然的中文，放行；
+# 反方向词（把「取消」说成「恢复」）永远不在同义表里，照样拦下来。
+_DIRECTION_VARIANTS: dict[str, tuple[str, ...]] = {
+    "取消": ("撤掉", "撤了", "删掉", "去掉"),
+    "暂停": ("先停", "停一下", "按住"),
+    "恢复": ("重新开", "接着提醒", "继续提醒"),
+    "跳过": ("不发", "略过"),
+    "忘记": ("删掉", "删了", "清掉", "去掉"),
+}
+
+
 def _fact_variants(fact: str) -> tuple[str, ...]:
-    return (fact, *_CN_DIGIT_VARIANTS.get(fact, ()))
+    return (fact, *_CN_DIGIT_VARIANTS.get(fact, ()), *_DIRECTION_VARIANTS.get(fact, ()))
+
+
+def _persona_max_chars(template: str) -> int:
+    """确认话默认 60 字够了；但带预热任务的模板本身就是两行，按 60 截断必然丢事实、
+    必然退回模板，那这次模型调用等于白花。模板有多长就给多长，再留 30 字换语气。"""
+    return max(PERSONA_REPLY_MAX_CHARS, len(template) + 30)
 
 # 没被 @ 时的主动关心，这几项可以在群里直接 @ 我改，优先级高于 .env。
 # (中文名, 类型, 对应的默认配置字段)
@@ -1067,43 +1091,34 @@ class XiaoxiaClient(botpy.Client):
     ) -> str:
         action = str(intent.get("action") or "chat")
 
-        if action == "task_create":
-            return self._handle_task_create(intent, message)
-        if action in {"task_list", "task_cancel", "task_pause", "task_resume", "task_skip"}:
-            return self._handle_task_action(intent, message)
-        if action == "memory_remember":
+        async def speak(result: str) -> str:
+            """办成一件事之后，让模型用小毛豆的语气把这句确认话说一遍。
+
+            只有 handler 明确标了 persona=True 的成功模板会被改写；列表、报错、
+            「匹配到多条，请说编号」这些原样返回——那些话必须精确可预测。
+            """
             return await self._persona_or_raw(
-                action,
-                self._handle_memory_remember(intent, message, identity),
-                request,
-                message,
-                identity,
-                topic,
+                action, result, request, message, identity, topic
             )
+
+        if action == "task_create":
+            return await speak(self._handle_task_create(intent, message))
+        if action in {"task_list", "task_cancel", "task_pause", "task_resume", "task_skip"}:
+            return await speak(self._handle_task_action(intent, message))
+        if action == "memory_remember":
+            return await speak(self._handle_memory_remember(intent, message, identity))
         if action == "memory_list":
             return self._handle_memory_list(intent, message)
         if action in {"memory_pin", "memory_unpin"}:
-            return await self._persona_or_raw(
-                action,
-                self._handle_memory_pin(intent, message, pinned=action == "memory_pin"),
-                request,
-                message,
-                identity,
-                topic,
+            return await speak(
+                self._handle_memory_pin(intent, message, pinned=action == "memory_pin")
             )
         if action == "memory_forget":
-            return self._handle_memory_forget(intent, message)
+            return await speak(self._handle_memory_forget(intent, message))
         if action == "memory_alias":
             return self._handle_memory_alias(intent, message)
         if action == "address_set":
-            return await self._persona_or_raw(
-                action,
-                self._handle_address_set(intent, message, identity),
-                request,
-                message,
-                identity,
-                topic,
-            )
+            return await speak(self._handle_address_set(intent, message, identity))
         if action == "calendar_query":
             return self._handle_calendar_query(intent)
         if action == "bot_pref":
@@ -1170,7 +1185,7 @@ class XiaoxiaClient(botpy.Client):
                 identity_context=identity.prompt(),
                 memory_context=self._memory_context(message.group_openid),
                 topic_context=topic,
-                max_chars=PERSONA_REPLY_MAX_CHARS,
+                max_chars=_persona_max_chars(template),
                 addendum=ACTION_REPLY_ADDENDUM,
             )
         except Exception as exc:
@@ -1250,7 +1265,11 @@ class XiaoxiaClient(botpy.Client):
             leap_month=leap_month,
             remind_days_ahead=remind_days_ahead,
         )
-        reply = f"已设置任务 {task.id}：{self._schedule_label(task)}，{task.title}。"
+        # 时间标签和任务名是硬事实：模型可以换语气，但「每天 09:00」和任务名
+        # 必须原样带出来，否则用户没法核对到底定在了几点、定的是哪件事。
+        label = self._schedule_label(task)
+        facts = [str(task.id), label, task.title]
+        reply = f"已设置任务 {task.id}：{label}，{task.title}。"
         warm = self._create_warmup_task(
             task=task,
             schedule_type=schedule_type,
@@ -1264,8 +1283,10 @@ class XiaoxiaClient(botpy.Client):
             now=now,
         )
         if warm is not None:
-            reply += f"\n还建了任务 {warm.id}：{self._schedule_label(warm)}提醒提前准备。"
-        return reply
+            warm_label = self._schedule_label(warm)
+            facts += [str(warm.id), warm_label]
+            reply += f"\n还建了任务 {warm.id}：{warm_label}提醒提前准备。"
+        return ActionResult(reply, persona=True, facts=facts)
 
     def _create_warmup_task(
         self,
@@ -1346,15 +1367,17 @@ class XiaoxiaClient(botpy.Client):
         task = tasks[0]
         if action == "task_cancel":
             self.store.delete_task(message.group_openid, task.id)
-            return f"已取消任务 {task.id}：{task.title}。"
+            return self._task_done("取消", f"已取消任务 {task.id}：{task.title}。", task)
         if action == "task_pause":
             self.store.set_task_status(message.group_openid, task.id, "paused")
-            return f"已暂停任务 {task.id}：{task.title}。"
+            return self._task_done("暂停", f"已暂停任务 {task.id}：{task.title}。", task)
         if action == "task_skip":
             if task.schedule_type == "once":
                 return "单次任务没有“下一次”，要取消就直接说取消。"
             self.store.set_task_skip_next(message.group_openid, task.id, True)
-            return f"好的，任务 {task.id} 下一次会跳过。"
+            return self._task_done(
+                "跳过", f"好的，任务 {task.id} 下一次会跳过。", task, with_title=False
+            )
         if action == "task_resume":
             if task.schedule_type == "once":
                 next_run = parse_datetime(task.next_run_at, task.timezone)
@@ -1378,9 +1401,23 @@ class XiaoxiaClient(botpy.Client):
                     next_run.isoformat(timespec="seconds"),
                 )
             self.store.set_task_status(message.group_openid, task.id, "active")
-            return f"已恢复任务 {task.id}：{task.title}。"
+            return self._task_done("恢复", f"已恢复任务 {task.id}：{task.title}。", task)
 
         return "这个任务操作我还没听明白。"
+
+    @staticmethod
+    def _task_done(
+        direction: str,
+        template: str,
+        task: ScheduledTask,
+        *,
+        with_title: bool = True,
+    ) -> ActionResult:
+        """任务操作办成的那句确认话。方向词和编号锁死，语气交给模型。"""
+        facts = [direction, str(task.id)]
+        if with_title and task.title:
+            facts.append(task.title)
+        return ActionResult(template, persona=True, facts=facts)
 
     @staticmethod
     def _schedule_label(task: ScheduledTask) -> str:
@@ -1745,8 +1782,16 @@ class XiaoxiaClient(botpy.Client):
         if not deleted:
             return "这些记忆刚刚变动过，麻烦再说一次。"
         if len(cards) == 1:
-            return f"已忘记记忆 {cards[0].id}：{cards[0].content}"
-        return f"已忘记{'全部 ' if is_all else ''}{deleted} 条记忆。"
+            return ActionResult(
+                f"已忘记记忆 {cards[0].id}：{cards[0].content}",
+                persona=True,
+                facts=("忘记", str(cards[0].id)),
+            )
+        return ActionResult(
+            f"已忘记{'全部 ' if is_all else ''}{deleted} 条记忆。",
+            persona=True,
+            facts=("忘记", str(deleted)),
+        )
 
     async def _handle_memory_search(
         self,
