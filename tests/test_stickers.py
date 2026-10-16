@@ -57,17 +57,22 @@ class RenderFacesTests(unittest.TestCase):
     def test_typo_is_corrected_to_the_real_name(self) -> None:
         # 线上真实翻车：它写的是 [秃头]，名字库里根本没有
         self.assertEqual(render_faces("[秃头]", self.book), '<faceType=1,faceId="267">')
-        # 关掉标签通道也不能留着查无此表的名字
-        self.assertEqual(render_faces("[秃头]", self.book, as_tags=False), "[头秃]")
+        # 标签通道关掉时：方括号发出去只是一对括号，直接删掉，让它改用 emoji
+        self.assertEqual(render_faces("被主人念秃了[秃头]", self.book, as_tags=False), "被主人念秃了")
 
     def test_unknown_brackets_are_left_alone(self) -> None:
         self.assertEqual(render_faces("看这个[神秘代码]哦", self.book), "看这个[神秘代码]哦")
         self.assertEqual(render_faces("[[1]] 是 markdown", self.book), "[[1]] 是 markdown")
 
+    def test_a_reply_that_is_only_a_face_keeps_its_text(self) -> None:
+        # 删干净会变成空消息，QQ 直接拒收；这种时候宁可留着原文
+        self.assertEqual(render_faces("[头秃]", self.book, as_tags=False), "[头秃]")
+        self.assertEqual(render_faces("[秃头]", self.book, as_tags=False), "[秃头]")
+
     def test_sticker_names_stay_readable(self) -> None:
         book = face_book(face_tokens(BIG_STICKER))
-        # 大表情没有图片就发不出去，纯文本里至少留个可读名字
-        self.assertEqual(render_faces("走你[大胆]", book), "走你[大胆]")
+        # 大表情的名字也是方括号，发出去一样是括号，不如不给
+        self.assertEqual(render_faces("走你[大胆]", book), "走你")
 
     def test_sticker_names_are_not_correction_targets(self) -> None:
         # 线上真抓到过大表情名字长成 "/笑哭"，拿它去纠 [哭] 会把字改花
@@ -85,7 +90,8 @@ class RenderFacesTests(unittest.TestCase):
     def test_prompt_lists_names_and_is_empty_without_any(self) -> None:
         prompt = face_prompt(self.book)
         self.assertIn("[头秃]", prompt)
-        self.assertEqual(face_prompt({}), "")
+        # 一个表情都没见过时，也只能教它用 emoji
+        self.assertIn("emoji", face_prompt({}))
 
     def test_prompt_only_advertises_sendable_faces(self) -> None:
         book = face_book(face_tokens(f"好累{SMALL_FACE}{BIG_STICKER}"))
@@ -93,7 +99,13 @@ class RenderFacesTests(unittest.TestCase):
         self.assertIn("[头秃]", prompt)
         self.assertNotIn("[大胆]", prompt)
         # 只剩大表情时，等于没有能发的表情，别拿它们去钓模型
-        self.assertEqual(face_prompt(face_book(face_tokens(BIG_STICKER))), "")
+        self.assertIn("emoji", face_prompt(face_book(face_tokens(BIG_STICKER))))
+
+    def test_tags_off_teaches_emoji_instead_of_names(self) -> None:
+        prompt = face_prompt(self.book, as_tags=False)
+        self.assertIn("emoji", prompt)
+        # 不列表情名，免得它以为写了名字就能变表情
+        self.assertNotIn("群里出现过的表情", prompt)
 
 
 class FaceLearningTests(unittest.TestCase):
@@ -253,7 +265,7 @@ class OutgoingFaceTests(unittest.TestCase):
 
     def test_tags_can_be_switched_off(self) -> None:
         self.client.settings = SimpleNamespace(timezone="Asia/Shanghai", face_tags=False)
-        self.assertEqual(self.client._outgoing_text(GROUP, "[秃头]"), "[头秃]")
+        self.assertEqual(self.client._outgoing_text(GROUP, "本豆要秃了[秃头]"), "本豆要秃了")
 
 
 if __name__ == "__main__":

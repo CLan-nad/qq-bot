@@ -97,9 +97,9 @@ def load_settings() -> Settings:
         care_daily_max=int(os.getenv("XIAOXIA_CARE_DAILY_MAX", "2")),
         care_cooldown_minutes=int(os.getenv("XIAOXIA_CARE_COOLDOWN_MINUTES", "180")),
         active_msg_daily_max=int(os.getenv("XIAOXIA_ACTIVE_MSG_DAILY_MAX", "6")),
-        # 模型写的 [头秃] 出站时要不要还原成 QQ 表情标签。关掉的话只纠正名字，
-        # 发出去仍是可读文本（表达式没这个功能时的稳妥档）。
-        face_tags=os.getenv("XIAOXIA_FACE_TAGS", "1").strip().lower()
+        # 模型写的 [头秃] 出站时要不要还原成 QQ 表情标签。实测 QQ 群消息不认这些标签
+        # （2026-10-16 探针：三种写法都原样显示成尖括号），所以默认关：让它改用 emoji。
+        face_tags=os.getenv("XIAOXIA_FACE_TAGS", "0").strip().lower()
         not in {"0", "false", "no"},
         ack_after_seconds=float(os.getenv("XIAOXIA_ACK_AFTER_SECONDS", "6")),
         search_provider=os.getenv("XIAOXIA_SEARCH_PROVIDER", "auto").strip().lower(),

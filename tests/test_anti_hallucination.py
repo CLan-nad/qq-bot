@@ -178,6 +178,7 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
                 memory_prompt_event_cards=5,
                 memory_search_messages=50,
                 max_context_chars=4000,
+                face_tags=False,
             ),
             store=self.store,
             llm=llm,

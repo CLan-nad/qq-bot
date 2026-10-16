@@ -1250,7 +1250,10 @@ class XiaoxiaClient(botpy.Client):
             background_context=background,
             memory_context=persona["memory_context"],
             identity_context=persona["identity_context"],
-            face_context=face_prompt(self.store.face_book(message.group_openid)),
+            face_context=face_prompt(
+                self.store.face_book(message.group_openid),
+                as_tags=self.settings.face_tags,
+            ),
         )
 
     async def _persona_or_raw(

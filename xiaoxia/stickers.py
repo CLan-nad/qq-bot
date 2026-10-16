@@ -93,8 +93,9 @@ def render_faces(
     """出站前处理方括号表情名。
 
     as_tags=True：认识的换成真表情标签，发出去就是表情；
-    as_tags=False：换不成表情（平台不吃标签）时至少把名字纠正成真实存在的那个，
-    别让 [秃头] 这种查无此表的名字又被复读一轮。
+    as_tags=False：平台不吃标签（实测 QQ 群消息就是不吃），名字发出去只是文字，
+    屏幕上就是一对方括号——所以干脆删掉，让模型改用 emoji 表达情绪。
+    认不出来的方括号（[1]、[神秘代码]）一律不动。
     """
     if not text or not book:
         return text or ""
@@ -112,11 +113,15 @@ def render_faces(
                 return match.group(0)
             token = book[fixed]
         if not as_tags or token.is_sticker:
-            # 大表情得走图片通道，纯文本里只保留可读名字，由调用方决定怎么发图。
-            return f"[{token.name}]"
+            # 大表情得走图片通道；纯文本里带上名字只是方括号，不如不给。
+            return ""
         return token.tag
 
-    return FACE_NAME_PATTERN.sub(replace, text)
+    rendered = FACE_NAME_PATTERN.sub(replace, text)
+    # 整条回复只有表情名时，删干净就成空消息了（QQ 会直接拒收），退回原文保底。
+    if not rendered.strip() and text.strip():
+        return text
+    return rendered
 
 
 def face_names_in(text: str | None, book: dict[str, FaceToken]) -> list[str]:
@@ -132,11 +137,19 @@ def face_names_in(text: str | None, book: dict[str, FaceToken]) -> list[str]:
     return found
 
 
-def face_prompt(book: dict[str, FaceToken]) -> str:
-    """告诉模型有哪些表情能用。只报发得出去的（小表情）。"""
+EMOJI_PROMPT = (
+    "表情：想表达情绪就直接写 emoji（比如 本豆要秃了😭），发出去就是真的表情。"
+    "别写 [头秃] 这类方括号名字——QQ 群消息不认这种标签，发出来只是一串方括号，很难看。"
+)
+
+
+def face_prompt(book: dict[str, FaceToken], *, as_tags: bool = True) -> str:
+    """告诉模型表情怎么发。标签通道不通时只教它用 emoji。"""
+    if not as_tags:
+        return EMOJI_PROMPT
     names = [name for name, token in book.items() if not token.is_sticker]
     if not names:
-        return ""
+        return EMOJI_PROMPT
     listed = "、".join(f"[{name}]" for name in names)
     return (
         f"群里出现过的表情：{listed}。想表达情绪就直接把它写进回复里（比如：本豆要秃了[头秃]），"
