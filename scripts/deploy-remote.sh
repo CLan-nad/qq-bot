@@ -14,6 +14,11 @@ RUNAS="sudo -u $OWNER -H"
 STATE_DIR=/var/lib/xiaoxia-deploy
 say() { printf '%s %s\n' "[$1]" "$2"; }
 
+# 服务器到 github.com 的 git 通道时通时断，而且是"挂着不动"而不是干脆报错——
+# 2026-10-16 就卡在这里十几分钟。所有对外 fetch 都套超时，超时了才走 bundle 兜底。
+FETCH_TIMEOUT="${FETCH_TIMEOUT:-45}"
+net_fetch() { timeout -k 10 "$FETCH_TIMEOUT" $RUNAS git -C "$DIR" "$@"; }
+
 cd "$DIR" || { say fatal "cannot enter $DIR"; exit 9; }
 
 # ---- 1. first run: attach the existing directory to git without touching the work tree ----
@@ -22,7 +27,7 @@ if [ ! -d "$DIR/.git" ]; then
   $RUNAS git init -q "$DIR" || { say fatal "git init failed"; exit 9; }
   $RUNAS git -C "$DIR" remote add origin "$URL"
   $RUNAS git -C "$DIR" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
-  $RUNAS git -C "$DIR" fetch -q origin || { say fatal "git fetch failed (check server -> GitHub connectivity)"; exit 9; }
+  net_fetch fetch -q origin || { say fatal "git fetch failed (check server -> GitHub connectivity)"; exit 9; }
   $RUNAS git -C "$DIR" branch -f "$BRANCH" "origin/$BRANCH"
   $RUNAS git -C "$DIR" symbolic-ref HEAD "refs/heads/$BRANCH"
   # --mixed only rebuilds the index, the work tree stays untouched,
@@ -52,7 +57,7 @@ fetch_from_bundle() {
   [ -n "$ref" ] || return 1
   $RUNAS git -C "$DIR" fetch -q "$BUNDLE" "$ref"
 }
-if $RUNAS git -C "$DIR" fetch -q origin; then
+if net_fetch fetch -q origin; then
   say fetch "objects from origin"
 elif fetch_from_bundle; then
   say fetch "origin unreachable, used offline bundle"

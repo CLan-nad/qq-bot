@@ -12,6 +12,10 @@ RUNAS="sudo -u $OWNER -H"
 STATE_DIR=/var/lib/xiaoxia-deploy
 line() { printf -- '--- %s ---\n' "$1"; }
 
+# 和 deploy-remote.sh 一样：到 github.com 的 fetch 会挂着不动，探测也不能被它卡住
+FETCH_TIMEOUT="${FETCH_TIMEOUT:-45}"
+net_fetch() { timeout -k 10 "$FETCH_TIMEOUT" $RUNAS git -C "$DIR" "$@"; }
+
 cd "$DIR" || { echo "FATAL: cannot enter $DIR"; exit 9; }
 
 line "identity"
@@ -46,7 +50,7 @@ printf 'HEAD=%s branch=%s\n' \
   "$($RUNAS git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)"
 # 与 deploy-remote.sh 一致：origin 连不上就退回离线 bundle，探测不该被网络卡住
 BUNDLE=/tmp/xiaoxia-deploy-bundle.bundle
-if ! $RUNAS git -C "$DIR" fetch -q origin; then
+if ! net_fetch fetch -q origin; then
   # 不猜 bundle 里的 ref 名，问它自己；优先取指向 TARGET 的那条
   bref="$($RUNAS git -C "$DIR" bundle list-heads "$BUNDLE" 2>/dev/null | awk -v want="$TARGET" '$1 == want { print $2; exit }')"
   [ -n "$bref" ] || bref="$($RUNAS git -C "$DIR" bundle list-heads "$BUNDLE" 2>/dev/null | awk 'NR == 1 { print $2 }')"
