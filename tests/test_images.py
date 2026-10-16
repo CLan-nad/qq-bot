@@ -583,6 +583,23 @@ class ImageNoteRenderingTests(unittest.TestCase):
         rendered = format_message_content("[图片内容：一只橘猫]")
         self.assertEqual(rendered, "〔图〕一只橘猫")
 
+    def test_pending_placeholder_becomes_readable(self) -> None:
+        # 还没被识别（那几条 [image/jpeg] 就是这种）也要让人看得懂
+        self.assertEqual(
+            format_message_content("[image/jpeg]"),
+            "〔图〕（这张还没识别）",
+        )
+        self.assertEqual(
+            format_message_content("[图片]"),
+            "〔图〕（这张还没识别）",
+        )
+
+    def test_unreadable_mark_becomes_readable(self) -> None:
+        self.assertEqual(
+            format_message_content("看这个\n[图片未识别]"),
+            "看这个\n〔图〕（没能看清）",
+        )
+
     def test_describe_image_output_is_single_line(self) -> None:
         llm, _ = _fake_llm()
 

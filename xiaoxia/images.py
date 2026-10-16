@@ -38,6 +38,10 @@ UNRECOGNIZED_IMAGE_MARK = "[图片未识别]"
 # 行，跟用户原话分清楚：文字是对方说的，〔图〕是我自己看图留下的记录。
 IMAGE_NOTE_LABEL = "〔图〕"
 IMAGE_NOTE_PATTERN = re.compile(r"\[图片内容：(.*?)\]", re.S)
+# 还没轮到识别（没有 @ 事件就不会跑视觉模型）和识别失败的图：渲染成人话，
+# 别把 "[image/jpeg]" 这种占位符丢给模型——它只会困惑，或者干脆当作对方打的字。
+IMAGE_PENDING_NOTE = "（这张还没识别）"
+IMAGE_UNREADABLE_NOTE = "（没能看清）"
 
 DEFAULT_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 30.0
@@ -133,6 +137,8 @@ def format_message_content(
 ) -> str:
     """渲染一条消息的正文：用户原话在前，自己看图的记录缩进成独立的〔图〕行。"""
     text, notes = split_image_notes(content)
+    text = IMAGE_PLACEHOLDER_PATTERN.sub(f"{note_label}{IMAGE_PENDING_NOTE}", text)
+    text = text.replace(UNRECOGNIZED_IMAGE_MARK, f"{note_label}{IMAGE_UNREADABLE_NOTE}")
     lines = [text] if text else []
     lines.extend(f"{indent}{note_label}{note}" for note in notes)
     return "\n".join(lines)
