@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .images import format_message_content, normalize_face_tags
+from .stickers import FaceToken, face_book, face_tokens
 from .scheduling import schedule_label
 
 
@@ -131,6 +132,8 @@ _ADDITIVE_COLUMNS = {
         ("expires_at", "TEXT"),
         ("source_row_id", "INTEGER"),
     ),
+    # 称呼原来是挂在显示名上的，对方一改昵称就认不出人了。补一列 openid 把称呼钉在人身上。
+    "person_addresses": (("member_openid", "TEXT NOT NULL DEFAULT ''"),),
     "scheduled_tasks": (
         ("month", "INTEGER"),
         ("day", "INTEGER"),
@@ -269,8 +272,21 @@ class ChatStore:
                     group_openid TEXT NOT NULL,
                     person TEXT NOT NULL,
                     address TEXT NOT NULL,
+                    member_openid TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (group_openid, person)
+                );
+
+                CREATE TABLE IF NOT EXISTS face_tokens (
+                    group_openid TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    face_type INTEGER NOT NULL DEFAULT 1,
+                    face_id TEXT NOT NULL DEFAULT '',
+                    ext TEXT NOT NULL DEFAULT '',
+                    hits INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (group_openid, name)
                 );
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -336,6 +352,11 @@ class ChatStore:
                 self._rebuild_tasks_table()
 
         self._normalize_legacy_face_tags()
+        # 称呼补齐 openid：老库里的称呼只挂了显示名，补一次就够，之后启动都是空转。
+        for row in self._conn.execute(
+            "SELECT DISTINCT group_openid FROM person_addresses"
+        ).fetchall():
+            self.backfill_address_openids(str(row["group_openid"]))
 
     def _normalize_legacy_face_tags(self) -> int:
         """把历史消息里存量的 <faceType=...> 乱码解码成 [表情名]。
@@ -414,6 +435,7 @@ class ChatStore:
         key = self.message_key(message_id, msg_seq)
         # 表情标签必须在入库前解码：库里的 content 就是模型每轮要读的上下文，
         # 存成 <faceType=1,faceId="267",ext="..."> 等于让它读乱码。
+        self.remember_faces(group_openid, content)
         text = normalize_face_tags(content).strip()
         if not text:
             text = self._attachment_summary(raw)
@@ -662,6 +684,57 @@ class ChatStore:
             )
             for row in rows
         ]
+
+    # ---------- 表情：群里出现过哪些，怎么把模型写的 [头秃] 发成真表情 ----------
+    #
+    # 名字↔faceId 的对应关系全部来自真实消息，代码里不写死任何一个。模型只看得到
+    # 可读名字（[头秃]），要发真表情时得靠这张表还原成 <faceType=1,faceId="267">。
+
+    def remember_faces(self, group_openid: str, content: str | None) -> int:
+        """把消息里出现过的表情标签记下来。返回记下的个数。"""
+        tokens = face_tokens(content)
+        if not tokens or not group_openid:
+            return 0
+        with self._conn:
+            for token in tokens:
+                self._conn.execute(
+                    """
+                    INSERT INTO face_tokens (group_openid, name, face_type, face_id, ext, hits)
+                    VALUES (?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(group_openid, name) DO UPDATE SET
+                        face_type = excluded.face_type,
+                        face_id = excluded.face_id,
+                        ext = excluded.ext,
+                        hits = face_tokens.hits + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (group_openid, token.name, token.face_type, token.face_id, token.ext),
+                )
+        return len(tokens)
+
+    def face_book(self, group_openid: str, limit: int = 60) -> dict[str, FaceToken]:
+        """群里见过的表情：名字 → 标签。按出现次数排序，常用的排在前面。"""
+        rows = self._conn.execute(
+            """
+            SELECT name, face_type, face_id, ext FROM face_tokens
+            WHERE group_openid = ?
+            ORDER BY hits DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (group_openid, limit),
+        ).fetchall()
+        return face_book(
+            FaceToken(
+                name=str(row["name"]),
+                face_type=int(row["face_type"] or 1),
+                face_id=str(row["face_id"] or ""),
+                ext=str(row["ext"] or ""),
+            )
+            for row in rows
+        )
+
+    def face_names(self, group_openid: str, limit: int = 60) -> list[str]:
+        return list(self.face_book(group_openid, limit=limit))
 
     def format_recent_messages(self, group_openid: str, limit: int, max_chars: int) -> str:
         # 局部导入：topics 依赖 store 里的数据类型，模块级互导会成环。
@@ -1098,7 +1171,12 @@ class ChatStore:
         for member in self.known_members(group_openid, limit=limit):
             name = (member.username or "").strip()
             openid = (member.member_openid or "").strip()
-            label = (self.address_for(group_openid, name) if name else "") or name or openid
+            label = (
+                (self.address_for_member(group_openid, openid) if openid else "")
+                or (self.address_for(group_openid, name) if name else "")
+                or name
+                or openid
+            )
             if not label:
                 continue
             if openid:
@@ -1106,6 +1184,38 @@ class ChatStore:
             if name:
                 labels.setdefault(name, label)
         return labels
+
+    def address_for_member(self, group_openid: str, member_openid: str | None) -> str:
+        """按 openid 查称呼。对方改昵称也照样认得出来（同一 openid 多行时取最近登记的）。"""
+        openid = (member_openid or "").strip()
+        if not openid:
+            return ""
+        row = self._conn.execute(
+            """
+            SELECT address FROM person_addresses
+            WHERE group_openid = ? AND member_openid = ?
+            ORDER BY updated_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (group_openid, openid),
+        ).fetchone()
+        return str(row["address"]) if row else ""
+
+    def member_openid_named(self, group_openid: str, person: str) -> str:
+        """按叫法反查 openid：显示名或它登记过的别名匹配上就算。查不到返回空串。"""
+        name = (person or "").strip()
+        if not name:
+            return ""
+        aliases = {
+            alias
+            for alias, canonical in self.person_aliases(group_openid).items()
+            if self.canonical_person(group_openid, alias) == name
+        }
+        wanted = {name, *aliases}
+        for member in self.known_members(group_openid, limit=50):
+            if (member.username or "").strip() in wanted:
+                return (member.member_openid or "").strip()
+        return ""
 
     def address_for(self, group_openid: str, person: str | None) -> str:
         """拿到该怎么称呼这个人；没登记过就返回空串。"""
@@ -1124,19 +1234,57 @@ class ChatStore:
         address = (address or "").strip().strip("「」“”\"'")
         if not name or not address:
             return ""
+        openid = self.member_openid_named(group_openid, name)
         with self._conn:
+            if openid:
+                # 同一个人只挂一个称呼：openid 从旧叫法那行摘掉，免得两行抢同一个 openid。
+                self._conn.execute(
+                    """
+                    UPDATE person_addresses SET member_openid = ''
+                    WHERE group_openid = ? AND member_openid = ? AND person != ?
+                    """,
+                    (group_openid, openid, name),
+                )
             self._conn.execute(
                 """
-                INSERT INTO person_addresses (group_openid, person, address)
-                VALUES (?, ?, ?)
+                INSERT INTO person_addresses (group_openid, person, address, member_openid)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(group_openid, person) DO UPDATE SET
                     address = excluded.address,
+                    member_openid = CASE
+                        WHEN excluded.member_openid != '' THEN excluded.member_openid
+                        ELSE person_addresses.member_openid
+                    END,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (group_openid, name, address),
+                (group_openid, name, address, openid),
             )
-        logger.info("person address set: %s -> %s", name, address)
+        logger.info("person address set: %s -> %s (openid bound=%s)", name, address, bool(openid))
         return name
+
+    def backfill_address_openids(self, group_openid: str) -> int:
+        """给历史里没绑 openid 的称呼补上；每次启动跑一遍，重复执行安全。"""
+        rows = self._conn.execute(
+            """
+            SELECT person FROM person_addresses
+            WHERE group_openid = ? AND (member_openid IS NULL OR member_openid = '')
+            """,
+            (group_openid,),
+        ).fetchall()
+        bound = 0
+        for row in rows:
+            person = str(row["person"])
+            openid = self.member_openid_named(group_openid, person)
+            if not openid:
+                continue
+            with self._conn:
+                self._conn.execute(
+                    "UPDATE person_addresses SET member_openid = ? WHERE group_openid = ? AND person = ?",
+                    (openid, group_openid, person),
+                )
+            bound += 1
+            logger.info("person address %s bound to openid", person)
+        return bound
 
     def clear_person_address(self, group_openid: str, person: str) -> bool:
         name = self.canonical_person(group_openid, person)
