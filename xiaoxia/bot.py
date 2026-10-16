@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import logging
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import botpy
+from botpy.http import Route
 from botpy.message import GroupMessage
 from botpy.robot import Token
 
@@ -37,7 +40,7 @@ from .images import (
 from .llm import ACTION_REPLY_ADDENDUM, XiaoxiaLLM
 from .scheduling import advance_task, parse_datetime, resolve_next_run, schedule_label
 from .store import ChatStore, MemoryCard, ScheduledTask, StoredMessage
-from .stickers import face_prompt, render_faces
+from .stickers import Sticker, StickerLibrary, face_prompt, render_faces
 from .topics import format_topic, split_topic
 from .tools import (
     ToolResult,
@@ -309,6 +312,16 @@ class XiaoxiaClient(botpy.Client):
         self.settings = settings
         self.store = store
         self.llm = llm
+        # 表情包：清单在 assets/stickers/manifest.json。读不到就当没有这个能力，
+        # 静默降级成纯文字，不能让一个坏掉的素材目录把机器人拦在启动之外。
+        sticker_dir = str(getattr(settings, "sticker_dir", "") or "")
+        self.stickers = (
+            StickerLibrary.load(sticker_dir)
+            if sticker_dir and getattr(settings, "stickers_enabled", False)
+            else StickerLibrary(Path("."), {})
+        )
+        if self.stickers:
+            logger.info("loaded %s stickers from %s", len(self.stickers), self.stickers.root)
         self._reply_lock = asyncio.Lock()
         self._memory_lock = asyncio.Lock()
         # 后台补识别旧图片：正在跑的群 + 任务引用（防止被 GC 掉）
@@ -986,26 +999,91 @@ class XiaoxiaClient(botpy.Client):
         """
         if not text:
             return text
-        return render_faces(
-            text,
+        return self._outgoing_parts(group_openid, text)[0]
+
+    def _outgoing_parts(self, group_openid: str, text: str) -> tuple[str, Sticker | None]:
+        """出站前的最后一道加工：先摘表情包，再处理小表情。
+
+        顺序不能反。表情包的名字（[抱抱]）是要换成一张图的，得在 render_faces 之前
+        摘走；否则它先被当成小表情名处理掉，图就发不出去了。
+        """
+        if not text:
+            return text or "", None
+        remainder, sticker = self.stickers.take(text)
+        rendered = render_faces(
+            remainder,
             self.store.face_book(group_openid),
             as_tags=self.settings.face_tags,
         )
+        return rendered, sticker
+
+    async def _upload_group_image(self, group_openid: str, sticker: Sticker) -> str:
+        """把图传上去换 file_info。
+
+        qq-botpy 1.2.1 的 post_group_file 只收 url，本地文件塞不进去，所以直接打
+        /v2/groups/{group_openid}/files 这个接口：file_data 走 base64、srv_send_msg
+        关掉（图只上传，发不发由下一条消息决定）。2026-10-16 用同一份参数实测 200。
+        """
+        http = getattr(self.api, "_http", None)
+        if http is None:
+            return ""
+        data = await asyncio.to_thread(sticker.read)
+        route = Route("POST", "/v2/groups/{group_openid}/files", group_openid=group_openid)
+        result = await http.request(
+            route,
+            json={
+                "file_type": 1,
+                "file_data": base64.b64encode(data).decode("ascii"),
+                "srv_send_msg": False,
+            },
+        )
+        return str((result or {}).get("file_info") or "")
+
+    async def _send_sticker(
+        self,
+        group_openid: str,
+        sticker: Sticker,
+        caption: str,
+        *,
+        msg_id: str | None = None,
+        msg_seq: int | None = None,
+    ) -> None:
+        """发一张表情图。正文当配文跟着图一起走，所以不会有「先图后字」的割裂感。"""
+        file_info = await self._upload_group_image(group_openid, sticker)
+        if not file_info:
+            raise RuntimeError(f"sticker upload returned no file_info: {sticker.name}")
+        payload: dict[str, Any] = {
+            "group_openid": group_openid,
+            "msg_type": 7,
+            # 配文不能是空串：实测带空白才稳，而整条只有表情名时正文本来就是空的。
+            "content": caption.strip() or " ",
+            "media": {"file_info": file_info},
+        }
+        if msg_id is not None:
+            payload["msg_id"] = msg_id
+        if msg_seq is not None:
+            payload["msg_seq"] = msg_seq
+        await self.api.post_group_message(**payload)
 
     async def _send_reply_proactive(
         self, message: RichGroupMessage, text: str, source: str
     ) -> bool:
         """被动回复通道彻底不通时，退回主动消息兜底，至少让人看到一句回复。"""
+        content = self._outgoing_parts(message.group_openid, text)[0]
+        if not content.strip():
+            # 这条本来就只是一张表情图，没有能被文字兜住的正文，就别硬发一句空的。
+            logger.warning("proactive fallback skipped, nothing but a sticker: %s", message.id)
+            return False
         try:
             await self.api.post_group_message(
                 group_openid=message.group_openid,
-                content=self._outgoing_text(message.group_openid, text),
+                content=content,
             )
         except Exception as exc:
             self._note_rate_limit(message.group_openid, exc)
             logger.exception("proactive fallback also failed, msg_id=%s", message.id)
             return False
-        self._remember_bot_reply(message.group_openid, text, f"{source}:FALLBACK")
+        self._remember_bot_reply(message.group_openid, content, f"{source}:FALLBACK")
         logger.info("group reply delivered via proactive fallback, msg_id=%s", message.id)
         return True
 
@@ -1028,17 +1106,39 @@ class XiaoxiaClient(botpy.Client):
         - 重试时才被判去重：说明上一次其实已经发出去了，直接算投递成功，不再重复发；
         - 其它错误按原 seq 重试，最多 attempts 次；
         - 全部失败退回主动消息通道兜底（ack 不兜底，它发不出去无所谓）。
+        表情图走的是另一条接口（先传图再发富媒体），多了两次可能失败的请求，所以图
+        发不出去时不再重试图，直接用剩下的文字发——回复本身比那张图重要得多。
         """
+        content, sticker = self._outgoing_parts(message.group_openid, text)
         current = seq
         for attempt in range(1, max(1, attempts) + 1):
             try:
-                await self.api.post_group_message(
-                    group_openid=message.group_openid,
-                    msg_id=message.id,
-                    msg_seq=current,
-                    content=self._outgoing_text(message.group_openid, text),
-                )
+                if sticker is not None:
+                    await self._send_sticker(
+                        message.group_openid,
+                        sticker,
+                        content,
+                        msg_id=message.id,
+                        msg_seq=current,
+                    )
+                else:
+                    await self.api.post_group_message(
+                        group_openid=message.group_openid,
+                        msg_id=message.id,
+                        msg_seq=current,
+                        content=content,
+                    )
             except Exception as exc:
+                if sticker is not None and not self._is_dedup_error(exc):
+                    self._note_rate_limit(message.group_openid, exc)
+                    logger.warning(
+                        "sticker %s failed (%s), falling back to text", sticker.name, exc
+                    )
+                    sticker = None
+                    if not content.strip():
+                        logger.error("sticker failed and there is no text to send, seq=%s", current)
+                        return False
+                    continue
                 if self._is_dedup_error(exc):
                     if attempt > 1:
                         logger.info("group reply already delivered, seq=%s", current)
@@ -1243,6 +1343,12 @@ class XiaoxiaClient(botpy.Client):
         if action == "math_eval":
             return await self._handle_math_eval(request, intent, **persona)
 
+        face_context = face_prompt(
+            self.store.face_book(message.group_openid),
+            as_tags=self.settings.face_tags,
+            stickers=self.stickers,
+        )
+
         return await self.llm.generate_reply(
             requester=requester,
             request=request,
@@ -1250,10 +1356,7 @@ class XiaoxiaClient(botpy.Client):
             background_context=background,
             memory_context=persona["memory_context"],
             identity_context=persona["identity_context"],
-            face_context=face_prompt(
-                self.store.face_book(message.group_openid),
-                as_tags=self.settings.face_tags,
-            ),
+            face_context=face_context,
         )
 
     async def _persona_or_raw(

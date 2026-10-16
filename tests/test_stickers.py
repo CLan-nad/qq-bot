@@ -107,6 +107,21 @@ class RenderFacesTests(unittest.TestCase):
         # 不列表情名，免得它以为写了名字就能变表情
         self.assertNotIn("群里出现过的表情", prompt)
 
+    def test_prompt_with_stickers_still_forbids_small_face_names(self) -> None:
+        # 表情包让它写 [抱抱]，小表情又让它别写方括号——两段话必须互相说明白，
+        # 不然模型只会记住一条，另一条就被否掉了（线上就是这么出 [秃头] 的）。
+        from xiaoxia.stickers import Sticker, StickerLibrary
+
+        library = StickerLibrary(
+            Path("."), {"抱抱": Sticker(name="抱抱", path=Path("a.gif"), emoji="🤗")}
+        )
+        prompt = face_prompt(self.book, as_tags=False, stickers=library)
+        self.assertIn("[抱抱]", prompt)
+        self.assertIn("emoji", prompt)
+        # 说清楚「小表情名字不能写」，而不是笼统地「别写方括号」
+        self.assertIn("小表情名字", prompt)
+        self.assertNotIn("别写 [头秃] 这类方括号名字", prompt)
+
 
 class FaceLearningTests(unittest.TestCase):
     def setUp(self) -> None:
