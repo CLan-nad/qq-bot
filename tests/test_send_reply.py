@@ -25,8 +25,8 @@ def _client(script):
     返回 (client, message, sent, proactive)。
     """
     client = XiaoxiaClient(
-        settings=SimpleNamespace(timezone="Asia/Shanghai"),
-        store=SimpleNamespace(),
+        settings=SimpleNamespace(timezone="Asia/Shanghai", face_tags=True),
+        store=SimpleNamespace(face_book=lambda group: {}),
         llm=SimpleNamespace(),
     )
     sent: list[tuple] = []

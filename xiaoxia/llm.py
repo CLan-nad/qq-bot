@@ -414,6 +414,7 @@ class XiaoxiaLLM:
         search_context: str = "",
         identity_context: str = "",
         executed_actions: str = "",
+        face_context: str = "",
     ) -> str:
         user_prompt = f"""当前触发者：{requester.username}（{requester.role}）
 说话人说明：下面每条记录开头的【】里就是发那条消息的人，【小毛豆】是你自己说过的话。
@@ -430,6 +431,11 @@ class XiaoxiaLLM:
             user_prompt += f"""
 【更早的背景】（已经翻篇的话题，只用来理解语气，不要主动提起）：
 {background_context}
+"""
+        if face_context:
+            user_prompt += f"""
+表情：
+{face_context}
 """
         if memory_context:
             user_prompt += f"""

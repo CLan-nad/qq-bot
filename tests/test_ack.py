@@ -19,10 +19,11 @@ def _client(ack_after_seconds: float = 0.05):
         timezone="Asia/Shanghai",
         ack_after_seconds=ack_after_seconds,
         allowed_group_openids=frozenset(),
+        face_tags=True,
     )
     client = XiaoxiaClient(
         settings=settings,
-        store=SimpleNamespace(),
+        store=SimpleNamespace(face_book=lambda group: {}),
         llm=SimpleNamespace(),
     )
     sent: list[tuple[int, str]] = []

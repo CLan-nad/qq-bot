@@ -37,6 +37,7 @@ from .images import (
 from .llm import ACTION_REPLY_ADDENDUM, XiaoxiaLLM
 from .scheduling import advance_task, parse_datetime, resolve_next_run, schedule_label
 from .store import ChatStore, MemoryCard, ScheduledTask, StoredMessage
+from .stickers import face_prompt, render_faces
 from .topics import format_topic, split_topic
 from .tools import (
     ToolResult,
@@ -624,7 +625,7 @@ class XiaoxiaClient(botpy.Client):
                 content = await self._task_content(task)
                 await self.api.post_group_message(
                     group_openid=task.group_openid,
-                    content=content,
+                    content=self._outgoing_text(task.group_openid, content),
                 )
                 self._remember_bot_reply(task.group_openid, content, "BOT_TASK")
                 self.store.complete_task_run(
@@ -840,7 +841,10 @@ class XiaoxiaClient(botpy.Client):
             text = normalize_care_text(str(verdict.get("text") or ""))
             if not text:
                 return
-            await self.api.post_group_message(group_openid=group_openid, content=text)
+            await self.api.post_group_message(
+                group_openid=group_openid,
+                content=self._outgoing_text(group_openid, text),
+            )
         except Exception as exc:
             self._note_rate_limit(group_openid, exc)
             logger.info("proactive care skipped: %s", exc)
@@ -974,12 +978,29 @@ class XiaoxiaClient(botpy.Client):
     def _is_dedup_error(error: BaseException) -> bool:
         return DEDUP_CODE in str(error)
 
+    def _outgoing_text(self, group_openid: str, text: str) -> str:
+        """出站前处理表情：模型写的 [头秃] 还原成真表情标签。
+
+        库里存的永远是可读名字（跟入库时把标签解码成 [头秃] 对称），所以只在出站这一处
+        做转换，别让 <faceType=...> 这种标签回流进上下文。
+        """
+        if not text:
+            return text
+        return render_faces(
+            text,
+            self.store.face_book(group_openid),
+            as_tags=self.settings.face_tags,
+        )
+
     async def _send_reply_proactive(
         self, message: RichGroupMessage, text: str, source: str
     ) -> bool:
         """被动回复通道彻底不通时，退回主动消息兜底，至少让人看到一句回复。"""
         try:
-            await self.api.post_group_message(group_openid=message.group_openid, content=text)
+            await self.api.post_group_message(
+                group_openid=message.group_openid,
+                content=self._outgoing_text(message.group_openid, text),
+            )
         except Exception as exc:
             self._note_rate_limit(message.group_openid, exc)
             logger.exception("proactive fallback also failed, msg_id=%s", message.id)
@@ -1015,7 +1036,7 @@ class XiaoxiaClient(botpy.Client):
                     group_openid=message.group_openid,
                     msg_id=message.id,
                     msg_seq=current,
-                    content=text,
+                    content=self._outgoing_text(message.group_openid, text),
                 )
             except Exception as exc:
                 if self._is_dedup_error(exc):
@@ -1229,6 +1250,7 @@ class XiaoxiaClient(botpy.Client):
             background_context=background,
             memory_context=persona["memory_context"],
             identity_context=persona["identity_context"],
+            face_context=face_prompt(self.store.face_book(message.group_openid)),
         )
 
     async def _persona_or_raw(

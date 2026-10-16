@@ -35,6 +35,7 @@ class Settings:
     care_daily_max: int
     care_cooldown_minutes: int
     active_msg_daily_max: int
+    face_tags: bool
     ack_after_seconds: float
     search_provider: str
     tavily_api_key: str
@@ -96,6 +97,10 @@ def load_settings() -> Settings:
         care_daily_max=int(os.getenv("XIAOXIA_CARE_DAILY_MAX", "2")),
         care_cooldown_minutes=int(os.getenv("XIAOXIA_CARE_COOLDOWN_MINUTES", "180")),
         active_msg_daily_max=int(os.getenv("XIAOXIA_ACTIVE_MSG_DAILY_MAX", "6")),
+        # 模型写的 [头秃] 出站时要不要还原成 QQ 表情标签。关掉的话只纠正名字，
+        # 发出去仍是可读文本（表达式没这个功能时的稳妥档）。
+        face_tags=os.getenv("XIAOXIA_FACE_TAGS", "1").strip().lower()
+        not in {"0", "false", "no"},
         ack_after_seconds=float(os.getenv("XIAOXIA_ACK_AFTER_SECONDS", "6")),
         search_provider=os.getenv("XIAOXIA_SEARCH_PROVIDER", "auto").strip().lower(),
         tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),

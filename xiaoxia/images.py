@@ -144,7 +144,7 @@ def format_message_content(
     return "\n".join(lines)
 
 
-def _decode_face_text(ext: str) -> str:
+def decode_face_text(ext: str) -> str:
     """解开 QQ 表情标签里的 ext，取出可读名称；失败时返回空串。"""
     if not ext:
         return ""
@@ -168,7 +168,7 @@ def normalize_face_tags(content: str | None) -> str:
         return ""
 
     def render(match: re.Match[str]) -> str:
-        name = _decode_face_text(match.group(3) or "")
+        name = decode_face_text(match.group(3) or "")
         if not name:
             return "[表情]"
         return name if name.startswith("[") else f"[{name}]"

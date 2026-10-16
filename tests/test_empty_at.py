@@ -43,6 +43,7 @@ def _settings(**overrides) -> SimpleNamespace:
         vision_max_image_bytes=1024 * 1024,
         image_cache_enabled=False,
         image_cache_max_rows=0,
+        face_tags=True,
     )
     base.update(overrides)
     return SimpleNamespace(**base)

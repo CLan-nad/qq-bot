@@ -86,6 +86,7 @@ class CareBase(unittest.TestCase):
             care_daily_max=2,
             care_cooldown_minutes=180,
             active_msg_daily_max=6,
+            face_tags=True,
             max_context_chars=4000,
             reply_max_chars=500,
             task_max_count=20,

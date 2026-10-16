@@ -45,6 +45,7 @@ def _settings(**overrides) -> SimpleNamespace:
         vision_max_image_bytes=1024 * 1024,
         image_cache_enabled=False,
         image_cache_max_rows=0,
+        face_tags=True,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -53,7 +54,7 @@ def _settings(**overrides) -> SimpleNamespace:
 def _client(store=None, llm=None, **overrides) -> XiaoxiaClient:
     return XiaoxiaClient(
         settings=_settings(**overrides),
-        store=store if store is not None else SimpleNamespace(),
+        store=store if store is not None else SimpleNamespace(face_book=lambda group: {}),
         llm=llm if llm is not None else SimpleNamespace(),
     )
 
