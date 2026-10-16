@@ -15,6 +15,7 @@ from xiaoxia.llm import (
     SYSTEM_PROMPT,
     XiaoxiaLLM,
 )
+from xiaoxia.bot import XiaoxiaClient
 
 
 class IntentPromptTests(unittest.TestCase):
@@ -77,13 +78,19 @@ class AnniversaryPromptTests(unittest.TestCase):
         self.assertIn("festival_context", params)
         self.assertIn("节日表", inspect.getsource(XiaoxiaLLM.parse_intent))
 
-    def test_memory_batch_is_told_not_to_repeat_existing_facts(self) -> None:
+    def test_memory_batch_only_summarizes(self) -> None:
+        # 用户要求：只有明确说「记住 xx」才写长期记忆。后台归档只出摘要。
         params = inspect.signature(XiaoxiaLLM.process_memory_batch).parameters
-        self.assertIn("existing", params)
-        self.assertIn("不要重复输出这些", inspect.getsource(XiaoxiaLLM.process_memory_batch))
-        self.assertIn("绝对不要再输出一次", MEMORY_SYSTEM_PROMPT)
-        self.assertIn("同一个人只允许有一种叫法", MEMORY_SYSTEM_PROMPT)
+        self.assertNotIn("existing", params)
         self.assertNotIn("recent_context", params)
+        self.assertIn("不要输出 memories", MEMORY_SYSTEM_PROMPT)
+        self.assertNotIn("memories: 适合长期记住", MEMORY_SYSTEM_PROMPT)
+
+    def test_compaction_never_writes_memory_cards(self) -> None:
+        # bot 层也要守住：_compact_memories 里不能再出现自动落记忆卡的做法。
+        source = inspect.getsource(XiaoxiaClient._compact_memories)
+        self.assertIn("memories=[]", source)
+        self.assertNotIn("existing_memory_lines", source)
 
 
 class SystemPromptTests(unittest.TestCase):

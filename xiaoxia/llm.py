@@ -145,18 +145,14 @@ math_eval 输出 expression。
 无法确定或普通聊天时输出 {"action":"chat"}。"""
 
 
-MEMORY_SYSTEM_PROMPT = """你是私人情侣群聊的长期记忆整理器。只输出 JSON，不输出 Markdown 或解释。
-从给定聊天中提取：
-1. summary: 150-300 字的客观摘要
-2. memories: 适合长期记住的偏好、重要事实、约定、纪念日和关系事件
+MEMORY_SYSTEM_PROMPT = """你是私人情侣群聊的聊天记录归档器。只输出 JSON，不输出 Markdown 或解释。
 
-每条聊天前面的显示名代表发送者。整理“我/她/他/对象”时，必须结合该条消息的发送者判断。
-memories 中的 person 使用明确显示名，不要只写“我/她/他”。
-不要记录密码、身份证号、银行卡号、住址门牌、医疗隐私或其他高风险敏感信息。
-已经在前面「现有记忆」清单里出现过的内容，绝对不要再输出一次，也不要换个说法重复输出。
-同一个人只允许有一种叫法：清单里 person 已经用过的写法必须原样沿用，不要改用真名、昵称或群显示名的另一种。
-没有长期价值的信息不要放入 memories。memories 每项字段：kind、person、content。
-kind 可为 preference、fact、agreement、event、relationship。"""
+从给定聊天里写出一段 summary：150-300 字，客观交代谁说了什么、话题怎么走、有没有结论或情绪波动。
+每条聊天前面的显示名代表发送者，叙述“我/她/他/对象”时必须结合该条消息的发送者判断。
+用中性、克制的第三人称叙述，不评价、不加戏。
+
+不要输出 memories 字段，也不要顺手罗列“值得长期记住的事实”：长期记忆只由群里明确下达
+“记住……”的指令时写入，这里只产出给上下文用的摘要，日常小事不再自动进记忆。"""
 
 
 VISION_SYSTEM_PROMPT = """你是 QQ 群聊里的图片识别助手，服务一对情侣的日常聊天。
@@ -523,19 +519,13 @@ class XiaoxiaLLM:
         )
         return content[: self.settings.reply_max_chars]
 
-    async def process_memory_batch(
-        self, message_context: str, existing: list[str] | None = None
-    ) -> dict:
-        """把这批聊天记录压成摘要 + 长期记忆。
+    async def process_memory_batch(self, message_context: str) -> dict:
+        """把这批聊天记录压成一段摘要。
 
-        existing 是「已经记住的全部条目」，不只是置顶的那些——早先只传置顶清单，
-        而置顶常年是 0 张，等于没做去重，同一件事被抽了三四遍。
+        这里**不**再产出长期记忆：用户明确要求「只有我让它记住 xx 才记」，
+        长期记忆一律由 memory_remember（群里 @ 我下指令）写入，后台只负责摘要。
         """
-        existing_lines = "\n".join(existing or []) or "（暂无）"
-        user_prompt = f"""现有记忆（这些已经记住了，不要重复输出这些，也不要换个说法再输出一遍）：
-{existing_lines}
-
-请整理这批聊天记录：
+        user_prompt = f"""请整理这批聊天记录：
 {message_context}
 """
         content = await self._chat(

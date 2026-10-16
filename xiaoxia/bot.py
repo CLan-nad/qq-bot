@@ -644,6 +644,11 @@ class XiaoxiaClient(botpy.Client):
         )
 
     async def _compact_memories(self) -> None:
+        """把攒够的聊天压成一段摘要，顺带清掉过期记忆。
+
+        这里**不**再自动生产长期记忆：用户要求「只有我明确说记住 xx 才记」，
+        长期记忆一律由 memory_remember（群里 @ 我下指令）写入，后台只出摘要。
+        """
         async with self._memory_lock:
             cutoff = (self._now() - timedelta(days=90)).isoformat(timespec="seconds")
             purged = self.store.purge_expired_memories(cutoff)
@@ -661,16 +666,8 @@ class XiaoxiaClient(botpy.Client):
                     batch.messages,
                     self.settings.max_context_chars,
                 )
-                # 传全部现存记忆做去重，不是只传置顶的——置顶常年是 0 张，
-                # 只传置顶等于没去重，同一件事会被抽好几遍。
-                existing = self.store.existing_memory_lines(
-                    group_openid,
-                    now_iso=self._now().isoformat(timespec="seconds"),
-                )
-                result = await self.llm.process_memory_batch(message_context, existing)
+                result = await self.llm.process_memory_batch(message_context)
                 summary = str(result.get("summary") or "").strip()
-                raw_memories = result.get("memories")
-                memories = raw_memories if isinstance(raw_memories, list) else []
                 if not summary:
                     continue
 
@@ -679,17 +676,12 @@ class XiaoxiaClient(botpy.Client):
                     start_row_id=batch.start_row_id,
                     end_row_id=batch.end_row_id,
                     summary=summary,
-                    memories=[
-                        item
-                        for item in memories
-                        if isinstance(item, dict) and str(item.get("content") or "").strip()
-                    ],
+                    memories=[],
                 )
                 logger.info(
-                    "saved memory batch for group %s: messages=%s memories=%s",
+                    "saved chat summary for group %s: messages=%s",
                     group_openid,
                     len(batch.messages),
-                    len(memories),
                 )
 
     @staticmethod
