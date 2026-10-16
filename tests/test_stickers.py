@@ -69,6 +69,15 @@ class RenderFacesTests(unittest.TestCase):
         # 大表情没有图片就发不出去，纯文本里至少留个可读名字
         self.assertEqual(render_faces("走你[大胆]", book), "走你[大胆]")
 
+    def test_sticker_names_are_not_correction_targets(self) -> None:
+        # 线上真抓到过大表情名字长成 "/笑哭"，拿它去纠 [哭] 会把字改花
+        book = {
+            "头秃": FaceToken(name="头秃", face_type=1, face_id="267"),
+            "/笑哭": FaceToken(name="/笑哭", face_type=6, face_id="0"),
+        }
+        self.assertEqual(render_faces("[哭]", book), "[哭]")
+        self.assertEqual(render_faces("[秃头]", book), '<faceType=1,faceId="267">')
+
     def test_names_in_reply(self) -> None:
         self.assertEqual(face_names_in("哈哈[秃头]再说[头秃]", self.book), ["头秃"])
         self.assertEqual(face_names_in("没表情", self.book), [])
@@ -77,6 +86,14 @@ class RenderFacesTests(unittest.TestCase):
         prompt = face_prompt(self.book)
         self.assertIn("[头秃]", prompt)
         self.assertEqual(face_prompt({}), "")
+
+    def test_prompt_only_advertises_sendable_faces(self) -> None:
+        book = face_book(face_tokens(f"好累{SMALL_FACE}{BIG_STICKER}"))
+        prompt = face_prompt(book)
+        self.assertIn("[头秃]", prompt)
+        self.assertNotIn("[大胆]", prompt)
+        # 只剩大表情时，等于没有能发的表情，别拿它们去钓模型
+        self.assertEqual(face_prompt(face_book(face_tokens(BIG_STICKER))), "")
 
 
 class FaceLearningTests(unittest.TestCase):

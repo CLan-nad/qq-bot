@@ -99,7 +99,9 @@ def render_faces(
     if not text or not book:
         return text or ""
 
-    names = tuple(book)
+    # 只有小表情才换得成标签，纠错池也只放它们：大表情的名字长成 "/笑哭" 这样，
+    # 拿它去纠 [哭] 只会把好端端的字改成 "/笑哭"。
+    names = tuple(name for name, token in book.items() if not token.is_sticker)
 
     def replace(match: re.Match[str]) -> str:
         raw = match.group(1)
@@ -131,11 +133,13 @@ def face_names_in(text: str | None, book: dict[str, FaceToken]) -> list[str]:
 
 
 def face_prompt(book: dict[str, FaceToken]) -> str:
-    """告诉模型有哪些表情能用。一个都没见过时返回空串，不给它添乱。"""
-    if not book:
+    """告诉模型有哪些表情能用。只报发得出去的（小表情）。"""
+    names = [name for name, token in book.items() if not token.is_sticker]
+    if not names:
         return ""
-    names = "、".join(f"[{name}]" for name in book)
+    listed = "、".join(f"[{name}]" for name in names)
     return (
-        f"群里出现过的表情：{names}。想表达情绪就直接把它写进回复里（比如：本豆要秃了[头秃]），"
-        "发出去会变成真的表情；不确定名字就写你在聊天记录里见过的那一个，别自己造新名字。"
+        f"群里出现过的表情：{listed}。想表达情绪就直接把它写进回复里（比如：本豆要秃了[头秃]），"
+        "发出去会变成真的表情。偶尔带一个就好，别每句都挂；不确定名字就写你在聊天记录里"
+        "见过的那一个，别自己造新名字。"
     )
