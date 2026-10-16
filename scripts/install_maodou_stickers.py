@@ -68,6 +68,24 @@ PICKS: list[tuple[str, tuple[int, int, int, int], str, str, list[str], str]] = [
         ["本尊", "委屈", "安慰"],
         "m_benzon_sad.png",
     ),
+    # 手游版：乖乖坐着等夸
+    (
+        "character2/c14.png",
+        (0, 0, 285, 269),
+        "本尊坐好",
+        "🐰",
+        ["本尊", "乖乖", "等夸"],
+        "m_benzon_sit.png",
+    ),
+    # 手游版半身：探头看一眼（这张原图背景是黑的，裁不掉，就这么用）
+    (
+        "character2/c11.png",
+        (0, 0, 584, 292),
+        "本尊探头",
+        "👀",
+        ["本尊", "探头", "好奇"],
+        "m_benzon_peek.png",
+    ),
 ]
 
 

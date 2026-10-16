@@ -3,7 +3,7 @@
 小毛豆想发表情，QQ 群却只吃「图片」这一条通道，所以得先有一批图。这个脚本从两个
 开源图源拉素材、压到适合群聊的体积，并生成一张带编号的预览总图，方便人过目挑选：
 
-  A 批  Google Noto Animated Emoji（Apache-2.0，512x512 动图）
+  A 批  Google Noto Animated Emoji（Apache-2.0，512x512 动图，取最完整的一帧存静图）
   B 批  Microsoft Fluent Emoji 3D（MIT，静态高清）
 
 用法：
@@ -38,11 +38,9 @@ FLUENT_LICENSE = "Fluent Emoji (MIT)"
 
 # 大表情发出去是「一张图」，所以尺寸别贪大：240 够清楚，体积也压得住。
 TARGET_SIZE = 240
-# 单张上限，超过就抽帧。QQ 图片上限 20MB，这里留一大截余量。
-MAX_BYTES = 400 * 1024
 
 
-# ---------------------------------------------------------------- A 批：动图表情
+# ---------------------------------------------------------------- A 批：动图取一帧
 # 覆盖一个「可爱、调皮、会撒娇」的搭子需要表达的情绪：开心、喜欢、撒娇、抱抱、
 # 委屈、哭、生气、无语、困、震惊、比心、暗中观察……动物脸那几个是为大耳帽兜
 # 这个形象挑的：兔子、小猫、小鸡、青蛙都在同一套画风里，不会打架。
@@ -95,7 +93,7 @@ NOTO_PICKS: list[tuple[str, str, str, list[str]]] = [
 ]
 
 # ---------------------------------------------------------------- B 批：静态高清
-# 动图之外留一档静态图：不会被抽帧、体积小，适合当「发张图给你看」的那种。
+# 另一个图源的高清静图，3D 质感，跟 A 批是两套画风，备用。
 FLUENT_PICKS: list[tuple[str, str, str, str, list[str]]] = [
     ("Smiling face with hearts", "smiling_face_with_hearts", "爱心脸", "喜欢", ["喜欢"]),
     ("Smiling face with heart-eyes", "smiling_face_with_heart-eyes", "花痴脸", "喜欢", ["喜欢"]),
@@ -119,70 +117,36 @@ FLUENT_PICKS: list[tuple[str, str, str, str, list[str]]] = [
 ]
 
 
-# GIF 只有 1 位透明度，留出最高索引当透明色。255 色量化之后这一格是空着的。
-TRANSPARENT_INDEX = 255
-ALPHA_CUTOFF = 128
+def _fullest_frame(source: Image.Image) -> Image.Image:
+    """动图里挑「最完整」的那一帧。
 
-
-def _to_palette_frame(frame: Image.Image) -> Image.Image:
-    """RGBA 一帧 → 带透明索引的调色板帧（不然透明区会被填成黑色方块）。"""
-    alpha = frame.getchannel("A")
-    solid = Image.new("RGB", frame.size, (255, 255, 255))
-    solid.paste(frame, (0, 0), alpha)
-    paletted = solid.quantize(colors=TRANSPARENT_INDEX, method=Image.MEDIANCUT)
-    paletted.paste(TRANSPARENT_INDEX, alpha.point(lambda value: 255 if value < ALPHA_CUTOFF else 0))
-    paletted.info["transparency"] = TRANSPARENT_INDEX
-    return paletted
-
-
-def _render_gif(frames: list, duration: int) -> bytes:
-    quantized = [_to_palette_frame(frame) for frame in frames]
-    buffer = io.BytesIO()
-    quantized[0].save(
-        buffer,
-        format="GIF",
-        save_all=True,
-        append_images=quantized[1:],
-        duration=duration,
-        loop=0,
-        disposal=2,
-        transparency=TRANSPARENT_INDEX,
-        optimize=True,
-    )
-    return buffer.getvalue()
-
-
-def encode_gif(raw: bytes) -> bytes:
-    """把动图压到群聊友好：缩小到 TARGET_SIZE，去掉全透明首帧，太大了就抽帧。"""
-    source = Image.open(io.BytesIO(raw))
-    duration = int(source.info.get("duration") or 80) or 80
-    frames = []
+    Noto 的表情都是「从框外弹进来 → 停住 → 缩回去」，首尾两头不是空白就是半张脸。我们
+    发的是静图，取最满的那帧才好看：原来按首帧存的那版，「比心」是一张缺半只手的图。
+    """
+    best: Image.Image | None = None
+    best_area = -1
     try:
         while True:
-            frames.append(source.convert("RGBA").resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS))
+            frame = source.convert("RGBA")
+            box = frame.getchannel("A").getbbox()
+            area = 0 if box is None else (box[2] - box[0]) * (box[3] - box[1])
+            if area > best_area:
+                best, best_area = frame, area
             source.seek(source.tell() + 1)
     except EOFError:
         pass
     except Exception:
         pass
-    if not frames:
-        raise ValueError("动图没有可用的帧")
-
-    # Noto 有几张是淡入的，首帧整个是空的。QQ 里闪过一帧空白很难看，直接掐掉。
-    while len(frames) > 1 and not frames[0].getchannel("A").getbbox():
-        frames.pop(0)
-
-    payload = b""
-    for step in (1, 2, 3, 4, 6):
-        picked = frames[::step][: max(6, 48 // step)]
-        payload = _render_gif(picked, duration * step)
-        if len(payload) <= MAX_BYTES:
-            break
-    return payload
+    return best if best is not None else source.convert("RGBA")
 
 
 def encode_png(raw: bytes) -> bytes:
-    source = Image.open(io.BytesIO(raw)).convert("RGBA")
+    """一张图：取最完整的一帧，缩到 TARGET_SIZE，存 PNG。
+
+    A 批的源素材是动图，B 批本身就是静图，走到这里统一成静图。群里发出去的本来就是
+    「一张图」，动图在里面循环播，首尾的空帧只会碍眼，体积还大一整个数量级。
+    """
+    source = _fullest_frame(Image.open(io.BytesIO(raw)))
     source.thumbnail((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
     buffer = io.BytesIO()
     source.save(buffer, format="PNG", optimize=True)
@@ -245,25 +209,10 @@ def sheet(entries: list[tuple[str, Path]], out: Path, *, columns: int = 8) -> No
 
 
 def _best_frame(path: Path) -> Image.Image:
-    """预览用「内容最满」的那一帧：动图首帧常常是空的，拿它当封面等于一片白。"""
-    source = Image.open(path)
-    best: Image.Image | None = None
-    best_area = -1
-    try:
-        while True:
-            frame = source.convert("RGBA").resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
-            box = frame.getchannel("A").getbbox()
-            area = 0 if box is None else (box[2] - box[0]) * (box[3] - box[1])
-            if area > best_area:
-                best, best_area = frame, area
-            source.seek(source.tell() + 1)
-    except EOFError:
-        pass
-    except Exception:
-        pass
-    if best is None:
-        best = source.convert("RGBA").resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
-    return best
+    """预览用「内容最满」的那一帧：动图首尾常常是空的，拿它当封面等于一片白。"""
+    frame = _fullest_frame(Image.open(path))
+    frame.thumbnail((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
+    return frame
 
 
 async def run(out: Path, *, force: bool = False) -> int:
@@ -278,13 +227,13 @@ async def run(out: Path, *, force: bool = False) -> int:
             {
                 "batch": "A",
                 "slug": f"a_{codepoint}",
-                "ext": ".gif",
+                "ext": ".png",
                 "label": label,
                 "name": name,
                 "tags": tags,
                 "url": NOTO.format(cp=codepoint),
                 "license": NOTO_LICENSE,
-                "encode": encode_gif,
+                "encode": encode_png,
             }
         )
     for folder, stem, label, name, tags in FLUENT_PICKS:

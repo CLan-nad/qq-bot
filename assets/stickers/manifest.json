@@ -5,7 +5,7 @@
       "id": "emoji",
       "source": "Google Noto Animated Emoji",
       "license": "Apache-2.0",
-      "note": "动图由 scripts/fetch_stickers.py 取自官方开源 emoji 素材，未改动内容，仅压缩尺寸。"
+      "note": "静图由 scripts/fetch_stickers.py 取自官方开源 emoji 素材，只取动图里最完整的一帧并缩小尺寸，未改动内容。"
     },
     {
       "id": "maodou",
@@ -17,7 +17,7 @@
   "items": [
     {
       "name": "爱心眼",
-      "file": "a_1f970.gif",
+      "file": "a_1f970.png",
       "emoji": "🥰",
       "tags": [
         "喜欢",
@@ -26,7 +26,7 @@
     },
     {
       "name": "飞吻",
-      "file": "a_1f618.gif",
+      "file": "a_1f618.png",
       "emoji": "😘",
       "tags": [
         "亲亲",
@@ -35,7 +35,7 @@
     },
     {
       "name": "崇拜",
-      "file": "a_1f60d.gif",
+      "file": "a_1f60d.png",
       "emoji": "😍",
       "tags": [
         "喜欢",
@@ -44,7 +44,7 @@
     },
     {
       "name": "抱抱",
-      "file": "a_1f917.gif",
+      "file": "a_1f917.png",
       "emoji": "🤗",
       "tags": [
         "抱抱",
@@ -53,7 +53,7 @@
     },
     {
       "name": "贴贴",
-      "file": "a_1fac2.gif",
+      "file": "a_1fac2.png",
       "emoji": "🫂",
       "tags": [
         "抱抱",
@@ -62,7 +62,7 @@
     },
     {
       "name": "比心",
-      "file": "a_1faf6.gif",
+      "file": "a_1faf6.png",
       "emoji": "🫶",
       "tags": [
         "喜欢",
@@ -71,7 +71,7 @@
     },
     {
       "name": "爱心",
-      "file": "a_2764_fe0f.gif",
+      "file": "a_2764_fe0f.png",
       "emoji": "❤️",
       "tags": [
         "喜欢"
@@ -79,7 +79,7 @@
     },
     {
       "name": "求求了",
-      "file": "a_1f97a.gif",
+      "file": "a_1f97a.png",
       "emoji": "🥺",
       "tags": [
         "撒娇",
@@ -88,7 +88,7 @@
     },
     {
       "name": "感动",
-      "file": "a_1f979.gif",
+      "file": "a_1f979.png",
       "emoji": "🥹",
       "tags": [
         "感动"
@@ -96,7 +96,7 @@
     },
     {
       "name": "大哭",
-      "file": "a_1f62d.gif",
+      "file": "a_1f62d.png",
       "emoji": "😭",
       "tags": [
         "哭",
@@ -105,7 +105,7 @@
     },
     {
       "name": "笑到打滚",
-      "file": "a_1f923.gif",
+      "file": "a_1f923.png",
       "emoji": "🤣",
       "tags": [
         "开心",
@@ -114,7 +114,7 @@
     },
     {
       "name": "嘿嘿",
-      "file": "a_1f601.gif",
+      "file": "a_1f601.png",
       "emoji": "😁",
       "tags": [
         "开心"
@@ -122,7 +122,7 @@
     },
     {
       "name": "微笑",
-      "file": "a_1f60a.gif",
+      "file": "a_1f60a.png",
       "emoji": "😊",
       "tags": [
         "开心",
@@ -131,7 +131,7 @@
     },
     {
       "name": "撒花",
-      "file": "a_1f389.gif",
+      "file": "a_1f389.png",
       "emoji": "🎉",
       "tags": [
         "庆祝"
@@ -139,7 +139,7 @@
     },
     {
       "name": "鼓掌",
-      "file": "a_1f44f.gif",
+      "file": "a_1f44f.png",
       "emoji": "👏",
       "tags": [
         "夸",
@@ -148,7 +148,7 @@
     },
     {
       "name": "赞",
-      "file": "a_1f44d.gif",
+      "file": "a_1f44d.png",
       "emoji": "👍",
       "tags": [
         "夸",
@@ -157,7 +157,7 @@
     },
     {
       "name": "好耶",
-      "file": "a_1f64c.gif",
+      "file": "a_1f64c.png",
       "emoji": "🙌",
       "tags": [
         "开心"
@@ -165,7 +165,7 @@
     },
     {
       "name": "偷笑",
-      "file": "a_1f92d.gif",
+      "file": "a_1f92d.png",
       "emoji": "🤭",
       "tags": [
         "调皮",
@@ -174,7 +174,7 @@
     },
     {
       "name": "坏笑",
-      "file": "a_1f60f.gif",
+      "file": "a_1f60f.png",
       "emoji": "😏",
       "tags": [
         "调皮",
@@ -183,7 +183,7 @@
     },
     {
       "name": "你懂的",
-      "file": "a_1f609.gif",
+      "file": "a_1f609.png",
       "emoji": "😉",
       "tags": [
         "调皮"
@@ -191,7 +191,7 @@
     },
     {
       "name": "害羞",
-      "file": "a_1f633.gif",
+      "file": "a_1f633.png",
       "emoji": "😳",
       "tags": [
         "害羞"
@@ -199,7 +199,7 @@
     },
     {
       "name": "困了",
-      "file": "a_1f971.gif",
+      "file": "a_1f971.png",
       "emoji": "🥱",
       "tags": [
         "困"
@@ -207,7 +207,7 @@
     },
     {
       "name": "睡觉",
-      "file": "a_1f634.gif",
+      "file": "a_1f634.png",
       "emoji": "😴",
       "tags": [
         "困",
@@ -216,7 +216,7 @@
     },
     {
       "name": "思考",
-      "file": "a_1f914.gif",
+      "file": "a_1f914.png",
       "emoji": "🤔",
       "tags": [
         "思考",
@@ -225,7 +225,7 @@
     },
     {
       "name": "无语",
-      "file": "a_1f644.gif",
+      "file": "a_1f644.png",
       "emoji": "🙄",
       "tags": [
         "无语",
@@ -234,7 +234,7 @@
     },
     {
       "name": "尴尬",
-      "file": "a_1f62c.gif",
+      "file": "a_1f62c.png",
       "emoji": "😬",
       "tags": [
         "尴尬"
@@ -242,7 +242,7 @@
     },
     {
       "name": "融化了",
-      "file": "a_1fae0.gif",
+      "file": "a_1fae0.png",
       "emoji": "🫠",
       "tags": [
         "社死",
@@ -251,7 +251,7 @@
     },
     {
       "name": "脑壳炸了",
-      "file": "a_1f92f.gif",
+      "file": "a_1f92f.png",
       "emoji": "🤯",
       "tags": [
         "头秃",
@@ -260,7 +260,7 @@
     },
     {
       "name": "震惊",
-      "file": "a_1f631.gif",
+      "file": "a_1f631.png",
       "emoji": "😱",
       "tags": [
         "震惊",
@@ -269,7 +269,7 @@
     },
     {
       "name": "气鼓鼓",
-      "file": "a_1f621.gif",
+      "file": "a_1f621.png",
       "emoji": "😡",
       "tags": [
         "生气"
@@ -277,7 +277,7 @@
     },
     {
       "name": "哼",
-      "file": "a_1f620.gif",
+      "file": "a_1f620.png",
       "emoji": "😠",
       "tags": [
         "生气"
@@ -285,7 +285,7 @@
     },
     {
       "name": "我死了",
-      "file": "a_1f480.gif",
+      "file": "a_1f480.png",
       "emoji": "💀",
       "tags": [
         "崩溃",
@@ -294,7 +294,7 @@
     },
     {
       "name": "暗中观察",
-      "file": "a_1f440.gif",
+      "file": "a_1f440.png",
       "emoji": "👀",
       "tags": [
         "看戏",
@@ -303,7 +303,7 @@
     },
     {
       "name": "偷看",
-      "file": "a_1fae3.gif",
+      "file": "a_1fae3.png",
       "emoji": "🫣",
       "tags": [
         "调皮",
@@ -312,7 +312,7 @@
     },
     {
       "name": "哇塞",
-      "file": "a_1f929.gif",
+      "file": "a_1f929.png",
       "emoji": "🤩",
       "tags": [
         "夸",
@@ -321,7 +321,7 @@
     },
     {
       "name": "收到",
-      "file": "a_1fae1.gif",
+      "file": "a_1fae1.png",
       "emoji": "🫡",
       "tags": [
         "答应",
@@ -330,7 +330,7 @@
     },
     {
       "name": "蹦跶",
-      "file": "a_1f407.gif",
+      "file": "a_1f407.png",
       "emoji": "🐇",
       "tags": [
         "动物",
@@ -339,7 +339,7 @@
     },
     {
       "name": "喵",
-      "file": "a_1f431.gif",
+      "file": "a_1f431.png",
       "emoji": "🐱",
       "tags": [
         "动物",
@@ -348,7 +348,7 @@
     },
     {
       "name": "小鸡",
-      "file": "a_1f423.gif",
+      "file": "a_1f423.png",
       "emoji": "🐣",
       "tags": [
         "动物",
@@ -357,7 +357,7 @@
     },
     {
       "name": "呱",
-      "file": "a_1f438.gif",
+      "file": "a_1f438.png",
       "emoji": "🐸",
       "tags": [
         "动物",
@@ -400,6 +400,26 @@
         "本尊",
         "委屈",
         "安慰"
+      ]
+    },
+    {
+      "name": "本尊坐好",
+      "file": "m_benzon_sit.png",
+      "emoji": "🐰",
+      "tags": [
+        "本尊",
+        "乖乖",
+        "等夸"
+      ]
+    },
+    {
+      "name": "本尊探头",
+      "file": "m_benzon_peek.png",
+      "emoji": "👀",
+      "tags": [
+        "本尊",
+        "探头",
+        "好奇"
       ]
     }
   ]
