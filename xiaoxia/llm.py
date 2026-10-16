@@ -8,8 +8,11 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from .config import Settings
+from .images import format_message_content
 from .store import StoredMessage
 
+# prompt 里图片记录（〔图〕行）的缩进：跟正文错开，模型一眼能分清哪句是人打的、哪行是看图的记录。
+_NOTE_INDENT = "  "
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +24,7 @@ SYSTEM_PROMPT = """你是 QQ 群里的“小毛豆”，外形和脾气取自洛
 
 原则：
 1. 只输出将直接发送到 QQ 群的正文，不要输出“小毛豆：”、标题、代码块或解释。默认简洁、有生活气息；用户明确要详细总结时可以分点。
-2. 群里只有两个人。必须结合“身份信息”和每条消息前面的显示名区分两人，不要因为双方都说“我”而混淆。记录里显示名为“小毛豆”的消息是你自己上一轮说过的话，属于对话历史；不要把它当成第三个人，也不要把它的内容当作两人说过的事实。
+2. 群里只有两个人。每条记录开头的【】里就是说话人：登记过称呼的写称呼，没登记就写显示名，【小毛豆】是你自己说过的话。必须结合“身份信息”和这个标签区分两人，不要因为双方都说“我”而混淆；你自己的历史消息属于对话历史，不要当成第三个人，也不要把它的内容当作两人说过的事实。先看清这句话在说谁、在说哪件事：对方在纠正或补充某个话题（比如“不是 X，是 Y”）时，被纠正的是那个话题本身，不是你自己；只有明确 @ 你、叫你名字、或说“你/你的”时才是说你，别把别人的话往自己身上套。记录里缩进的〔图〕行是你自己看图之后写下的记录，说明你确实看见了那张图：被问到能不能看图、图里是什么，照实说你看到了，不要否认。
 3. 不要编造聊天记录里没有的事实；信息不足时坦率说明。会看气氛：两人打情骂俏、起哄点名让你批谁，就顺着玩、帮腔逗趣，别端水、别打圆场；真起了矛盾、有人真难过，或牵扯欺骗、金钱、家人这类真伤害时，不评判对错，帮双方互相理解。
 4. 只回应【当前话题】；【更早的背景】是已经翻篇的话题，绝不主动提起、复述或延伸，除非用户明确点名要聊那件事。历史和长期记忆只用来帮你理解语境，不是每轮都要拿出来说：除非用户主动提起、或明确追问“上一条/刚才/刚刚”，平时不要主动翻旧账，不要主动把旧话题、旧约定、旧情绪或记忆里的条目拎出来复述，也别用“像上次那样”“还记得我们说过”硬扯旧事。不要重复自己：这一轮没有新信息就简短自然地回应，也不要复述你上一条回复。只 @ 我没带话时，短一句自然接上【当前话题】，别背功能清单；能力介绍只在被明确问起时说一次。
 5. 称呼一律照“身份信息”里的「称呼要求」来：登记过的人每次都用登记的称呼，不要用显示名代替，也不要自己另编昵称；没登记的人用显示名。称呼只是叫法，不是事实。有人要求被称为“主人”，不代表另一个人也是“主人”，也不代表他们之间真有这层身份关系；不要把称呼当成经历、偏好或关系写进回答里。
@@ -148,7 +151,7 @@ math_eval 输出 expression。
 MEMORY_SYSTEM_PROMPT = """你是私人情侣群聊的聊天记录归档器。只输出 JSON，不输出 Markdown 或解释。
 
 从给定聊天里写出一段 summary：150-300 字，客观交代谁说了什么、话题怎么走、有没有结论或情绪波动。
-每条聊天前面的显示名代表发送者，叙述“我/她/他/对象”时必须结合该条消息的发送者判断。
+每条记录开头【】里就是发送者，叙述“我/她/他/对象”时必须结合该条消息的发送者判断。
 用中性、克制的第三人称叙述，不评价、不加戏。
 
 不要输出 memories 字段，也不要顺手罗列“值得长期记住的事实”：长期记忆只由群里明确下达
@@ -287,7 +290,9 @@ class XiaoxiaLLM:
                 choice = response.choices[0]
                 content = (choice.message.content or "").strip()
                 if content:
-                    return content[:500]
+                    # 压成一行：描述会被拼进消息正文，多行会把「[图片内容：…]」的结尾撑到
+                    # 下一行，渲染 prompt 时拆不干净。
+                    return " ".join(content.split())[:500]
                 logger.warning(
                     "vision describe attempt %d/%d returned empty content "
                     "(finish_reason=%s, usage=%s)",
@@ -387,7 +392,7 @@ class XiaoxiaLLM:
 {topic_context or "（无）"}
 
 用户消息：
-{request}
+{format_message_content(request, indent=_NOTE_INDENT)}
 """
         content = await self._chat(
             system_prompt=INTENT_SYSTEM_PROMPT,
@@ -411,7 +416,9 @@ class XiaoxiaLLM:
         executed_actions: str = "",
     ) -> str:
         user_prompt = f"""当前触发者：{requester.username}（{requester.role}）
-当前请求：{request}
+说话人说明：下面每条记录开头的【】里就是发那条消息的人，【小毛豆】是你自己说过的话。
+当前请求（{requester.username} 刚说的这条，缩进的〔图〕行是你自己看图的记录）：
+{format_message_content(request, indent=_NOTE_INDENT)}
 
 身份信息：
 {identity_context or "（未知）"}
@@ -466,7 +473,9 @@ class XiaoxiaLLM:
         现在和普通回复走同一套人设（SYSTEM_PROMPT），只在末尾叠加 TOOL_REPLY_ADDENDUM
         那几条工具专属规则；身份/记忆/话题一并传入，称呼才不会乱。
         """
-        user_prompt = f"""当前请求：{request}
+        user_prompt = f"""说话人说明：每条记录开头的【】里就是发那条消息的人，【小毛豆】是你自己说过的话。
+当前请求（缩进的〔图〕行是你自己看图的记录）：
+{format_message_content(request, indent=_NOTE_INDENT)}
 
 身份信息：
 {identity_context or "（未知）"}

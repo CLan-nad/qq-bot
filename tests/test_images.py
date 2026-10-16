@@ -14,12 +14,14 @@ import xiaoxia.images as images_module
 import xiaoxia.llm as llm_module
 from xiaoxia.images import (
     fetch_image_bytes,
+    format_message_content,
     image_attachments,
     message_with_image_descriptions,
     message_with_unrecognized_images,
     needs_image_description,
     normalize_face_tags,
     sniff_image_content_type,
+    split_image_notes,
     strip_image_placeholders,
     to_data_url,
 )
@@ -537,6 +539,61 @@ class StickerDescribeTests(unittest.TestCase):
         # 系统小表情没有图片附件，不该浪费一次视觉调用；但入库时乱码已经解码成可读文本。
         self.assertEqual(budget, 3)
         self.assertEqual(self.store.recent_messages(GROUP, 5)[0].content, "[头秃]")
+
+
+class ImageNoteRenderingTests(unittest.TestCase):
+    """入库仍用 [图片内容：…] 标记，进 prompt 时拆成独立〔图〕行。
+
+    线上原样回放：小毛豆看图认出了白桃乌龙雪糕，被问起却说「图片我是真看不了」——
+    因为描述被拼成了一行用户文字，它以为那是对方打出来的。
+    """
+
+    def test_split_image_notes_pulls_notes_out_of_the_text(self) -> None:
+        text, notes = split_image_notes("八块，我去\n[图片内容：手里拿着白桃乌龙雪糕]")
+        self.assertEqual(text, "八块，我去")
+        self.assertEqual(notes, ["手里拿着白桃乌龙雪糕"])
+
+    def test_split_image_notes_keeps_text_only_content(self) -> None:
+        text, notes = split_image_notes("就是普通一句话")
+        self.assertEqual(text, "就是普通一句话")
+        self.assertEqual(notes, [])
+
+    def test_split_image_notes_handles_several_images(self) -> None:
+        text, notes = split_image_notes(
+            "[图片内容：一只橘猫]\n[图片内容：桌面有点乱]"
+        )
+        self.assertEqual(text, "")
+        self.assertEqual(notes, ["一只橘猫", "桌面有点乱"])
+
+    def test_split_image_notes_collapses_multiline_descriptions(self) -> None:
+        text, notes = split_image_notes("看图\n[图片内容：第一行\n第二行]")
+        self.assertEqual(text, "看图")
+        self.assertEqual(notes, ["第一行 第二行"])
+
+    def test_format_message_content_keeps_note_on_its_own_line(self) -> None:
+        rendered = format_message_content(
+            "八块，我去\n[图片内容：手里拿着白桃乌龙雪糕]", indent="    "
+        )
+        lines = rendered.splitlines()
+        self.assertEqual(lines[0], "八块，我去")
+        self.assertEqual(lines[1], "    〔图〕手里拿着白桃乌龙雪糕")
+        self.assertNotIn("[图片内容：", rendered)
+
+    def test_format_message_content_pure_image_message(self) -> None:
+        rendered = format_message_content("[图片内容：一只橘猫]")
+        self.assertEqual(rendered, "〔图〕一只橘猫")
+
+    def test_describe_image_output_is_single_line(self) -> None:
+        llm, _ = _fake_llm()
+
+        class _Multiline:
+            async def create(self, **kwargs):
+                message = SimpleNamespace(content="第一行\n\n第二行  第三行")
+                return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+        llm.client = SimpleNamespace(chat=SimpleNamespace(completions=_Multiline()))
+        description = asyncio.run(llm.describe_image("https://example.com/a.jpg"))
+        self.assertEqual(description, "第一行 第二行 第三行")
 
 
 if __name__ == "__main__":

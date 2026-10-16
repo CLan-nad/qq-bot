@@ -72,7 +72,10 @@ class SystemPromptRuleTests(unittest.TestCase):
         # 17 条压到 7 条：4 条「别翻旧账」并成规则 4，3 条反幻觉补丁并成规则 7。
         # 这条断言是防止 prompt 再往回长——规则越多，人设越被淹没。
         self.assertEqual(numbers[-1], 7)
-        self.assertLessEqual(len(SYSTEM_PROMPT), 1400)
+        # 上限从 1400 放到 1700：规则 2 里补了「【】就是说话人」「纠正的是话题不是你自己」
+        # 「〔图〕是你自己看图的记录」三件事——都是线上真实翻车（说话人错位、把 codex
+        # 当成自己、认了图却说没识别）换来的，不是可选项。
+        self.assertLessEqual(len(SYSTEM_PROMPT), 1700)
 
     def test_persona_still_outranks_the_bug_patches(self) -> None:
         # 压缩的目的：让「性格」在 prompt 里的分量压过历史补丁

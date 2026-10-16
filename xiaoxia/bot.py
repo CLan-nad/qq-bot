@@ -247,9 +247,19 @@ class IdentityContext:
     partner: StoredMessage | None
     # 显示名 -> 群里登记过的称呼。没登记过就是空 dict，照旧用显示名。
     addresses: dict[str, str] = field(default_factory=dict)
+    # openid / 显示名 -> 记录里【】里挂的那个名字，跟 format_topic 用的是同一张表。
+    speaker_labels: dict[str, str] = field(default_factory=dict)
 
     def _address(self, member: StoredMessage) -> str:
         return self.addresses.get((member.username or "").strip(), "")
+
+    def _speaker(self, member: StoredMessage | None) -> str:
+        """这条人在聊天记录里挂的名字（登记过称呼就是称呼，否则显示名）。"""
+        if member is None:
+            return "暂时未识别"
+        name = (member.username or "").strip()
+        openid = (member.member_openid or "").strip()
+        return self.speaker_labels.get(openid) or self.speaker_labels.get(name) or name or "成员"
 
     def _label(self, member: StoredMessage) -> str:
         role = ROLE_LABELS.get(member.role, member.role or "成员")
@@ -269,9 +279,16 @@ class IdentityContext:
         )
         if rules:
             lines.append(f"称呼要求（他们自己定的，每一轮都要照做）：{rules}。")
+        # 记录里每条消息挂的是【称呼】，这里把标签对准身份：谁是「你」、谁是「另一位」。
+        legend = f"【{self._speaker(self.requester)}】= 当前触发者（就是「你」）"
+        if self.partner is not None:
+            legend += f"；【{self._speaker(self.partner)}】= 另一位聊天成员"
+        lines.append(
+            f"聊天记录里的名字：{legend}；【小毛豆】= 你自己说的话。"
+        )
         lines.append(
             "身份要求：当前触发者用“你”指代，另一位用他的称呼或“你对象”指代。"
-            "最近记录中的“我”以每条消息开头的显示名为准，不要把两人的经历或偏好混在一起。"
+            "最近记录中的“我”以每条消息开头的【】里那个人为准，不要把两人的经历或偏好混在一起。"
         )
         return "\n".join(lines)
 
@@ -540,7 +557,12 @@ class XiaoxiaClient(botpy.Client):
             address = self.store.address_for(group_openid, name)
             if address:
                 addresses[name] = address
-        return IdentityContext(requester=requester, partner=partner, addresses=addresses)
+        return IdentityContext(
+            requester=requester,
+            partner=partner,
+            addresses=addresses,
+            speaker_labels=self.store.speaker_labels(group_openid),
+        )
 
     async def on_ready(self) -> None:
         stats = self.store.stats()
@@ -665,6 +687,7 @@ class XiaoxiaClient(botpy.Client):
                 message_context = self._format_stored_messages(
                     batch.messages,
                     self.settings.max_context_chars,
+                    self.store.speaker_labels(group_openid),
                 )
                 result = await self.llm.process_memory_batch(message_context)
                 summary = str(result.get("summary") or "").strip()
@@ -685,17 +708,13 @@ class XiaoxiaClient(botpy.Client):
                 )
 
     @staticmethod
-    def _format_stored_messages(messages: list[StoredMessage], max_chars: int) -> str:
-        lines: list[str] = []
-        total = 0
-        for message in messages:
-            timestamp = (message.timestamp or "")[:19].replace("T", " ")
-            line = f"{timestamp} {message.username}: {message.content}"
-            if total + len(line) + 1 > max_chars:
-                break
-            lines.append(line)
-            total += len(line) + 1
-        return "\n".join(lines)
+    def _format_stored_messages(
+        messages: list[StoredMessage],
+        max_chars: int,
+        labels: dict[str, str] | None = None,
+    ) -> str:
+        """归档/情绪判断看到的记录跟主回复同一套：时间 + 【说话人】 + 正文。"""
+        return format_topic(messages, max_chars, labels)
 
     def _memory_context(self, group_openid: str) -> str:
         summaries = self.store.conversation_summaries(group_openid, limit=5)
@@ -812,7 +831,9 @@ class XiaoxiaClient(botpy.Client):
         try:
             verdict = await self.llm.judge_care(
                 content=content,
-                recent_context=self._format_stored_messages(recent, 600),
+                recent_context=self._format_stored_messages(
+                    recent, 600, self.store.speaker_labels(group_openid)
+                ),
             )
             if not verdict.get("care"):
                 return
@@ -938,14 +959,15 @@ class XiaoxiaClient(botpy.Client):
     def _topic_context(self, group_openid: str) -> tuple[str, str, str]:
         """切成【当前话题】+【更早的背景】，另外留一份全量记录给历史检索兜底。"""
         recent = self.store.recent_messages(group_openid, self.settings.recent_messages)
+        labels = self.store.speaker_labels(group_openid)
         topic_slice = split_topic(
             recent,
             boundary_row_id=self.store.latest_summary_row_id(group_openid),
         )
         return (
-            format_topic(topic_slice.current, self.settings.max_context_chars),
-            format_topic(topic_slice.previous_tail, 4000),
-            format_topic(recent, self.settings.max_context_chars),
+            format_topic(topic_slice.current, self.settings.max_context_chars, labels),
+            format_topic(topic_slice.previous_tail, 4000, labels),
+            format_topic(recent, self.settings.max_context_chars, labels),
         )
 
     @staticmethod

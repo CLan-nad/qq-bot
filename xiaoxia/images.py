@@ -32,6 +32,13 @@ FACE_TAG_PATTERN = re.compile(r'<faceType=(\d+),faceId="(\d+)"(?:,ext="([^"]*)")
 IMAGE_DESCRIBED_MARKS = ("图片内容：", "图片未识别")
 UNRECOGNIZED_IMAGE_MARK = "[图片未识别]"
 
+# 图片描述入库时拼在正文里，形如「[图片内容：…]」。这条记录是「我看过这张图」的凭据，
+# 但它混在用户正文里就成了同一行文字，模型会以为「这是对方打出来的字」——线上于是出现
+# 「它都看出是白桃乌龙雪糕了，问它却说没识别出图片」。渲染 prompt 时统一拆成独立的〔图〕
+# 行，跟用户原话分清楚：文字是对方说的，〔图〕是我自己看图留下的记录。
+IMAGE_NOTE_LABEL = "〔图〕"
+IMAGE_NOTE_PATTERN = re.compile(r"\[图片内容：(.*?)\]", re.S)
+
 DEFAULT_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 30.0
 _IMAGE_REQUEST_HEADERS = {
@@ -103,6 +110,32 @@ def message_with_unrecognized_images(content: str | None) -> str:
     parts = [text] if text else []
     parts.append(UNRECOGNIZED_IMAGE_MARK)
     return "\n".join(parts)
+
+
+def split_image_notes(content: str | None) -> tuple[str, list[str]]:
+    """把「[图片内容：…]」从正文里拆出来，返回 (用户原话, [看图记录...])。"""
+    text = content or ""
+    notes: list[str] = []
+    for match in IMAGE_NOTE_PATTERN.finditer(text):
+        note = " ".join(match.group(1).split())
+        if note:
+            notes.append(note)
+    remainder = IMAGE_NOTE_PATTERN.sub("", text)
+    lines = [line.strip() for line in remainder.splitlines()]
+    return "\n".join(line for line in lines if line).strip(), notes
+
+
+def format_message_content(
+    content: str | None,
+    *,
+    indent: str = "",
+    note_label: str = IMAGE_NOTE_LABEL,
+) -> str:
+    """渲染一条消息的正文：用户原话在前，自己看图的记录缩进成独立的〔图〕行。"""
+    text, notes = split_image_notes(content)
+    lines = [text] if text else []
+    lines.extend(f"{indent}{note_label}{note}" for note in notes)
+    return "\n".join(lines)
 
 
 def _decode_face_text(ext: str) -> str:

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from .images import normalize_face_tags
+from .images import format_message_content, normalize_face_tags
 from .scheduling import schedule_label
 
 
@@ -664,17 +664,14 @@ class ChatStore:
         ]
 
     def format_recent_messages(self, group_openid: str, limit: int, max_chars: int) -> str:
-        messages = self.recent_messages(group_openid, limit)
-        lines: list[str] = []
-        total = 0
-        for message in messages:
-            timestamp = (message.timestamp or "")[:19].replace("T", " ")
-            line = f"{timestamp} {message.username}({message.role}): {message.content}"
-            if total + len(line) + 1 > max_chars:
-                break
-            lines.append(line)
-            total += len(line) + 1
-        return "\n".join(lines)
+        # 局部导入：topics 依赖 store 里的数据类型，模块级互导会成环。
+        from .topics import format_topic
+
+        return format_topic(
+            self.recent_messages(group_openid, limit),
+            max_chars,
+            self.speaker_labels(group_openid),
+        )
 
     @staticmethod
     def _search_text(query: str) -> str:
@@ -736,7 +733,8 @@ class ChatStore:
         total = 0
         for result in results:
             timestamp = (result.timestamp or "")[:19].replace("T", " ")
-            line = f"{timestamp} {result.username}: {result.content}"
+            # 看图记录拆成独立的〔图〕行：检索回放里也要看得出「这是我当时看到的图」。
+            line = f"{timestamp} {result.username}: {format_message_content(result.content)}"
             if total + len(line) + 1 > max_chars:
                 break
             lines.append(line)
@@ -1089,6 +1087,25 @@ class ChatStore:
             (group_openid,),
         ).fetchall()
         return {str(row["person"]): str(row["address"]) for row in rows}
+
+    def speaker_labels(self, group_openid: str, limit: int = 50) -> dict[str, str]:
+        """说话人标签表：openid / 显示名 → 该挂的名字。登记过称呼的用称呼。
+
+        渲染聊天记录时用它给每条消息挂名字，模型不用再猜「这句话是谁说的」。
+        两个 key 都能查（openid 优先），历史消息的显示名变了也还能命中。
+        """
+        labels: dict[str, str] = {}
+        for member in self.known_members(group_openid, limit=limit):
+            name = (member.username or "").strip()
+            openid = (member.member_openid or "").strip()
+            label = (self.address_for(group_openid, name) if name else "") or name or openid
+            if not label:
+                continue
+            if openid:
+                labels.setdefault(openid, label)
+            if name:
+                labels.setdefault(name, label)
+        return labels
 
     def address_for(self, group_openid: str, person: str | None) -> str:
         """拿到该怎么称呼这个人；没登记过就返回空串。"""

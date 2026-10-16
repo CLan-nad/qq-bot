@@ -12,8 +12,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
 
+from .images import format_message_content
 from .store import StoredMessage
 
+
+# 机器人自己的显示名：记录里它的消息都用这个标签，模型才不会把自己当成第三个人。
+BOT_LABEL = "小毛豆"
+BOT_ROLES = frozenset({"bot", "assistant"})
 
 # 相邻两条消息间隔超过这个分钟数，认为上一个话题已经结束。
 DEFAULT_GAP_MINUTES = 45
@@ -93,17 +98,56 @@ def split_topic(
     return TopicSlice(current=current, previous_tail=previous_tail)
 
 
-def format_topic(messages: Iterable[StoredMessage], max_chars: int) -> str:
+def speaker_label(
+    message: StoredMessage,
+    labels: dict[str, str] | None = None,
+    *,
+    bot_label: str = BOT_LABEL,
+) -> str:
+    """这条消息该挂谁的名字。
+
+    以前只有显示名，模型每轮都得猜「都怪你叫叫叫」是谁说的——线上因此出现把 A 的话
+    算到 B 头上。现在优先用登记过的称呼（openid 或显示名任一命中），机器人固定叫
+    「小毛豆」，剩下的退回显示名。
+    """
+    username = (message.username or "").strip()
+    if (message.role or "").strip().lower() in BOT_ROLES or username == bot_label:
+        return bot_label
+    if labels:
+        openid = (message.member_openid or "").strip()
+        if openid and labels.get(openid):
+            return labels[openid]
+        if username and labels.get(username):
+            return labels[username]
+    return username or "未知"
+
+
+def format_topic(
+    messages: Iterable[StoredMessage],
+    max_chars: int,
+    labels: dict[str, str] | None = None,
+    *,
+    bot_label: str = BOT_LABEL,
+) -> str:
+    """渲染成「时间 【说话人】正文」，多带一行看图的记录。"""
     lines: list[str] = []
     total = 0
     for message in messages:
         timestamp = (message.timestamp or "")[:19].replace("T", " ")
-        line = f"{timestamp} {message.username}({message.role}): {message.content}"
-        if total + len(line) + 1 > max_chars:
+        prefix = f"{timestamp} 【{speaker_label(message, labels, bot_label=bot_label)}】"
+        block = prefix + format_message_content(message.content, indent=" " * len(prefix))
+        if total + len(block) + 1 > max_chars:
             break
-        lines.append(line)
-        total += len(line) + 1
+        lines.append(block)
+        total += len(block) + 1
     return "\n".join(lines)
 
 
-__all__ = ["TopicSlice", "format_topic", "parse_timestamp", "split_topic"]
+__all__ = [
+    "BOT_LABEL",
+    "TopicSlice",
+    "format_topic",
+    "parse_timestamp",
+    "speaker_label",
+    "split_topic",
+]

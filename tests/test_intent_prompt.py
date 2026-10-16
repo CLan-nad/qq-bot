@@ -132,6 +132,22 @@ class SystemPromptTests(unittest.TestCase):
         self.assertIn("不用游戏原名", SYSTEM_PROMPT)
         self.assertIn("可爱、调皮", SYSTEM_PROMPT)
 
+    def test_rule_speaker_labels_are_spelled_out(self) -> None:
+        # 说话人错位（把 A 的话算到 B 头上）的根治办法：prompt 里明说【】就是说话人
+        self.assertIn("每条记录开头的【】里就是说话人", SYSTEM_PROMPT)
+        self.assertIn("【小毛豆】是你自己说过的话", SYSTEM_PROMPT)
+
+    def test_rule_correction_targets_the_topic_not_itself(self) -> None:
+        # 「不是编程工具，是 agent」被它听成「在说我自己」，必须写清被纠正的是话题本身
+        self.assertIn("被纠正的是那个话题本身，不是你自己", SYSTEM_PROMPT)
+        self.assertIn("别把别人的话往自己身上套", SYSTEM_PROMPT)
+
+    def test_rule_says_it_can_see_images(self) -> None:
+        # 已经识别出雪糕图、被问却否认「看不了图片」，是 prompt 从没告诉它能看图
+        self.assertIn("〔图〕", SYSTEM_PROMPT)
+        self.assertIn("说明你确实看见了那张图", SYSTEM_PROMPT)
+        self.assertIn("不要否认", SYSTEM_PROMPT)
+
 
 class GroupPrefPromptTests(unittest.TestCase):
     def test_bot_pref_action_is_listed(self) -> None:
