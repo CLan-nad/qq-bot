@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -118,6 +120,65 @@ class FaceLearningTests(unittest.TestCase):
     def test_plain_text_learns_nothing(self) -> None:
         self._save("今天天气不错")
         self.assertEqual(self.store.face_book(GROUP), {})
+
+
+class FaceBackfillTests(unittest.TestCase):
+    """老库升级：历史消息里的表情名得能补出来，不然群里用过的表情一个也发不出去。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = str(Path(self.tmp.name) / "legacy.sqlite3")
+        self.store = ChatStore(self.path)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _insert_legacy(self, key: str, content: str, raw_json: str) -> None:
+        """老库的样子：content 已经是 [头秃]，raw_json 里还留着原始标签，face_tokens 空。"""
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            "INSERT INTO messages (message_key, message_id, group_openid, member_openid,"
+            " username, role, content, timestamp, source, raw_json)"
+            " VALUES (?, ?, ?, 'openid', 'CL', 'member', ?, '2026-10-16T20:00:00+08:00',"
+            " 'GROUP_MESSAGE_CREATE', ?)",
+            (key, key, GROUP, content, raw_json),
+        )
+        conn.commit()
+        conn.close()
+
+    def _reopen(self) -> None:
+        self.store.close()
+        self.store = ChatStore(self.path)
+
+    def test_history_hands_the_groups_faces_back(self) -> None:
+        self._insert_legacy("m1", "好累[头秃]", json.dumps({"content": f"好累{SMALL_FACE}"}))
+        self._insert_legacy("m2", "又[头秃]", json.dumps({"content": f"又{SMALL_FACE}"}))
+        self._insert_legacy("m3", "就这", json.dumps({"content": "就这"}))
+        self._reopen()
+        book = self.store.face_book(GROUP)
+        self.assertEqual(list(book), ["头秃"])
+        self.assertEqual(book["头秃"].tag, SMALL_FACE)
+
+    def test_backfill_counts_each_face_once(self) -> None:
+        self._insert_legacy("m1", "好累[头秃]", json.dumps({"content": f"好累{SMALL_FACE}"}))
+        self._reopen()
+        self._reopen()
+        row = self.store._conn.execute(
+            "SELECT hits FROM face_tokens WHERE group_openid = ?", (GROUP,)
+        ).fetchone()
+        self.assertEqual(int(row["hits"]), 1)
+
+    def test_unreadable_raw_json_is_skipped_quietly(self) -> None:
+        self._insert_legacy("m1", "好累[头秃]", "{坏掉的 faceType")
+        self._insert_legacy("m2", "又[头秃]", json.dumps({"content": f"又{SMALL_FACE}"}))
+        self._reopen()
+        self.assertEqual(list(self.store.face_book(GROUP)), ["头秃"])
+
+    def test_live_learning_does_not_need_the_backfill(self) -> None:
+        self._insert_legacy("m1", "好累[头秃]", json.dumps({"content": f"好累{SMALL_FACE}"}))
+        self._reopen()
+        self.assertEqual(self.store.backfill_face_tokens(GROUP), 0)
 
 
 class OutgoingFaceTests(unittest.TestCase):

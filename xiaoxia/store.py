@@ -357,6 +357,12 @@ class ChatStore:
             "SELECT DISTINCT group_openid FROM person_addresses"
         ).fetchall():
             self.backfill_address_openids(str(row["group_openid"]))
+        # 表情：学习是在 face_tokens 上线之后才开始的，老库第一次跑得把历史补一遍，
+        # 否则群里用了一年的表情一个都发不出来。补过就不再动（hits 会翻倍）。
+        for row in self._conn.execute(
+            "SELECT DISTINCT group_openid FROM messages"
+        ).fetchall():
+            self.backfill_face_tokens(str(row["group_openid"]))
 
     def _normalize_legacy_face_tags(self) -> int:
         """把历史消息里存量的 <faceType=...> 乱码解码成 [表情名]。
@@ -1285,6 +1291,39 @@ class ChatStore:
             bound += 1
             logger.info("person address %s bound to openid", person)
         return bound
+
+    def backfill_face_tokens(self, group_openid: str) -> int:
+        """从历史消息里补出群用过的表情，只在群里一个表情都还没记下时跑。
+
+        表情名 ↔ faceId 只能来自真实消息（代码里不写死任何一个），而入库学习是
+        face_tokens 上线之后才开始的。所以首次升级后补一次历史，之后每次启动都是空转。
+        返回补下的表情个数。
+        """
+        if not group_openid:
+            return 0
+        existing = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM face_tokens WHERE group_openid = ?",
+            (group_openid,),
+        ).fetchone()
+        if existing and int(existing["n"]) > 0:
+            return 0
+        rows = self._conn.execute(
+            "SELECT raw_json FROM messages WHERE group_openid = ? AND raw_json LIKE '%faceType%'",
+            (group_openid,),
+        ).fetchall()
+        learned = 0
+        for row in rows:
+            try:
+                raw = json.loads(row["raw_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            content = raw.get("content") if isinstance(raw, dict) else None
+            learned += self.remember_faces(group_openid, content)
+        if learned:
+            logger.info(
+                "backfilled %d face tokens for group %s", learned, group_openid
+            )
+        return learned
 
     def clear_person_address(self, group_openid: str, person: str) -> bool:
         name = self.canonical_person(group_openid, person)
