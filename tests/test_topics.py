@@ -64,10 +64,10 @@ class SplitTopicTests(unittest.TestCase):
         self.assertEqual(len(slice_.current), 13)
         self.assertEqual([m.content for m in slice_.previous_tail], ["m0"])
 
-    def test_summary_boundary_breaks_topic(self) -> None:
+    def test_summary_boundary_does_not_cut_live_topic(self) -> None:
         messages = _chain(5, step_minutes=2, start_row=10)
-        slice_ = split_topic(messages, boundary_row_id=12)
-        self.assertEqual([m.row_id for m in slice_.current], [13, 14])
+        slice_ = split_topic(messages)
+        self.assertEqual([m.row_id for m in slice_.current], [10, 11, 12, 13, 14])
 
     def test_single_message_borrows_previous_tail(self) -> None:
         messages = [

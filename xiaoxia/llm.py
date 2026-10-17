@@ -411,21 +411,22 @@ class XiaoxiaLLM:
         topic_context: str,
         background_context: str = "",
         memory_context: str = "",
+        summaries_context: str = "",
         search_context: str = "",
         identity_context: str = "",
         executed_actions: str = "",
         face_context: str = "",
     ) -> str:
-        user_prompt = f"""当前触发者：{requester.username}（{requester.role}）
-说话人说明：下面每条记录开头的【】里就是发那条消息的人，【小毛豆】是你自己说过的话。
-当前请求（{requester.username} 刚说的这条，缩进的〔图〕行是你自己看图的记录）：
-{format_message_content(request, indent=_NOTE_INDENT)}
+        user_prompt = f"""说话人说明：下面每条记录开头的【】里就是发那条消息的人，【小毛豆】是你自己说过的话。
 
 身份信息：
 {identity_context or "（未知）"}
 
-【当前话题】（从早到晚）：
+【当前话题】（从早到晚，最后一条就是现在要回应的消息）：
 {topic_context or "（暂无记录，机器人可能刚开启全量消息接收）"}
+
+本次要回应的是上面【当前话题】的最后一条（已去掉 @ 和表情标记，缩进的〔图〕行是你自己看图的记录）：
+{format_message_content(request, indent=_NOTE_INDENT)}
 """
         if background_context:
             user_prompt += f"""
@@ -437,9 +438,14 @@ class XiaoxiaLLM:
 表情：
 {face_context}
 """
+        if summaries_context:
+            user_prompt += f"""
+【最近聊天概要】（过去几天的粗略梗概）：
+{summaries_context}
+"""
         if memory_context:
             user_prompt += f"""
-长期记忆（从早到晚）：
+【长期记忆】（从早到晚）：
 {memory_context}
 """
         if search_context:

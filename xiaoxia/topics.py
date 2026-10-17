@@ -49,7 +49,6 @@ def parse_timestamp(value: str | None) -> datetime | None:
 def split_topic(
     messages: list[StoredMessage],
     *,
-    boundary_row_id: int = 0,
     gap_minutes: int = DEFAULT_GAP_MINUTES,
     max_messages: int = DEFAULT_MAX_MESSAGES,
     max_hours: int = DEFAULT_MAX_HOURS,
@@ -58,8 +57,8 @@ def split_topic(
     """按时间正序的消息切成当前话题 + 上一话题末尾若干条。
 
     从最新一条往前扫，命中任意一条就切断：相邻时间差超过 gap_minutes、已攒够
-    max_messages 条、跨度超过 max_hours、或 row_id 不大于 boundary_row_id
-    （那些消息已经被折叠进对话摘要，不该再算作「正在聊的话题」）。
+    max_messages 条、或跨度超过 max_hours。摘要边界不再硬切：正在进行的对话
+    不该因为恰好越过了某次归档的 row_id 就被劈成两半。
     """
     if not messages:
         return TopicSlice(current=[], previous_tail=[])
@@ -71,8 +70,6 @@ def split_topic(
         message = messages[index]
         if current:
             if len(current) >= max_messages:
-                break
-            if boundary_row_id and message.row_id and message.row_id <= boundary_row_id:
                 break
             stamp = parse_timestamp(message.timestamp)
             if stamp is not None:

@@ -39,7 +39,7 @@ from .images import (
 )
 from .llm import ACTION_REPLY_ADDENDUM, XiaoxiaLLM
 from .scheduling import advance_task, parse_datetime, resolve_next_run, schedule_label
-from .store import ChatStore, MemoryCard, ScheduledTask, StoredMessage
+from .store import ChatStore, MemoryCard, ScheduledTask, StoredMessage, clip_summary
 from .stickers import Sticker, StickerLibrary, face_prompt, render_faces
 from .topics import format_topic, split_topic
 from .tools import (
@@ -707,6 +707,7 @@ class XiaoxiaClient(botpy.Client):
                 summary = str(result.get("summary") or "").strip()
                 if not summary:
                     continue
+                summary = clip_summary(summary)
 
                 self.store.save_memory_batch(
                     group_openid=group_openid,
@@ -731,18 +732,29 @@ class XiaoxiaClient(botpy.Client):
         return format_topic(messages, max_chars, labels)
 
     def _memory_context(self, group_openid: str) -> str:
-        summaries = self.store.conversation_summaries(group_openid, limit=5)
-        # 注意：这里必须是 memory_cards_for_prompt。早先用 memory_cards(limit=30) 是 id
-        # 倒序，卡片一多，最早那批（真名、纪念日、人设）就永远挤不进上下文；后来改成
-        # 按 kind 配额，preference 只给 6 条，又把「别分点」「讲话俏皮」这些行为规则挤掉了。
-        # 现在按字符预算装，正常情况下全部记忆都进上下文。
+        """长期记忆只装记忆卡，不再混入对话摘要。
+
+        摘要属于「最近几天的剧情梗概」，和「稳定的事实」是两回事；混在一起后模型会把
+        剧情当成人设，张口就用摘要里的评价复述人。这里用 memory_cards_for_prompt 按
+        字符预算装卡片，摘要单独走 _summaries_context。
+        """
         cards = self.store.memory_cards_for_prompt(
             group_openid,
             now_iso=self._now().isoformat(timespec="seconds"),
         )
-        parts = [f"[摘要] {summary}" for summary in summaries]
-        parts.extend(ChatStore.format_memory_cards(cards).splitlines())
-        return "\n".join(parts)[: self.settings.max_context_chars]
+        return ChatStore.format_memory_cards(cards)[: self.settings.max_context_chars]
+
+    def _summaries_context(
+        self,
+        group_openid: str,
+        *,
+        limit: int = 2,
+        max_chars: int = 900,
+    ) -> str:
+        """最近几天的对话概要，只取最新两段，整块截断到 max_chars。"""
+        summaries = self.store.conversation_summaries(group_openid, limit=limit)
+        text = "\n".join(f"[摘要] {summary}" for summary in summaries)
+        return text[:max_chars]
 
     # ---------- 没被 @ 时的主动关心 ----------
 
@@ -977,10 +989,7 @@ class XiaoxiaClient(botpy.Client):
         """切成【当前话题】+【更早的背景】，另外留一份全量记录给历史检索兜底。"""
         recent = self.store.recent_messages(group_openid, self.settings.recent_messages)
         labels = self.store.speaker_labels(group_openid)
-        topic_slice = split_topic(
-            recent,
-            boundary_row_id=self.store.latest_summary_row_id(group_openid),
-        )
+        topic_slice = split_topic(recent)
         return (
             format_topic(topic_slice.current, self.settings.max_context_chars, labels),
             format_topic(topic_slice.previous_tail, 4000, labels),
@@ -1355,6 +1364,7 @@ class XiaoxiaClient(botpy.Client):
             topic_context=topic,
             background_context=background,
             memory_context=persona["memory_context"],
+            summaries_context=self._summaries_context(message.group_openid),
             identity_context=persona["identity_context"],
             face_context=face_context,
         )

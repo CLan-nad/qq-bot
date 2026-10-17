@@ -162,6 +162,23 @@ MEMORY_EPISODIC_KINDS = frozenset({"fact", "event"})
 # 判断「同一句话被抽了两遍」时忽略的标点空白。
 _MEMORY_NOISE = re.compile(r"[\s，。、；：,.;:!！?？~～“”\"'（）()【】\[\]《》—\-]+")
 
+# 对话摘要注入/落库的长度上限。生成时提示词要求 150-300 字，但线上出现过 615 字，
+# 这里在落库前再兜一道底，避免一段摘要就把上下文灌满。
+SUMMARY_MAX_CHARS = 300
+
+
+def clip_summary(text: str, max_chars: int = SUMMARY_MAX_CHARS) -> str:
+    """把超长摘要压回预算内：优先在最后一个整句处截断，找不到就用硬截断。"""
+    text = (text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    cut = text.rfind("。", 0, max_chars)
+    if cut == -1:
+        cut = text.rfind("；", 0, max_chars)
+    if cut == -1:
+        return text[:max_chars].rstrip() + "…"
+    return text[: cut + 1]
+
 
 class ChatStore:
     def __init__(self, db_path: str) -> None:
@@ -1532,6 +1549,50 @@ class ChatStore:
             (group_openid, limit),
         ).fetchall()
         return [row["summary"] for row in reversed(rows)]
+
+    def clamp_long_summaries(
+        self,
+        group_openid: str,
+        max_chars: int = SUMMARY_MAX_CHARS,
+    ) -> int:
+        """把库里超长的摘要截回预算内，返回更新条数。"""
+        rows = self._conn.execute(
+            """
+            SELECT id, summary FROM conversation_summaries
+            WHERE group_openid = ? AND length(summary) > ?
+            """,
+            (group_openid, max_chars),
+        ).fetchall()
+        with self._conn:
+            for row in rows:
+                self._conn.execute(
+                    "UPDATE conversation_summaries SET summary = ? WHERE id = ?",
+                    (clip_summary(row["summary"], max_chars), row["id"]),
+                )
+        return len(rows)
+
+    def dedupe_memory_cards(self, group_openid: str) -> int:
+        """删除 person+content 完全相同的重复卡，保留 id 最小的一张，返回删除条数。"""
+        before = self._conn.execute(
+            "SELECT COUNT(*) FROM memory_cards WHERE group_openid = ?", (group_openid,)
+        ).fetchone()[0]
+        with self._conn:
+            self._conn.execute(
+                """
+                DELETE FROM memory_cards
+                WHERE group_openid = ?
+                  AND id NOT IN (
+                      SELECT MIN(id) FROM memory_cards
+                      WHERE group_openid = ?
+                      GROUP BY person, content
+                  )
+                """,
+                (group_openid, group_openid),
+            )
+        after = self._conn.execute(
+            "SELECT COUNT(*) FROM memory_cards WHERE group_openid = ?", (group_openid,)
+        ).fetchone()[0]
+        return before - after
 
     def create_task(
         self,

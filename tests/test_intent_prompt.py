@@ -50,6 +50,18 @@ class IntentPromptTests(unittest.TestCase):
         self.assertIn("topic_context", params)
         self.assertIn("background_context", params)
 
+    def test_generate_reply_takes_summaries_context(self) -> None:
+        params = inspect.signature(XiaoxiaLLM.generate_reply).parameters
+        self.assertIn("summaries_context", params)
+
+    def test_memory_context_is_facts_only(self) -> None:
+        # 摘要不能再混进「长期记忆」，否则模型把剧情当人设（“主人多次骂我”）。摘要单独走
+        # _summaries_context，长期记忆只剩记忆卡。
+        source = inspect.getsource(XiaoxiaClient._memory_context)
+        self.assertNotIn("[摘要]", source)
+        self.assertIn("format_memory_cards", source)
+        self.assertIn("_summaries_context", inspect.getsource(XiaoxiaClient))
+
 class AnniversaryPromptTests(unittest.TestCase):
     """生日/纪念日/农历这套要靠提示词里的字段说明才能真正被解析出来。"""
 
