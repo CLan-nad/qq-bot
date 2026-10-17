@@ -35,6 +35,10 @@ class IntentPromptTests(unittest.TestCase):
     def test_falls_back_to_chat_when_query_unclear(self) -> None:
         self.assertIn("不要硬猜检索词", INTENT_SYSTEM_PROMPT)
 
+    def test_memory_search_query_uses_short_message_keywords(self) -> None:
+        self.assertIn("能出现在原消息里的短关键词", INTENT_SYSTEM_PROMPT)
+        self.assertIn("不要写完整描述句", INTENT_SYSTEM_PROMPT)
+
     def test_parse_intent_takes_topic_context(self) -> None:
         params = inspect.signature(XiaoxiaLLM.parse_intent).parameters
         self.assertIn("topic_context", params)

@@ -57,6 +57,37 @@ class FeatureTests(unittest.TestCase):
         self.assertTrue(self.store.delete_memory_card(GROUP, card.id))
         self.assertEqual(self.store.search_memory_cards(GROUP, "香菜"), [])
 
+    def test_search_splits_descriptive_query_into_keywords(self) -> None:
+        self._save("说说你主人")
+        self.store.save_bot_message(
+            group_openid=GROUP,
+            content="我没找到和“小虾主人 让小毛豆 说说主人”有关的记录。",
+            timestamp="2026-10-17T20:58:00+08:00",
+        )
+
+        results = self.store.search_messages(
+            GROUP,
+            "小虾主人 让小毛豆 说说主人",
+        )
+
+        self.assertGreaterEqual(len(results), 2)
+        # 原始成员消息要排在回显检索词的机器人失败回复前面。
+        self.assertEqual(results[0].content, "说说你主人")
+        self.assertEqual(results[1].username, "小毛豆")
+
+    def test_memory_card_search_also_accepts_keywords(self) -> None:
+        self.store.add_memory_card(
+            group_openid=GROUP,
+            kind="relationship",
+            person="主人",
+            content="小虾主人喜欢被小毛豆叫主人",
+        )
+
+        results = self.store.search_memory_cards(GROUP, "小虾主人 说说主人")
+
+        self.assertEqual(len(results), 1)
+        self.assertIn("小虾主人", results[0].content)
+
     def test_known_members_keeps_stable_authors(self) -> None:
         self._save("第一条消息", username="CL")
         self.store.save_message(

@@ -770,48 +770,78 @@ class ChatStore:
         )
 
     @staticmethod
-    def _search_text(query: str) -> str:
-        return query.strip()
+    def _search_term_weight(term: str) -> int:
+        return min(max(len(term), 2), 6)
 
-    @staticmethod
-    def _fts_query(query: str) -> str:
-        return '"' + query.replace('"', '""') + '"'
+    @classmethod
+    def _search_terms(cls, query: str) -> list[str]:
+        """把检索描述拆成可用于包含匹配的关键词。
+
+        意图模型常把 query 写成“小虾主人 让小毛豆 说说主人”这样的描述，
+        原文却可能只是“说说你主人”。整句短语匹配会漏掉，拆成两字片段后
+        由命中数量和来源排序共同筛选，更接近人在聊天记录里找原话。
+        """
+        parts = [
+            part.strip()
+            for part in re.split(r"[\s，。、；：,.;:!！?？~～“”\"'（）()【】\[\]《》—\-]+", query)
+            if part.strip()
+        ]
+        terms: list[str] = []
+        seen: set[str] = set()
+        single_only = sum(len(part) for part in parts) == 1
+        for part in parts:
+            candidates = [part]
+            if part.isascii():
+                candidates = [part]
+            elif len(part) >= 3:
+                candidates = [
+                    part[index : index + 2]
+                    for index in range(len(part) - 1)
+                ] + [part]
+            for candidate in candidates:
+                if not candidate or (len(candidate) == 1 and not single_only):
+                    continue
+                if candidate not in seen:
+                    terms.append(candidate)
+                    seen.add(candidate)
+                if len(terms) >= 24:
+                    return terms
+        return terms
 
     def search_messages(self, group_openid: str, query: str, limit: int = 20) -> list[SearchResult]:
-        query = query.strip()
-        if not query:
+        terms = self._search_terms(query)
+        if not terms:
             return []
 
-        rows: list[sqlite3.Row] = []
-        if len(query) >= 3:
-            try:
-                rows = self._conn.execute(
-                    """
-                    SELECT m.row_id, m.username, m.content, m.timestamp
-                    FROM messages_fts
-                    JOIN messages AS m ON m.row_id = messages_fts.rowid
-                    WHERE messages_fts MATCH ? AND m.group_openid = ?
-                    ORDER BY messages_fts.rank, m.row_id DESC
-                    LIMIT ?
-                    """,
-                    (self._fts_query(query), group_openid, limit),
-                ).fetchall()
-            except sqlite3.OperationalError:
-                rows = []
-
-        if not rows:
-            needle = self._search_text(query)
-            rows = self._conn.execute(
-                """
-                SELECT row_id, username, content, timestamp
-                FROM messages
-                WHERE group_openid = ?
-                  AND (INSTR(content, ?) > 0 OR INSTR(username, ?) > 0)
-                ORDER BY row_id DESC
-                LIMIT ?
-                """,
-                (group_openid, needle, needle, limit),
-            ).fetchall()
+        term_rows = ", ".join("(?, ?)" for _ in terms)
+        term_params = [
+            value
+            for term in terms
+            for value in (term, self._search_term_weight(term))
+        ]
+        rows = self._conn.execute(
+            f"""
+            WITH search_terms(term, weight) AS (VALUES {term_rows})
+            SELECT m.row_id, m.username, m.content, m.timestamp,
+                   (
+                       SELECT COALESCE(SUM(weight), 0)
+                       FROM search_terms
+                       WHERE INSTR(m.content, term) > 0 OR INSTR(m.username, term) > 0
+                   ) AS score
+            FROM messages AS m
+            WHERE m.group_openid = ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM search_terms
+                  WHERE INSTR(m.content, term) > 0 OR INSTR(m.username, term) > 0
+              )
+            ORDER BY CASE WHEN m.role = 'bot' THEN 1 ELSE 0 END,
+                     score DESC,
+                     m.row_id DESC
+            LIMIT ?
+            """,
+            (*term_params, group_openid, limit),
+        ).fetchall()
 
         return [
             SearchResult(
@@ -1365,21 +1395,39 @@ class ChatStore:
         return int(cursor.rowcount)
 
     def search_memory_cards(self, group_openid: str, query: str, limit: int = 10) -> list[MemoryCard]:
-        query = query.strip()
-        if not query:
+        terms = self._search_terms(query)
+        if not terms:
             return []
-        needle = self._search_text(query)
+        term_rows = ", ".join("(?, ?)" for _ in terms)
+        term_params = [
+            value
+            for term in terms
+            for value in (term, self._search_term_weight(term))
+        ]
         rows = self._conn.execute(
             f"""
-            SELECT {_MEMORY_COLUMNS}
+            WITH search_terms(term, weight) AS (VALUES {term_rows})
+            SELECT {_MEMORY_COLUMNS},
+                   (
+                       SELECT COALESCE(SUM(weight), 0)
+                       FROM search_terms
+                       WHERE INSTR(kind, term) > 0
+                          OR INSTR(person, term) > 0
+                          OR INSTR(content, term) > 0
+                   ) AS score
             FROM memory_cards
-            WHERE group_openid = ? AND (
-                INSTR(kind, ?) > 0 OR INSTR(person, ?) > 0 OR INSTR(content, ?) > 0
-            )
-            ORDER BY id DESC
+            WHERE group_openid = ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM search_terms
+                  WHERE INSTR(kind, term) > 0
+                     OR INSTR(person, term) > 0
+                     OR INSTR(content, term) > 0
+              )
+            ORDER BY score DESC, id DESC
             LIMIT ?
             """,
-            (group_openid, needle, needle, needle, limit),
+            (*term_params, group_openid, limit),
         ).fetchall()
         return [self._card_from_row(row) for row in rows]
 
