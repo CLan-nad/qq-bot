@@ -773,6 +773,14 @@ class ChatStore:
     def _search_term_weight(term: str) -> int:
         return min(max(len(term), 2), 6)
 
+    @staticmethod
+    def _search_parts(query: str) -> list[str]:
+        return [
+            part.strip()
+            for part in re.split(r"[\s，。、；：,.;:!！?？~～“”\"'（）()【】\[\]《》—\-]+", query)
+            if part.strip()
+        ]
+
     @classmethod
     def _search_terms(cls, query: str) -> list[str]:
         """把检索描述拆成可用于包含匹配的关键词。
@@ -781,11 +789,7 @@ class ChatStore:
         原文却可能只是“说说你主人”。整句短语匹配会漏掉，拆成两字片段后
         由命中数量和来源排序共同筛选，更接近人在聊天记录里找原话。
         """
-        parts = [
-            part.strip()
-            for part in re.split(r"[\s，。、；：,.;:!！?？~～“”\"'（）()【】\[\]《》—\-]+", query)
-            if part.strip()
-        ]
+        parts = cls._search_parts(query)
         terms: list[str] = []
         seen: set[str] = set()
         single_only = sum(len(part) for part in parts) == 1
@@ -808,7 +812,60 @@ class ChatStore:
                     return terms
         return terms
 
-    def search_messages(self, group_openid: str, query: str, limit: int = 20) -> list[SearchResult]:
+    @staticmethod
+    def _part_priority(part: str, priority_text: str) -> float:
+        if not priority_text or not part:
+            return 1.0
+        covered: set[int] = set()
+        if part in priority_text:
+            covered.update(range(len(part)))
+        elif not part.isascii() and len(part) >= 3:
+            for index in range(len(part) - 1):
+                if part[index : index + 2] in priority_text:
+                    covered.add(index)
+                    covered.add(index + 1)
+        return 1.0 + 4.0 * len(covered) / len(part)
+
+    @classmethod
+    def _search_coverage(
+        cls,
+        query: str,
+        text: str,
+        priority_text: str = "",
+    ) -> tuple[float, int]:
+        """按查询字符覆盖率排序，避免重叠二字片段被重复加分。
+
+        priority_text 是用户本轮的原话。模型补出来的称呼、解释可能比原话更
+        抢眼，把原话里出现过的片段加权，能让真正的原消息排上来。
+        """
+        covered: set[tuple[int, int]] = set()
+        exact_parts = 0
+        parts = cls._search_parts(query)
+        for part_index, part in enumerate(parts):
+            if part and part in text:
+                exact_parts += 1
+                covered.update((part_index, index) for index in range(len(part)))
+                continue
+            if part.isascii() or len(part) < 3:
+                continue
+            for index in range(len(part) - 1):
+                if part[index : index + 2] in text:
+                    covered.add((part_index, index))
+                    covered.add((part_index, index + 1))
+        weighted = sum(
+            cls._part_priority(parts[part_index], priority_text)
+            for part_index, _ in covered
+        )
+        return weighted, exact_parts
+
+    def search_messages(
+        self,
+        group_openid: str,
+        query: str,
+        limit: int = 20,
+        *,
+        priority_text: str = "",
+    ) -> list[SearchResult]:
         terms = self._search_terms(query)
         if not terms:
             return []
@@ -819,10 +876,11 @@ class ChatStore:
             for term in terms
             for value in (term, self._search_term_weight(term))
         ]
-        rows = self._conn.execute(
+        candidate_limit = min(max(limit * 20, 400), 1200)
+        candidates = self._conn.execute(
             f"""
             WITH search_terms(term, weight) AS (VALUES {term_rows})
-            SELECT m.row_id, m.username, m.content, m.timestamp,
+            SELECT m.row_id, m.username, m.content, m.timestamp, m.role,
                    (
                        SELECT COALESCE(SUM(weight), 0)
                        FROM search_terms
@@ -835,14 +893,23 @@ class ChatStore:
                   FROM search_terms
                   WHERE INSTR(m.content, term) > 0 OR INSTR(m.username, term) > 0
               )
-            ORDER BY CASE WHEN m.role = 'bot' THEN 1 ELSE 0 END,
-                     score DESC,
-                     m.row_id DESC
+            ORDER BY score DESC, m.row_id DESC
             LIMIT ?
             """,
-            (*term_params, group_openid, limit),
+            (*term_params, group_openid, candidate_limit),
         ).fetchall()
 
+        ranked_rows = []
+        for row in candidates:
+            coverage, exact_parts = self._search_coverage(
+                query,
+                f"{row['content'] or ''}\n{row['username'] or ''}",
+                priority_text,
+            )
+            ranked_rows.append(
+                (row["role"] == "bot", -coverage, -exact_parts, -int(row["row_id"]), row)
+            )
+        ranked_rows.sort(key=lambda item: item[:4])
         return [
             SearchResult(
                 row_id=row["row_id"],
@@ -850,7 +917,7 @@ class ChatStore:
                 content=row["content"] or "",
                 timestamp=row["timestamp"] or "",
             )
-            for row in rows
+            for row in (item[4] for item in ranked_rows[:limit])
         ]
 
     @staticmethod

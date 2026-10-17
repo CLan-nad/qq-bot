@@ -2043,6 +2043,7 @@ class XiaoxiaClient(botpy.Client):
             message.group_openid,
             query,
             self.settings.memory_search_messages,
+            priority_text=request,
         )
         cards = self.store.search_memory_cards(message.group_openid, query)
         if not results and not cards:

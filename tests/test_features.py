@@ -58,6 +58,7 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(self.store.search_memory_cards(GROUP, "香菜"), [])
 
     def test_search_splits_descriptive_query_into_keywords(self) -> None:
+        self._save("小虾主人和小毛豆在聊天")
         self._save("说说你主人")
         self.store.save_bot_message(
             group_openid=GROUP,
@@ -68,12 +69,13 @@ class FeatureTests(unittest.TestCase):
         results = self.store.search_messages(
             GROUP,
             "小虾主人 让小毛豆 说说主人",
+            priority_text="你去查查之前，我对象让你说说我的那条消息",
         )
 
         self.assertGreaterEqual(len(results), 2)
-        # 原始成员消息要排在回显检索词的机器人失败回复前面。
+        # 同时命中“说说”和“主人”的原消息要排在只有“小虾主人”的旧消息、
+        # 以及回显检索词的机器人失败回复前面。
         self.assertEqual(results[0].content, "说说你主人")
-        self.assertEqual(results[1].username, "小毛豆")
 
     def test_memory_card_search_also_accepts_keywords(self) -> None:
         self.store.add_memory_card(
