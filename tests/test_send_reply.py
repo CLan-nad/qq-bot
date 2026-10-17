@@ -150,9 +150,9 @@ class SendReplyTests(unittest.TestCase):
 
 
 class StickerSendTests(unittest.TestCase):
-    """表情图走的是另一条通道：先传图换 file_info，再发一条 msg_type=7 的消息。
+    """表情图单独走图片消息：先发正文，再用下一个 seq 传图并发送。
 
-    这条链比纯文字多了两次可能失败的请求，所以图发不出去时绝不能让整条回复也丢了。
+    图失败时正文已经送达，不能重发正文，也不能把整轮判成失败。
     """
 
     def setUp(self) -> None:
@@ -205,10 +205,10 @@ class StickerSendTests(unittest.TestCase):
         client._upload_group_image = upload_group_image
         client._remember_bot_reply = lambda group, text, source: remembered.append((text, source))
         message = SimpleNamespace(group_openid="g", id="m-1", content="在吗")
-        return client, message, sent, remembered
+        return client, message, sent, remembered, uploads
 
     def _send(self, script, text, *, upload="file-info-1", seq=1, attempts=3, fallback=True):
-        client, message, sent, remembered = self._client(script, upload=upload)
+        client, message, sent, remembered, uploads = self._client(script, upload=upload)
         ok = self.loop.run_until_complete(
             client._send_reply(
                 message,
@@ -219,46 +219,72 @@ class StickerSendTests(unittest.TestCase):
                 proactive_fallback=fallback,
             )
         )
-        return ok, sent, remembered
+        return ok, sent, remembered, uploads
 
-    def test_sticker_goes_out_as_an_image_with_its_caption(self) -> None:
-        ok, sent, remembered = self._send([None], "抱抱你呀[抱抱]")
+    def test_text_goes_first_then_sticker_uses_the_next_seq(self) -> None:
+        ok, sent, remembered, uploads = self._send([None, None], "抱抱你呀[抱抱]")
         self.assertTrue(ok)
-        # 正文里那个名字被摘掉了，图才是它；配文跟着图一起走，不会图字分家
-        self.assertEqual(sent, [(1, "抱抱你呀", "sticker")])
+        self.assertEqual(
+            sent,
+            [
+                (1, "抱抱你呀", "text"),
+                (2, " ", "sticker"),
+            ],
+        )
         # 本地库里留可读名字，下一轮它才认得自己刚发过什么
         self.assertEqual(remembered, [("抱抱你呀[抱抱]", "GROUP_MESSAGE_CREATE:REPLY")])
+        self.assertEqual(uploads["n"], 1)
 
-    def test_upload_failure_falls_back_to_text_without_retrying_the_image(self) -> None:
-        # 图失败要立刻降级，不能把三次重试都耗在图上——回复本身比那张图重要
-        ok, sent, remembered = self._send([None], "抱抱你呀[抱抱]", upload="")
+    def test_upload_failure_keeps_the_text_and_does_not_retry(self) -> None:
+        ok, sent, remembered, uploads = self._send([None], "抱抱你呀[抱抱]", upload="")
         self.assertTrue(ok)
         self.assertEqual(sent, [(1, "抱抱你呀", "text")])
         self.assertEqual(len(remembered), 1)
+        self.assertEqual(uploads["n"], 1)
 
     def test_pure_sticker_that_cannot_be_uploaded_reports_failure(self) -> None:
         # 只剩一张图、图又发不出去：没有能被文字兜住的正文，就当没发出去
-        ok, sent, remembered = self._send([None], "[抱抱]", upload="")
+        ok, sent, remembered, uploads = self._send([None], "[抱抱]", upload="")
         self.assertFalse(ok)
         self.assertEqual(sent, [])
         self.assertEqual(remembered, [])
+        self.assertEqual(uploads["n"], 1)
 
     def test_pure_sticker_sends_blank_caption_not_an_empty_string(self) -> None:
-        ok, sent, _ = self._send([None], "[抱抱]")
+        ok, sent, _, _ = self._send([None], "[抱抱]")
         self.assertTrue(ok)
         self.assertEqual(sent, [(1, " ", "sticker")])
 
-    def test_dedup_on_first_try_resends_the_sticker_with_the_next_seq(self) -> None:
-        # ack 占掉 seq=1 之后，图也得跟着换号重发，否则这条回复就没了
-        ok, sent, _ = self._send([DEDUP, None], "[抱抱]", seq=1)
+    def test_dedup_on_pure_sticker_resends_with_the_next_seq(self) -> None:
+        ok, sent, _, _ = self._send([DEDUP, None], "[抱抱]", seq=1)
         self.assertTrue(ok)
         self.assertEqual(sent, [(2, " ", "sticker")])
 
-    def test_sticker_send_error_never_falls_back_to_a_duplicate_seq(self) -> None:
-        # 发送本身失败（非去重）时图已降级成文字，seq 不能变，否则会撞上 QQ 的 msg_seq 去重
-        ok, sent, _ = self._send([NETWORK, None], "抱抱你呀[抱抱]", seq=3)
+    def test_sticker_send_error_after_text_does_not_resend_text(self) -> None:
+        ok, sent, remembered, _ = self._send([None, NETWORK], "抱抱你呀[抱抱]")
         self.assertTrue(ok)
-        self.assertEqual(sent, [(3, "抱抱你呀", "text")])
+        self.assertEqual(sent, [(1, "抱抱你呀", "text")])
+        self.assertEqual(remembered, [("抱抱你呀[抱抱]", "GROUP_MESSAGE_CREATE:REPLY")])
+
+    def test_text_failure_never_sends_the_sticker(self) -> None:
+        ok, sent, remembered, uploads = self._send(
+            [NETWORK], "抱抱你呀[抱抱]", attempts=1, fallback=False
+        )
+        self.assertFalse(ok)
+        self.assertEqual(sent, [])
+        self.assertEqual(remembered, [])
+        self.assertEqual(uploads["n"], 0)
+
+    def test_ack_seq_offset_is_preserved_for_text_and_sticker(self) -> None:
+        ok, sent, _, _ = self._send([None, None], "抱抱你呀[抱抱]", seq=2)
+        self.assertTrue(ok)
+        self.assertEqual([item[0] for item in sent], [2, 3])
+
+    def test_text_dedup_shift_leaves_room_for_sticker(self) -> None:
+        # ack 实际占了 seq=1，文字退到 2，图片必须继续用 3
+        ok, sent, _, _ = self._send([DEDUP, None, None], "抱抱你呀[抱抱]", seq=1)
+        self.assertTrue(ok)
+        self.assertEqual([item[0] for item in sent], [2, 3])
 
 
 if __name__ == "__main__":

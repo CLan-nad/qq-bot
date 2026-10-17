@@ -1052,20 +1052,19 @@ class XiaoxiaClient(botpy.Client):
         self,
         group_openid: str,
         sticker: Sticker,
-        caption: str,
         *,
         msg_id: str | None = None,
         msg_seq: int | None = None,
     ) -> None:
-        """发一张表情图。正文当配文跟着图一起走，所以不会有「先图后字」的割裂感。"""
+        """单独发一张表情图；文字由调用方先走普通文本消息发出去。"""
         file_info = await self._upload_group_image(group_openid, sticker)
         if not file_info:
             raise RuntimeError(f"sticker upload returned no file_info: {sticker.name}")
         payload: dict[str, Any] = {
             "group_openid": group_openid,
             "msg_type": 7,
-            # 配文不能是空串：实测带空白才稳，而整条只有表情名时正文本来就是空的。
-            "content": caption.strip() or " ",
+            # 图片消息的 content 不能是空串：实测带一个空白才稳。
+            "content": " ",
             "media": {"file_info": file_info},
         }
         if msg_id is not None:
@@ -1106,7 +1105,7 @@ class XiaoxiaClient(botpy.Client):
         attempts: int = SEND_ATTEMPTS,
         proactive_fallback: bool = True,
     ) -> bool:
-        """按 msg_seq 回复群消息。同一条 msg_id 下 seq 不能重复，所以 ack 用 1、正文用 2。
+        """按 msg_seq 回复群消息。同一条 msg_id 下每次实际发送都必须用不同的 seq。
 
         发送失败不再直接放弃。线上出现过一次 40054005「消息被去重」：ack 那次请求
         其实已经送到、只是本地报了异常，于是 acked=False、正文仍用 seq=1，
@@ -1115,68 +1114,113 @@ class XiaoxiaClient(botpy.Client):
         - 重试时才被判去重：说明上一次其实已经发出去了，直接算投递成功，不再重复发；
         - 其它错误按原 seq 重试，最多 attempts 次；
         - 全部失败退回主动消息通道兜底（ack 不兜底，它发不出去无所谓）。
-        表情图走的是另一条接口（先传图再发富媒体），多了两次可能失败的请求，所以图
-        发不出去时不再重试图，直接用剩下的文字发——回复本身比那张图重要得多。
+
+        有文字和表情图时不发富媒体配文：先发文字，再用下一个 seq 单独发图。文字已经
+        送达后图片失败也不会重发文字，整轮仍算成功；文字没送达时绝不会先发图。
         """
         content, sticker = self._outgoing_parts(message.group_openid, text)
         current = seq
-        for attempt in range(1, max(1, attempts) + 1):
-            try:
-                if sticker is not None:
-                    await self._send_sticker(
-                        message.group_openid,
-                        sticker,
-                        content,
-                        msg_id=message.id,
-                        msg_seq=current,
-                    )
-                else:
+        max_attempts = max(1, attempts)
+        has_text = bool(content.strip())
+
+        if not has_text and sticker is None:
+            logger.error("refusing to send an empty group reply, seq=%s", current)
+            return False
+
+        if has_text:
+            text_sent = False
+            for attempt in range(1, max_attempts + 1):
+                try:
                     await self.api.post_group_message(
                         group_openid=message.group_openid,
                         msg_id=message.id,
                         msg_seq=current,
                         content=content,
                     )
-            except Exception as exc:
-                if sticker is not None and not self._is_dedup_error(exc):
-                    self._note_rate_limit(message.group_openid, exc)
+                except Exception as exc:
+                    if self._is_dedup_error(exc):
+                        if attempt > 1:
+                            logger.info(
+                                "group reply already delivered, seq=%s", current
+                            )
+                            current += 1
+                            text_sent = True
+                            break
+                        logger.warning(
+                            "msg_seq %s already taken (ack landed?), resending as %s",
+                            current,
+                            current + 1,
+                        )
+                        current += 1
+                        continue
                     logger.warning(
-                        "sticker %s failed (%s), falling back to text", sticker.name, exc
+                        "failed to send group reply, attempt %s/%s, seq=%s: %s",
+                        attempt,
+                        max_attempts,
+                        current,
+                        exc,
                     )
-                    sticker = None
-                    if not content.strip():
-                        logger.error("sticker failed and there is no text to send, seq=%s", current)
-                        return False
-                    continue
+                    if attempt < max_attempts:
+                        await asyncio.sleep(SEND_RETRY_DELAY_SECONDS)
+                        continue
+                    if proactive_fallback:
+                        return await self._send_reply_proactive(message, text, source)
+                    logger.error("giving up on group reply, seq=%s", current)
+                    return False
+                else:
+                    current += 1
+                    text_sent = True
+                    break
+            if not text_sent:
+                if proactive_fallback:
+                    return await self._send_reply_proactive(message, text, source)
+                logger.error("giving up on group reply, seq=%s", current)
+                return False
+
+        if sticker is None:
+            self._remember_bot_reply(message.group_openid, text, source)
+            return True
+
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                await self._send_sticker(
+                    message.group_openid,
+                    sticker,
+                    msg_id=message.id,
+                    msg_seq=current,
+                )
+            except Exception as exc:
                 if self._is_dedup_error(exc):
                     if attempt > 1:
-                        logger.info("group reply already delivered, seq=%s", current)
-                        break
+                        logger.info("sticker already delivered, seq=%s", current)
+                        self._remember_bot_reply(message.group_openid, text, source)
+                        return True
                     logger.warning(
-                        "msg_seq %s already taken (ack landed?), resending as %s",
+                        "sticker msg_seq %s already taken, resending as %s",
                         current,
                         current + 1,
                     )
                     current += 1
                     continue
+                self._note_rate_limit(message.group_openid, exc)
                 logger.warning(
-                    "failed to send group reply, attempt %s/%s, seq=%s: %s",
-                    attempt,
-                    max(1, attempts),
-                    current,
-                    exc,
+                    "sticker %s failed (%s), seq=%s", sticker.name, exc, current
                 )
-                if attempt < max(1, attempts):
-                    await asyncio.sleep(SEND_RETRY_DELAY_SECONDS)
-                    continue
-                if proactive_fallback:
-                    return await self._send_reply_proactive(message, text, source)
-                logger.error("giving up on group reply, seq=%s", current)
+                if has_text:
+                    # 文字已经发出去了，图失败不能再重发文字，也不能让人以为整轮没回复。
+                    self._remember_bot_reply(message.group_openid, text, source)
+                    return True
+                logger.error("sticker failed and there is no text to send, seq=%s", current)
                 return False
+            else:
+                self._remember_bot_reply(message.group_openid, text, source)
+                return True
+
+        if has_text:
             self._remember_bot_reply(message.group_openid, text, source)
             return True
-        self._remember_bot_reply(message.group_openid, text, source)
-        return True
+        logger.error("giving up on sticker, seq=%s", current)
+        return False
 
     async def _answer_with_ack(
         self,

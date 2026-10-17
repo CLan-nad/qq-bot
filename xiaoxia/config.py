@@ -103,7 +103,7 @@ def load_settings() -> Settings:
         # （2026-10-16 探针：三种写法都原样显示成尖括号），所以默认关：让它改用 emoji。
         face_tags=os.getenv("XIAOXIA_FACE_TAGS", "0").strip().lower()
         not in {"0", "false", "no"},
-        # 表情包：模型写 [抱抱]，出站时换成一张真的图发出去。图跟代码一起放在
+        # 表情包：模型写 [爱你]，出站时换成一张真的图发出去。图跟代码一起放在
         # assets/stickers/，换目录或临时关掉都只动这两个开关。
         stickers_enabled=os.getenv("XIAOXIA_STICKERS", "1").strip().lower()
         not in {"0", "false", "no"},

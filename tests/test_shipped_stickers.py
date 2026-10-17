@@ -23,7 +23,7 @@ class ShippedStickerTests(unittest.TestCase):
         self.items = json.loads((LIBRARY / "manifest.json").read_text(encoding="utf-8"))["items"]
 
     def test_library_is_actually_loaded(self) -> None:
-        self.assertGreaterEqual(len(self.library), 40)
+        self.assertEqual(len(self.library), 8)
         self.assertEqual(len(self.library), len(self.items))
 
     def test_every_name_survives_the_take_pattern(self) -> None:
@@ -75,16 +75,27 @@ class ShippedStickerTests(unittest.TestCase):
                     f"{item['file']} 不是 GIF/PNG",
                 )
 
-    def test_maodou_pack_is_present(self) -> None:
-        # 本尊那几张是压轴：模型自称「小毛豆」的时候得有它自己的脸可发
-        names = self.library.names()
-        self.assertIn("本尊", names)
-        self.assertIn("本尊委屈", names)
+    def test_only_the_curated_pack_is_shipped(self) -> None:
+        expected = {
+            "你过来",
+            "践踏他们",
+            "兔没惹人",
+            "我不听",
+            "爱你",
+            "俺不中了",
+            "早安宝宝",
+            "晚安宝宝",
+        }
+        self.assertEqual(set(self.library.names()), expected)
+        files = {path.name for path in LIBRARY.glob("*.png")}
+        self.assertEqual(files, {item["file"] for item in self.items})
 
-    def test_prompt_offers_both_packs(self) -> None:
+    def test_prompt_offers_the_curated_pack(self) -> None:
         prompt = self.library.prompt()
-        self.assertIn("[抱抱]", prompt)
-        self.assertIn("[本尊]", prompt)
+        for name in self.library.names():
+            self.assertIn(f"[{name}]", prompt)
+        self.assertIn("文字和图片会分成两条发", prompt)
+        self.assertNotIn("[本尊]", prompt)
 
 
 if __name__ == "__main__":
