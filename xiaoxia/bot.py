@@ -1063,8 +1063,8 @@ class XiaoxiaClient(botpy.Client):
         payload: dict[str, Any] = {
             "group_openid": group_openid,
             "msg_type": 7,
-            # 图片消息的 content 不能是空串：实测带一个空白才稳。
-            "content": " ",
+            # msg_type=7 时 content 必须为空，否则 QQ 会在图下面画出一行空白。
+            "content": None,
             "media": {"file_info": file_info},
         }
         if msg_id is not None:

@@ -228,7 +228,7 @@ class StickerSendTests(unittest.TestCase):
             sent,
             [
                 (1, "抱抱你呀", "text"),
-                (2, " ", "sticker"),
+                (2, None, "sticker"),
             ],
         )
         # 本地库里留可读名字，下一轮它才认得自己刚发过什么
@@ -250,15 +250,15 @@ class StickerSendTests(unittest.TestCase):
         self.assertEqual(remembered, [])
         self.assertEqual(uploads["n"], 1)
 
-    def test_pure_sticker_sends_blank_caption_not_an_empty_string(self) -> None:
+    def test_pure_sticker_sends_image_with_no_caption(self) -> None:
         ok, sent, _, _ = self._send([None], "[抱抱]")
         self.assertTrue(ok)
-        self.assertEqual(sent, [(1, " ", "sticker")])
+        self.assertEqual(sent, [(1, None, "sticker")])
 
     def test_dedup_on_pure_sticker_resends_with_the_next_seq(self) -> None:
         ok, sent, _, _ = self._send([DEDUP, None], "[抱抱]", seq=1)
         self.assertTrue(ok)
-        self.assertEqual(sent, [(2, " ", "sticker")])
+        self.assertEqual(sent, [(2, None, "sticker")])
 
     def test_sticker_send_error_after_text_does_not_resend_text(self) -> None:
         ok, sent, remembered, _ = self._send([None, NETWORK], "抱抱你呀[抱抱]")

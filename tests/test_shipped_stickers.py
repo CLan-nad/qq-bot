@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import struct
 import unittest
 from pathlib import Path
 
@@ -74,6 +75,18 @@ class ShippedStickerTests(unittest.TestCase):
                     head.startswith(b"GIF87a") or head.startswith(b"GIF89a") or head.startswith(b"\x89PNG"),
                     f"{item['file']} 不是 GIF/PNG",
                 )
+
+    def test_all_pngs_share_the_same_display_size(self) -> None:
+        # 尺寸不一样会在群里呈现为大小不一的气泡，所以库里只允许一种像素尺寸。
+        sizes: set[tuple[int, int]] = set()
+        for item in self.items:
+            path = LIBRARY / item["file"]
+            data = path.read_bytes()
+            with self.subTest(file=item["file"]):
+                self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+                self.assertEqual(struct.unpack(">II", data[16:24]), (176, 176))
+            sizes.add(struct.unpack(">II", data[16:24]))
+        self.assertEqual(sizes, {(176, 176)})
 
     def test_only_the_curated_pack_is_shipped(self) -> None:
         expected = {
