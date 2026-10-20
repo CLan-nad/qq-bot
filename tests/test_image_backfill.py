@@ -437,5 +437,150 @@ class ReplyIsNotBlockedByBackfillTests(_LoopTestCase):
         asyncio.run(scenario())
 
 
+class SyncLatestImageBeforeReplyTests(_LoopTestCase):
+    """图片先单独发、下一条再 @ 问图：第一轮 prompt 必须已经包含图片描述。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = ChatStore(str(Path(self.tmp.name) / "test.sqlite3"))
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+        super().tearDown()
+
+    def _save(self, message_id: str, url: str, *, timestamp: str) -> None:
+        self.store.save_message(
+            message_id=message_id,
+            msg_seq="",
+            group_openid=GROUP,
+            member_openid="openid-CL",
+            username="CL",
+            role="member",
+            content="[图片]",
+            timestamp=timestamp,
+            source="GROUP_MESSAGE_CREATE",
+            raw={
+                "attachments": [
+                    {"content_type": "image/jpeg", "filename": f"{message_id}.jpg", "url": url}
+                ]
+            },
+        )
+
+    def test_latest_pending_image_is_described_before_prompt(self) -> None:
+        async def scenario() -> None:
+            self._save(
+                "old-image",
+                "https://example.com/old.jpg",
+                timestamp="2026-10-20T14:40:00+08:00",
+            )
+            self._save(
+                "new-image",
+                "https://example.com/new.jpg",
+                timestamp="2026-10-20T14:40:27+08:00",
+            )
+
+            client = _client(store=self.store)
+            sent: list[tuple[int, str]] = []
+            topics: list[str] = []
+            fetched: list[str] = []
+            vision_calls: list[str] = []
+
+            async def parse_intent(**kwargs):
+                topics.append(kwargs["topic_context"])
+                return {"action": "chat", "reply": "这是一张证件照"}
+
+            async def describe_image(image_ref, hint=""):
+                vision_calls.append(image_ref)
+                return "一张蓝色背景的证件照"
+
+            async def post_group_message(**kwargs):
+                sent.append((kwargs["msg_seq"], kwargs["content"]))
+
+            async def handle_intent(**kwargs):
+                return "这是一张证件照"
+
+            async def fake_fetch(url, *, max_bytes):
+                fetched.append(url)
+                return JPEG_BYTES, "image/jpeg"
+
+            client.llm = SimpleNamespace(
+                parse_intent=parse_intent,
+                describe_image=describe_image,
+            )
+            client.api = SimpleNamespace(post_group_message=post_group_message)
+            client._handle_intent = handle_intent
+            client._queue_image_backfill = lambda *args, **kwargs: None
+            client._identity_context = lambda group, requester: SimpleNamespace(prompt=lambda: "")
+            client._memory_context = lambda group: ""
+            client._remember_bot_reply = lambda group, text, source: None
+
+            original_fetch = bot_module.fetch_image_bytes
+            bot_module.fetch_image_bytes = fake_fetch
+            try:
+                await asyncio.wait_for(
+                    client._process_at_message(
+                        _at_message("这张图片是啥"), "GROUP_AT_MESSAGE_CREATE"
+                    ),
+                    timeout=5,
+                )
+            finally:
+                bot_module.fetch_image_bytes = original_fetch
+
+            # 只识别最新一张，不把更早的旧图也拖进同步路径。
+            self.assertEqual(fetched, ["https://example.com/new.jpg"])
+            self.assertEqual(len(vision_calls), 1)
+            self.assertIn("〔图〕一张蓝色背景的证件照", topics[0])
+            self.assertEqual(sent, [(1, "这是一张证件照")])
+            contents = {
+                m.message_key.split(":", 1)[0]: m.content
+                for m in self.store.recent_messages_with_raw(GROUP, 10)
+            }
+            self.assertIn("一张蓝色背景的证件照", contents["new-image"])
+            self.assertEqual(contents["old-image"], "[图片]")
+
+        asyncio.run(scenario())
+
+    def test_no_pending_image_keeps_the_old_fast_path(self) -> None:
+        async def scenario() -> None:
+            client = _client(store=self.store)
+            sent: list[tuple[int, str]] = []
+            vision_calls: list[str] = []
+
+            async def parse_intent(**kwargs):
+                return {"action": "chat", "reply": "在的"}
+
+            async def describe_image(image_ref, hint=""):
+                vision_calls.append(image_ref)
+                return "不该被调用"
+
+            async def post_group_message(**kwargs):
+                sent.append((kwargs["msg_seq"], kwargs["content"]))
+
+            async def handle_intent(**kwargs):
+                return "在的"
+
+            client.llm = SimpleNamespace(
+                parse_intent=parse_intent,
+                describe_image=describe_image,
+            )
+            client.api = SimpleNamespace(post_group_message=post_group_message)
+            client._handle_intent = handle_intent
+            client._queue_image_backfill = lambda *args, **kwargs: None
+            client._identity_context = lambda group, requester: SimpleNamespace(prompt=lambda: "")
+            client._memory_context = lambda group: ""
+            client._remember_bot_reply = lambda group, text, source: None
+
+            await client._process_at_message(
+                _at_message("在吗"), "GROUP_AT_MESSAGE_CREATE"
+            )
+
+            self.assertEqual(vision_calls, [])
+            self.assertEqual(sent, [(1, "在的")])
+
+        asyncio.run(scenario())
+
+
 if __name__ == "__main__":
     unittest.main()

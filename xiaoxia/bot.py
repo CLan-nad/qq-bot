@@ -509,6 +509,57 @@ class XiaoxiaClient(botpy.Client):
                 self.store.update_message_content(group_openid, stored.message_key, enriched)
         return budget
 
+    async def _describe_latest_pending_image(
+        self,
+        group_openid: str,
+        *,
+        exclude_key: str,
+        budget: int,
+    ) -> int:
+        """同步识别最近一条还没识别的图，返回这次消耗的图片额度。
+
+        图片消息本身不会触发视觉模型，只有 @ 事件才会。如果这里仍然把补识别丢后台，
+        当前这轮 prompt 会先带着「这张还没识别」构建，用户就得到「我看不到图」的回复。
+        只同步处理最新一条、最多一张，保证第一问能看到图，又不至于把一排旧图全等一遍。
+        """
+        if budget <= 0:
+            return 0
+        recent = self.store.recent_messages_with_raw(
+            group_openid,
+            self.settings.vision_recent_messages,
+        )
+        for stored in reversed(recent):
+            if stored.message_key == exclude_key or not needs_image_description(
+                stored.content, stored.raw
+            ):
+                continue
+            attachments = image_attachments(stored.raw)[:budget]
+            if not attachments:
+                continue
+            logger.info(
+                "describing latest pending image synchronously: %s (%s image(s))",
+                stored.message_key,
+                len(attachments),
+            )
+            descriptions = await self._describe_attachments(attachments)
+            if not any(description.strip() for description in descriptions):
+                logger.warning(
+                    "image description empty for latest message %s, marking unrecognized",
+                    stored.message_key,
+                )
+                self.store.update_message_content(
+                    group_openid,
+                    stored.message_key,
+                    message_with_unrecognized_images(stored.content),
+                )
+                return len(attachments)
+            enriched = message_with_image_descriptions(stored.content, descriptions)
+            if enriched != stored.content:
+                self.store.update_message_content(group_openid, stored.message_key, enriched)
+            logger.info("latest pending image described: %s", stored.message_key)
+            return len(attachments)
+        return 0
+
     def _queue_image_backfill(self, group_openid: str, *, exclude_key: str, budget: int) -> None:
         """把旧图片的补识别丢到后台去跑，不卡在 @ 回复路径上。
 
@@ -918,9 +969,11 @@ class XiaoxiaClient(botpy.Client):
         content = normalize_face_tags(message.content).strip()
         descriptions: list[str] = []
         budget = self.settings.vision_max_images_per_request
+        has_attachments = False
         if budget > 0:
             attachments = image_attachments(message.raw)[:budget]
             if attachments:
+                has_attachments = True
                 descriptions = await self._describe_attachments(attachments, hint=content)
                 budget -= len(attachments)
                 if any(description.strip() for description in descriptions):
@@ -928,6 +981,15 @@ class XiaoxiaClient(botpy.Client):
                     if enriched != content:
                         self.store.update_message_content(message.group_openid, key, enriched)
                     content = enriched
+            if not has_attachments and budget > 0:
+                # 图片先单独发、下一条再 @ 问图：这一轮必须先把最新一张看完，
+                # 否则 prompt 已经组装完，后台识别再快也赶不上当前回复。
+                used = await self._describe_latest_pending_image(
+                    message.group_openid,
+                    exclude_key=key,
+                    budget=min(budget, 1),
+                )
+                budget -= used
             self._queue_image_backfill(message.group_openid, exclude_key=key, budget=budget)
 
         requester = StoredMessage(
