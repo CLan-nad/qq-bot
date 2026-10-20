@@ -432,7 +432,7 @@ class ReplyIsNotBlockedByBackfillTests(_LoopTestCase):
             # 这一轮的额度全给了当前这张图，没有余量就不该再起后台任务
             self.assertEqual(calls, [])
             self.assertEqual(client._image_backfill_tasks, set())
-            self.assertEqual(sent, [(1, "看到啦")])
+            self.assertEqual(sent, [(1, "我看看图～"), (2, "看到啦")])
 
         asyncio.run(scenario())
 
@@ -711,7 +711,7 @@ class SyncImageBatchBeforeReplyTests(_LoopTestCase):
 
         asyncio.run(scenario())
 
-    def test_single_pending_image_does_not_send_an_extra_ack(self) -> None:
+    def test_single_pending_image_also_gets_a_quick_ack(self) -> None:
         async def scenario() -> None:
             self._save_image(
                 "only-image",
@@ -735,7 +735,8 @@ class SyncImageBatchBeforeReplyTests(_LoopTestCase):
 
             self.assertEqual(fetched, ["https://example.com/only.jpg"])
             self.assertEqual(len(vision_calls), 1)
-            self.assertEqual(sent, [(1, "看到了")])
+            # 单张也要下载 + 调视觉模型，等好几秒，所以同样先垫一句。
+            self.assertEqual(sent, [(1, "我看看图～"), (2, "看到了")])
 
         asyncio.run(scenario())
 

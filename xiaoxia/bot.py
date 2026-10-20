@@ -232,6 +232,7 @@ RATE_LIMIT_CODE = "40034"
 DEDUP_CODE = "40054005"
 ACK_TEXT = "稍等，我查一下～"
 ACK_TEXT_CHAT = "我想想～"
+ACK_TEXT_IMAGE = "我看看图～"
 ACK_TEXT_IMAGES = "我一张张看～"
 FALLBACK_TEXT = "小毛豆刚刚走神了，稍后再 @ 我一次试试。"
 
@@ -1010,6 +1011,7 @@ class XiaoxiaClient(botpy.Client):
         budget = self.settings.vision_max_images_per_request
         has_attachments = False
         pre_acked = False
+        ack_task: asyncio.Task[bool] | None = None
         if budget > 0:
             attachments = image_attachments(message.raw)[:budget]
             pending_batch: list[tuple[StoredMessage, list[ImageAttachment]]] = []
@@ -1021,17 +1023,19 @@ class XiaoxiaClient(botpy.Client):
                     budget=budget,
                 )
                 planned_images = sum(len(items) for _, items in pending_batch)
-            if planned_images > 1:
-                # 一批图要下载 + 逐张识别，可能超过 QQ 的被动回复等待时间。
-                # 先垫一句，正式回答改用 msg_seq=2；单图仍然直接回答，不额外刷屏。
-                pre_acked = await self._send_reply(
-                    message,
-                    ACK_TEXT_IMAGES,
-                    1,
-                    f"{source}:ACK_IMAGE",
-                    attempts=1,
-                    proactive_fallback=False,
-                    remember=False,
+            if planned_images > 0:
+                # 看图要下载 + 调视觉模型，单张也得等好几秒。先垫一句让用户知道在看，
+                # 正式回答改用 msg_seq=2；ack 后台发，和识图并行，不额外拖慢整体速度。
+                ack_task = asyncio.create_task(
+                    self._send_reply(
+                        message,
+                        ACK_TEXT_IMAGES if planned_images > 1 else ACK_TEXT_IMAGE,
+                        1,
+                        f"{source}:ACK_IMAGE",
+                        attempts=1,
+                        proactive_fallback=False,
+                        remember=False,
+                    )
                 )
             if attachments:
                 has_attachments = True
@@ -1052,6 +1056,12 @@ class XiaoxiaClient(botpy.Client):
                     batch=pending_batch,
                 )
                 budget -= used
+            if ack_task is not None:
+                try:
+                    pre_acked = await ack_task
+                except Exception:
+                    logger.exception("failed to send image ack")
+                    pre_acked = False
             self._queue_image_backfill(message.group_openid, exclude_key=key, budget=budget)
 
         requester = StoredMessage(
