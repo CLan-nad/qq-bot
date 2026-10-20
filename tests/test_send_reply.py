@@ -207,7 +207,17 @@ class StickerSendTests(unittest.TestCase):
         message = SimpleNamespace(group_openid="g", id="m-1", content="在吗")
         return client, message, sent, remembered, uploads
 
-    def _send(self, script, text, *, upload="file-info-1", seq=1, attempts=3, fallback=True):
+    def _send(
+        self,
+        script,
+        text,
+        *,
+        upload="file-info-1",
+        seq=1,
+        attempts=3,
+        fallback=True,
+        remember=True,
+    ):
         client, message, sent, remembered, uploads = self._client(script, upload=upload)
         ok = self.loop.run_until_complete(
             client._send_reply(
@@ -217,9 +227,16 @@ class StickerSendTests(unittest.TestCase):
                 "GROUP_MESSAGE_CREATE:REPLY",
                 attempts=attempts,
                 proactive_fallback=fallback,
+                remember=remember,
             )
         )
         return ok, sent, remembered, uploads
+
+    def test_remember_false_sends_without_persisting(self) -> None:
+        ok, sent, remembered, _uploads = self._send([None], "我一张张看～", remember=False)
+        self.assertTrue(ok)
+        self.assertEqual(sent, [(1, "我一张张看～", "text")])
+        self.assertEqual(remembered, [])
 
     def test_text_goes_first_then_sticker_uses_the_next_seq(self) -> None:
         ok, sent, remembered, uploads = self._send([None, None], "抱抱你呀[抱抱]")

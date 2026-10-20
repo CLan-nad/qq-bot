@@ -437,8 +437,8 @@ class ReplyIsNotBlockedByBackfillTests(_LoopTestCase):
         asyncio.run(scenario())
 
 
-class SyncLatestImageBeforeReplyTests(_LoopTestCase):
-    """图片先单独发、下一条再 @ 问图：第一轮 prompt 必须已经包含图片描述。"""
+class SyncImageBatchBeforeReplyTests(_LoopTestCase):
+    """图片先单独发、下一条再 @ 问图：第一轮 prompt 必须已经包含最近一批图片。"""
 
     def setUp(self) -> None:
         super().setUp()
@@ -450,7 +450,7 @@ class SyncLatestImageBeforeReplyTests(_LoopTestCase):
         self.tmp.cleanup()
         super().tearDown()
 
-    def _save(self, message_id: str, url: str, *, timestamp: str) -> None:
+    def _save_image(self, message_id: str, url: str, *, timestamp: str) -> None:
         self.store.save_message(
             message_id=message_id,
             msg_seq="",
@@ -468,17 +468,76 @@ class SyncLatestImageBeforeReplyTests(_LoopTestCase):
             },
         )
 
-    def test_latest_pending_image_is_described_before_prompt(self) -> None:
+    def _save_text(self, message_id: str, content: str, *, timestamp: str) -> None:
+        self.store.save_message(
+            message_id=message_id,
+            msg_seq="",
+            group_openid=GROUP,
+            member_openid="openid-CL",
+            username="CL",
+            role="member",
+            content=content,
+            timestamp=timestamp,
+            source="GROUP_MESSAGE_CREATE",
+            raw={},
+        )
+
+    def _wire(
+        self,
+        client: XiaoxiaClient,
+        sent: list[tuple[int, str]],
+        topics: list[str],
+        fetched: list[str],
+        vision_calls: list[str],
+        *,
+        answer: str = "看完啦",
+    ) -> None:
+        async def parse_intent(**kwargs):
+            topics.append(kwargs["topic_context"])
+            return {"action": "chat", "reply": answer}
+
+        async def describe_image(image_ref, hint=""):
+            vision_calls.append(image_ref)
+            return f"第{len(vision_calls)}张图"
+
+        async def post_group_message(**kwargs):
+            sent.append((kwargs["msg_seq"], kwargs["content"]))
+
+        async def handle_intent(**kwargs):
+            return answer
+
+        async def fake_fetch(url, *, max_bytes):
+            fetched.append(url)
+            return JPEG_BYTES + url.encode(), "image/jpeg"
+
+        client.llm = SimpleNamespace(parse_intent=parse_intent, describe_image=describe_image)
+        client.api = SimpleNamespace(post_group_message=post_group_message)
+        client._handle_intent = handle_intent
+        client._queue_image_backfill = lambda *args, **kwargs: None
+        client._identity_context = lambda group, requester: SimpleNamespace(prompt=lambda: "")
+        client._memory_context = lambda group: ""
+        client._remember_bot_reply = lambda group, text, source: None
+
+        original_fetch = bot_module.fetch_image_bytes
+        bot_module.fetch_image_bytes = fake_fetch
+        self.addCleanup(setattr, bot_module, "fetch_image_bytes", original_fetch)
+
+    def test_pending_image_batch_is_described_before_prompt(self) -> None:
         async def scenario() -> None:
-            self._save(
-                "old-image",
-                "https://example.com/old.jpg",
+            self._save_image(
+                "image-1",
+                "https://example.com/1.jpg",
                 timestamp="2026-10-20T14:40:00+08:00",
             )
-            self._save(
-                "new-image",
-                "https://example.com/new.jpg",
-                timestamp="2026-10-20T14:40:27+08:00",
+            self._save_image(
+                "image-2",
+                "https://example.com/2.jpg",
+                timestamp="2026-10-20T14:40:10+08:00",
+            )
+            self._save_image(
+                "image-3",
+                "https://example.com/3.jpg",
+                timestamp="2026-10-20T14:40:20+08:00",
             )
 
             client = _client(store=self.store)
@@ -486,59 +545,197 @@ class SyncLatestImageBeforeReplyTests(_LoopTestCase):
             topics: list[str] = []
             fetched: list[str] = []
             vision_calls: list[str] = []
-
-            async def parse_intent(**kwargs):
-                topics.append(kwargs["topic_context"])
-                return {"action": "chat", "reply": "这是一张证件照"}
-
-            async def describe_image(image_ref, hint=""):
-                vision_calls.append(image_ref)
-                return "一张蓝色背景的证件照"
-
-            async def post_group_message(**kwargs):
-                sent.append((kwargs["msg_seq"], kwargs["content"]))
-
-            async def handle_intent(**kwargs):
-                return "这是一张证件照"
-
-            async def fake_fetch(url, *, max_bytes):
-                fetched.append(url)
-                return JPEG_BYTES, "image/jpeg"
-
-            client.llm = SimpleNamespace(
-                parse_intent=parse_intent,
-                describe_image=describe_image,
+            self._wire(
+                client,
+                sent,
+                topics,
+                fetched,
+                vision_calls,
+                answer="三张都看到啦",
             )
-            client.api = SimpleNamespace(post_group_message=post_group_message)
-            client._handle_intent = handle_intent
-            client._queue_image_backfill = lambda *args, **kwargs: None
-            client._identity_context = lambda group, requester: SimpleNamespace(prompt=lambda: "")
-            client._memory_context = lambda group: ""
-            client._remember_bot_reply = lambda group, text, source: None
 
-            original_fetch = bot_module.fetch_image_bytes
-            bot_module.fetch_image_bytes = fake_fetch
-            try:
-                await asyncio.wait_for(
-                    client._process_at_message(
-                        _at_message("这张图片是啥"), "GROUP_AT_MESSAGE_CREATE"
-                    ),
-                    timeout=5,
-                )
-            finally:
-                bot_module.fetch_image_bytes = original_fetch
+            await asyncio.wait_for(
+                client._process_at_message(
+                    _at_message("这三张图片是啥"), "GROUP_AT_MESSAGE_CREATE"
+                ),
+                timeout=5,
+            )
 
-            # 只识别最新一张，不把更早的旧图也拖进同步路径。
-            self.assertEqual(fetched, ["https://example.com/new.jpg"])
-            self.assertEqual(len(vision_calls), 1)
-            self.assertIn("〔图〕一张蓝色背景的证件照", topics[0])
-            self.assertEqual(sent, [(1, "这是一张证件照")])
+            self.assertEqual(
+                fetched,
+                [
+                    "https://example.com/1.jpg",
+                    "https://example.com/2.jpg",
+                    "https://example.com/3.jpg",
+                ],
+            )
+            self.assertEqual(len(vision_calls), 3)
+            self.assertEqual(
+                sent,
+                [(1, "我一张张看～"), (2, "三张都看到啦")],
+            )
+            for index in (1, 2, 3):
+                self.assertIn(f"〔图〕第{index}张图", topics[0])
             contents = {
                 m.message_key.split(":", 1)[0]: m.content
                 for m in self.store.recent_messages_with_raw(GROUP, 10)
             }
-            self.assertIn("一张蓝色背景的证件照", contents["new-image"])
-            self.assertEqual(contents["old-image"], "[图片]")
+            for index in (1, 2, 3):
+                self.assertIn(f"第{index}张图", contents[f"image-{index}"])
+
+        asyncio.run(scenario())
+
+    def _save_images(self, message_id: str, urls: list[str], *, timestamp: str) -> None:
+        self.store.save_message(
+            message_id=message_id,
+            msg_seq="",
+            group_openid=GROUP,
+            member_openid="openid-CL",
+            username="CL",
+            role="member",
+            content="[图片]" * len(urls),
+            timestamp=timestamp,
+            source="GROUP_MESSAGE_CREATE",
+            raw={
+                "attachments": [
+                    {
+                        "content_type": "image/jpeg",
+                        "filename": f"{message_id}-{index}.jpg",
+                        "url": url,
+                    }
+                    for index, url in enumerate(urls, start=1)
+                ]
+            },
+        )
+
+    def test_multiple_attachments_in_one_message_are_all_described(self) -> None:
+        async def scenario() -> None:
+            urls = [
+                "https://example.com/a.jpg",
+                "https://example.com/b.jpg",
+                "https://example.com/c.jpg",
+            ]
+            self._save_images(
+                "one-message",
+                urls,
+                timestamp="2026-10-20T14:40:00+08:00",
+            )
+
+            client = _client(store=self.store)
+            sent: list[tuple[int, str]] = []
+            topics: list[str] = []
+            fetched: list[str] = []
+            vision_calls: list[str] = []
+            self._wire(client, sent, topics, fetched, vision_calls, answer="三张都是猫")
+
+            await asyncio.wait_for(
+                client._process_at_message(
+                    _at_message("这三张是什么"), "GROUP_AT_MESSAGE_CREATE"
+                ),
+                timeout=5,
+            )
+
+            self.assertEqual(fetched, urls)
+            self.assertEqual(len(vision_calls), 3)
+            self.assertEqual(sent, [(1, "我一张张看～"), (2, "三张都是猫")])
+            for index in (1, 2, 3):
+                self.assertIn(f"〔图〕第{index}张图", topics[0])
+
+        asyncio.run(scenario())
+
+    def test_text_message_breaks_the_pending_batch(self) -> None:
+        async def scenario() -> None:
+            self._save_image(
+                "old-image",
+                "https://example.com/old.jpg",
+                timestamp="2026-10-20T14:40:00+08:00",
+            )
+            self._save_text(
+                "chatter",
+                "先聊点别的",
+                timestamp="2026-10-20T14:41:00+08:00",
+            )
+
+            client = _client(store=self.store)
+            sent: list[tuple[int, str]] = []
+            topics: list[str] = []
+            fetched: list[str] = []
+            vision_calls: list[str] = []
+            self._wire(client, sent, topics, fetched, vision_calls, answer="在呀")
+
+            await asyncio.wait_for(
+                client._process_at_message(_at_message("在吗"), "GROUP_AT_MESSAGE_CREATE"),
+                timeout=5,
+            )
+
+            # 文字把这一批截断了，不能继续往前把旧图拖进同步识图。
+            self.assertEqual(fetched, [])
+            self.assertEqual(vision_calls, [])
+            self.assertEqual(sent, [(1, "在呀")])
+
+        asyncio.run(scenario())
+
+    def test_image_batch_respects_the_total_budget(self) -> None:
+        async def scenario() -> None:
+            for index in range(1, 11):
+                self._save_image(
+                    f"image-{index}",
+                    f"https://example.com/{index}.jpg",
+                    timestamp=f"2026-10-20T14:40:{index:02d}+08:00",
+                )
+
+            client = _client(store=self.store, vision_max_images_per_request=9)
+            sent: list[tuple[int, str]] = []
+            topics: list[str] = []
+            fetched: list[str] = []
+            vision_calls: list[str] = []
+            self._wire(client, sent, topics, fetched, vision_calls, answer="九张看完啦")
+
+            await asyncio.wait_for(
+                client._process_at_message(
+                    _at_message("这些图都看看"), "GROUP_AT_MESSAGE_CREATE"
+                ),
+                timeout=5,
+            )
+
+            # 从最新往前收满 9 张：最老的 image-1 留给后台补识别。
+            self.assertEqual(
+                fetched,
+                [f"https://example.com/{index}.jpg" for index in range(2, 11)],
+            )
+            self.assertEqual(len(vision_calls), 9)
+            self.assertEqual(
+                sent,
+                [(1, "我一张张看～"), (2, "九张看完啦")],
+            )
+
+        asyncio.run(scenario())
+
+    def test_single_pending_image_does_not_send_an_extra_ack(self) -> None:
+        async def scenario() -> None:
+            self._save_image(
+                "only-image",
+                "https://example.com/only.jpg",
+                timestamp="2026-10-20T14:40:00+08:00",
+            )
+
+            client = _client(store=self.store)
+            sent: list[tuple[int, str]] = []
+            topics: list[str] = []
+            fetched: list[str] = []
+            vision_calls: list[str] = []
+            self._wire(client, sent, topics, fetched, vision_calls, answer="看到了")
+
+            await asyncio.wait_for(
+                client._process_at_message(
+                    _at_message("这张图片是啥"), "GROUP_AT_MESSAGE_CREATE"
+                ),
+                timeout=5,
+            )
+
+            self.assertEqual(fetched, ["https://example.com/only.jpg"])
+            self.assertEqual(len(vision_calls), 1)
+            self.assertEqual(sent, [(1, "看到了")])
 
         asyncio.run(scenario())
 
@@ -546,36 +743,16 @@ class SyncLatestImageBeforeReplyTests(_LoopTestCase):
         async def scenario() -> None:
             client = _client(store=self.store)
             sent: list[tuple[int, str]] = []
+            topics: list[str] = []
+            fetched: list[str] = []
             vision_calls: list[str] = []
-
-            async def parse_intent(**kwargs):
-                return {"action": "chat", "reply": "在的"}
-
-            async def describe_image(image_ref, hint=""):
-                vision_calls.append(image_ref)
-                return "不该被调用"
-
-            async def post_group_message(**kwargs):
-                sent.append((kwargs["msg_seq"], kwargs["content"]))
-
-            async def handle_intent(**kwargs):
-                return "在的"
-
-            client.llm = SimpleNamespace(
-                parse_intent=parse_intent,
-                describe_image=describe_image,
-            )
-            client.api = SimpleNamespace(post_group_message=post_group_message)
-            client._handle_intent = handle_intent
-            client._queue_image_backfill = lambda *args, **kwargs: None
-            client._identity_context = lambda group, requester: SimpleNamespace(prompt=lambda: "")
-            client._memory_context = lambda group: ""
-            client._remember_bot_reply = lambda group, text, source: None
+            self._wire(client, sent, topics, fetched, vision_calls, answer="在的")
 
             await client._process_at_message(
                 _at_message("在吗"), "GROUP_AT_MESSAGE_CREATE"
             )
 
+            self.assertEqual(fetched, [])
             self.assertEqual(vision_calls, [])
             self.assertEqual(sent, [(1, "在的")])
 

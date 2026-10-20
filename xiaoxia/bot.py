@@ -232,6 +232,7 @@ RATE_LIMIT_CODE = "40034"
 DEDUP_CODE = "40054005"
 ACK_TEXT = "稍等，我查一下～"
 ACK_TEXT_CHAT = "我想想～"
+ACK_TEXT_IMAGES = "我一张张看～"
 FALLBACK_TEXT = "小毛豆刚刚走神了，稍后再 @ 我一次试试。"
 
 # 只 @ 一下不说话，该怎么接？以前的答案是代码替它决定的：把空消息硬填成
@@ -509,42 +510,81 @@ class XiaoxiaClient(botpy.Client):
                 self.store.update_message_content(group_openid, stored.message_key, enriched)
         return budget
 
-    async def _describe_latest_pending_image(
+    def _pending_image_batch(
         self,
         group_openid: str,
         *,
         exclude_key: str,
         budget: int,
-    ) -> int:
-        """同步识别最近一条还没识别的图，返回这次消耗的图片额度。
+    ) -> list[tuple[StoredMessage, list[ImageAttachment]]]:
+        """从最新消息往前收集「连续的一批待识别图片」。
 
-        图片消息本身不会触发视觉模型，只有 @ 事件才会。如果这里仍然把补识别丢后台，
-        当前这轮 prompt 会先带着「这张还没识别」构建，用户就得到「我看不到图」的回复。
-        只同步处理最新一条、最多一张，保证第一问能看到图，又不至于把一排旧图全等一遍。
+        图片消息本身不会触发视觉模型，只有 @ 事件才会。用户一次连发好几张图再 @ 时，
+        如果只同步最新一张，第一轮回答仍然会把前面几张当成没看到。这里按消息从新到旧
+        扫，碰到普通文字就停，最多收满本轮额度；机器人自己的消息跳过，不打断图片批次。
+        """
+        if budget <= 0:
+            return []
+        selected: list[tuple[StoredMessage, list[ImageAttachment]]] = []
+        remaining = budget
+        for stored in reversed(
+            self.store.recent_messages_with_raw(
+                group_openid,
+                self.settings.vision_recent_messages,
+            )
+        ):
+            if stored.message_key == exclude_key or stored.role == "bot":
+                continue
+            attachments = image_attachments(stored.raw)
+            if attachments and needs_image_description(stored.content, stored.raw):
+                taken = attachments[:remaining]
+                if taken:
+                    selected.append((stored, taken))
+                    remaining -= len(taken)
+                if remaining <= 0:
+                    break
+                continue
+            # 一张普通文字（或已经看过、没有待处理图片的消息）就是这一批的边界，
+            # 不能因为它而继续往前翻，把很久以前的旧图也拖进来重看。
+            break
+        selected.reverse()
+        return selected
+
+    async def _describe_pending_image_batch(
+        self,
+        group_openid: str,
+        *,
+        exclude_key: str,
+        budget: int,
+        batch: list[tuple[StoredMessage, list[ImageAttachment]]] | None = None,
+    ) -> int:
+        """同步识别最近一批待看图，返回这次消耗的图片额度。
+
+        每张消息识别完立刻写回消息表，全部处理完再让调用方组装当前话题和 prompt。
         """
         if budget <= 0:
             return 0
-        recent = self.store.recent_messages_with_raw(
-            group_openid,
-            self.settings.vision_recent_messages,
+        items = (
+            batch
+            if batch is not None
+            else self._pending_image_batch(
+                group_openid,
+                exclude_key=exclude_key,
+                budget=budget,
+            )
         )
-        for stored in reversed(recent):
-            if stored.message_key == exclude_key or not needs_image_description(
-                stored.content, stored.raw
-            ):
-                continue
-            attachments = image_attachments(stored.raw)[:budget]
-            if not attachments:
-                continue
+        used = 0
+        for stored, attachments in items:
             logger.info(
-                "describing latest pending image synchronously: %s (%s image(s))",
+                "describing pending image batch synchronously: %s (%s image(s))",
                 stored.message_key,
                 len(attachments),
             )
             descriptions = await self._describe_attachments(attachments)
+            used += len(attachments)
             if not any(description.strip() for description in descriptions):
                 logger.warning(
-                    "image description empty for latest message %s, marking unrecognized",
+                    "image description empty for pending message %s, marking unrecognized",
                     stored.message_key,
                 )
                 self.store.update_message_content(
@@ -552,13 +592,12 @@ class XiaoxiaClient(botpy.Client):
                     stored.message_key,
                     message_with_unrecognized_images(stored.content),
                 )
-                return len(attachments)
+                continue
             enriched = message_with_image_descriptions(stored.content, descriptions)
             if enriched != stored.content:
                 self.store.update_message_content(group_openid, stored.message_key, enriched)
-            logger.info("latest pending image described: %s", stored.message_key)
-            return len(attachments)
-        return 0
+            logger.info("pending image described: %s", stored.message_key)
+        return used
 
     def _queue_image_backfill(self, group_openid: str, *, exclude_key: str, budget: int) -> None:
         """把旧图片的补识别丢到后台去跑，不卡在 @ 回复路径上。
@@ -970,8 +1009,30 @@ class XiaoxiaClient(botpy.Client):
         descriptions: list[str] = []
         budget = self.settings.vision_max_images_per_request
         has_attachments = False
+        pre_acked = False
         if budget > 0:
             attachments = image_attachments(message.raw)[:budget]
+            pending_batch: list[tuple[StoredMessage, list[ImageAttachment]]] = []
+            planned_images = len(attachments)
+            if not attachments:
+                pending_batch = self._pending_image_batch(
+                    message.group_openid,
+                    exclude_key=key,
+                    budget=budget,
+                )
+                planned_images = sum(len(items) for _, items in pending_batch)
+            if planned_images > 1:
+                # 一批图要下载 + 逐张识别，可能超过 QQ 的被动回复等待时间。
+                # 先垫一句，正式回答改用 msg_seq=2；单图仍然直接回答，不额外刷屏。
+                pre_acked = await self._send_reply(
+                    message,
+                    ACK_TEXT_IMAGES,
+                    1,
+                    f"{source}:ACK_IMAGE",
+                    attempts=1,
+                    proactive_fallback=False,
+                    remember=False,
+                )
             if attachments:
                 has_attachments = True
                 descriptions = await self._describe_attachments(attachments, hint=content)
@@ -982,12 +1043,13 @@ class XiaoxiaClient(botpy.Client):
                         self.store.update_message_content(message.group_openid, key, enriched)
                     content = enriched
             if not has_attachments and budget > 0:
-                # 图片先单独发、下一条再 @ 问图：这一轮必须先把最新一张看完，
+                # 图片先单独发、下一条再 @ 问图：这一轮必须先把最近一批看完，
                 # 否则 prompt 已经组装完，后台识别再快也赶不上当前回复。
-                used = await self._describe_latest_pending_image(
+                used = await self._describe_pending_image_batch(
                     message.group_openid,
                     exclude_key=key,
-                    budget=min(budget, 1),
+                    budget=budget,
+                    batch=pending_batch,
                 )
                 budget -= used
             self._queue_image_backfill(message.group_openid, exclude_key=key, budget=budget)
@@ -1004,7 +1066,7 @@ class XiaoxiaClient(botpy.Client):
         identity = self._identity_context(message.group_openid, requester)
 
         async with self._reply_lock:
-            acked = False
+            acked = pre_acked
             try:
                 bot_mention = self._bot_mention(message)
                 raw_request = normalize_face_tags(message.content).strip()
@@ -1039,6 +1101,7 @@ class XiaoxiaClient(botpy.Client):
                     full_recent=full_recent,
                     identity=identity,
                     source=source,
+                    pre_acked=pre_acked,
                 )
                 logger.info("handled @ request %s from %s", intent.get("action"), message.username)
             except Exception:
@@ -1166,6 +1229,7 @@ class XiaoxiaClient(botpy.Client):
         *,
         attempts: int = SEND_ATTEMPTS,
         proactive_fallback: bool = True,
+        remember: bool = True,
     ) -> bool:
         """按 msg_seq 回复群消息。同一条 msg_id 下每次实际发送都必须用不同的 seq。
 
@@ -1182,6 +1246,10 @@ class XiaoxiaClient(botpy.Client):
         """
         content, sticker = self._outgoing_parts(message.group_openid, text)
         current = seq
+
+        def remember_delivery() -> None:
+            if remember:
+                self._remember_bot_reply(message.group_openid, text, source)
         max_attempts = max(1, attempts)
         has_text = bool(content.strip())
 
@@ -1240,7 +1308,7 @@ class XiaoxiaClient(botpy.Client):
                 return False
 
         if sticker is None:
-            self._remember_bot_reply(message.group_openid, text, source)
+            remember_delivery()
             return True
 
         for attempt in range(1, max(1, attempts) + 1):
@@ -1255,7 +1323,7 @@ class XiaoxiaClient(botpy.Client):
                 if self._is_dedup_error(exc):
                     if attempt > 1:
                         logger.info("sticker already delivered, seq=%s", current)
-                        self._remember_bot_reply(message.group_openid, text, source)
+                        remember_delivery()
                         return True
                     logger.warning(
                         "sticker msg_seq %s already taken, resending as %s",
@@ -1270,16 +1338,16 @@ class XiaoxiaClient(botpy.Client):
                 )
                 if has_text:
                     # 文字已经发出去了，图失败不能再重发文字，也不能让人以为整轮没回复。
-                    self._remember_bot_reply(message.group_openid, text, source)
+                    remember_delivery()
                     return True
                 logger.error("sticker failed and there is no text to send, seq=%s", current)
                 return False
             else:
-                self._remember_bot_reply(message.group_openid, text, source)
+                remember_delivery()
                 return True
 
         if has_text:
-            self._remember_bot_reply(message.group_openid, text, source)
+            remember_delivery()
             return True
         logger.error("giving up on sticker, seq=%s", current)
         return False
@@ -1296,6 +1364,7 @@ class XiaoxiaClient(botpy.Client):
         full_recent: str,
         identity: IdentityContext,
         source: str,
+        pre_acked: bool = False,
     ) -> bool:
         """执行 intent，返回是否已经发过 ack（决定正式回复用哪个 msg_seq）。"""
         action = str(intent.get("action") or "chat")
@@ -1311,10 +1380,10 @@ class XiaoxiaClient(botpy.Client):
                 identity=identity,
             )
         )
-        seq = 1
-        acked = False
+        seq = 2 if pre_acked else 1
+        acked = pre_acked
         timeout = self.settings.ack_after_seconds
-        if action in ACK_ACTIONS and timeout > 0:
+        if not pre_acked and action in ACK_ACTIONS and timeout > 0:
             done, _pending = await asyncio.wait({task}, timeout=timeout)
             if not done:
                 # ack 只是垫场：发不出去就别重试也别兜底，把 seq=1 让给正文。

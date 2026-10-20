@@ -83,7 +83,7 @@ def load_settings() -> Settings:
         task_max_count=int(os.getenv("XIAOXIA_TASK_MAX_COUNT", "20")),
         vision_model=os.getenv("XIAOXIA_VISION_MODEL", "deepseek-flash"),
         vision_max_images_per_request=int(
-            os.getenv("XIAOXIA_VISION_MAX_IMAGES_PER_REQUEST", "3")
+            os.getenv("XIAOXIA_VISION_MAX_IMAGES_PER_REQUEST", "9")
         ),
         vision_recent_messages=int(os.getenv("XIAOXIA_VISION_RECENT_MESSAGES", "20")),
         vision_max_image_bytes=int(

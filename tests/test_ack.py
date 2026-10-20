@@ -121,6 +121,19 @@ class AckTests(unittest.TestCase):
         self.assertEqual(sent[1][0], 2)
         self.assertEqual(sent[1][1], bot_module.FALLBACK_TEXT)
 
+    def test_pre_acked_answer_uses_seq_two_and_skips_second_ack(self) -> None:
+        client, message, sent = _client()
+
+        async def slow():
+            await asyncio.sleep(0.2)
+            return "九张看完了"
+
+        args = _args(client, message, "chat", slow)
+        args["pre_acked"] = True
+        acked = asyncio.run(client._answer_with_ack(**args))
+        self.assertTrue(acked)
+        self.assertEqual(sent, [(2, "九张看完了")])
+
     def test_failed_ack_keeps_seq_one_for_answer(self) -> None:
         client, message, _sent = _client()
 
