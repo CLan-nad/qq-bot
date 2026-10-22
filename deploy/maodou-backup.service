@@ -7,4 +7,4 @@ Type=oneshot
 User=maodou
 Group=maodou
 WorkingDirectory=/opt/maodou
-ExecStart=/opt/maodou/scripts/backup.sh
+ExecStart=/bin/bash /opt/maodou/scripts/backup.sh
