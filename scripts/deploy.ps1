@@ -51,8 +51,8 @@ Write-Host "   已推送到 origin/$Branch"
 # 服务器到 github.com 的 git 传输通道时通时断（api.github.com 通、github.com 超时），
 # 原写法一次 fetch 不动就整个部署作废。这里顺手把 bundle 传到服务器当后备：
 # 正常部署根本不会用它，只有远端 fetch origin 失败时才拿它补齐对象。
-$bundleLocal = Join-Path $env:TEMP "xiaoxia-deploy-bundle.bundle"
-$bundleRemote = "/tmp/xiaoxia-deploy-bundle.bundle"
+$bundleLocal = Join-Path $env:TEMP "maodou-deploy-bundle.bundle"
+$bundleRemote = "/tmp/maodou-deploy-bundle.bundle"
 if (Test-Path -LiteralPath $bundleLocal) { [System.IO.File]::Delete($bundleLocal) }
 [void](Get-Git @("bundle", "create", $bundleLocal, $Ref))
 if (-not (Test-Path -LiteralPath $bundleLocal)) { throw "bundle 生成失败：$bundleLocal" }

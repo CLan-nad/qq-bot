@@ -47,7 +47,7 @@ DEFAULT_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 30.0
 _IMAGE_REQUEST_HEADERS = {
     # QQ 图片 CDN 对默认 UA 不友好，这里伪装成普通浏览器请求。
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) xiaoxia-qq-bot/0.1",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) maodou-qq-bot/0.1",
     "Referer": "https://q.qq.com/",
 }
 

@@ -5,10 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=xiaoxia
-Group=xiaoxia
-WorkingDirectory=/opt/xiaoxia
-ExecStart=/opt/xiaoxia/.venv/bin/python main.py
+User=maodou
+Group=maodou
+WorkingDirectory=/opt/maodou
+ExecStart=/opt/maodou/.venv/bin/python main.py
 Restart=always
 RestartSec=5
 TimeoutStopSec=20

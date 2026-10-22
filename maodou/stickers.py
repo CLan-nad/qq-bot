@@ -21,7 +21,7 @@ from typing import Iterable
 from .images import FACE_TAG_PATTERN, decode_face_text
 
 
-logger = logging.getLogger("xiaoxia")
+logger = logging.getLogger("maodou")
 
 
 # 模型表达情用的方括号写法：[头秃]、[好耶]。限制长度和字符，免得把 [[1]] 这种

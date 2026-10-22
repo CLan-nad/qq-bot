@@ -16,15 +16,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from xiaoxia.bot import (
+from maodou.bot import (
     PERSONA_TOOL_LABELS,
     ActionResult,
     IdentityContext,
-    XiaoxiaClient,
+    MaodouClient,
     _contradicts_success,
 )
-from xiaoxia.llm import ACTION_REPLY_ADDENDUM
-from xiaoxia.store import ChatStore, StoredMessage
+from maodou.llm import ACTION_REPLY_ADDENDUM
+from maodou.store import ChatStore, StoredMessage
 
 
 GROUP = "test-group"
@@ -119,8 +119,8 @@ class PersonaOrRawTests(unittest.TestCase):
         asyncio.set_event_loop(None)
         self.loop.close()
 
-    def _client(self, llm) -> XiaoxiaClient:
-        return XiaoxiaClient(settings=_settings(), store=self.store, llm=llm)
+    def _client(self, llm) -> MaodouClient:
+        return MaodouClient(settings=_settings(), store=self.store, llm=llm)
 
     def _run(self, action: str, result: str, llm) -> str:
         return self.loop.run_until_complete(
@@ -254,7 +254,7 @@ class PersonaOrRawTests(unittest.TestCase):
 
 class HandlerPersonaFlagTests(unittest.TestCase):
     def setUp(self) -> None:
-        # XiaoxiaClient.__init__ 里要建 asyncio.Lock，没有当前 loop 会直接 RuntimeError
+        # MaodouClient.__init__ 里要建 asyncio.Lock，没有当前 loop 会直接 RuntimeError
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.tmp = tempfile.TemporaryDirectory()
@@ -262,7 +262,7 @@ class HandlerPersonaFlagTests(unittest.TestCase):
         self.identity = IdentityContext(
             requester=_member("CL"), partner=_member("二十四桥明月夜")
         )
-        self.client = XiaoxiaClient(
+        self.client = MaodouClient(
             settings=_settings(), store=self.store, llm=SimpleNamespace()
         )
 
@@ -378,7 +378,7 @@ class IntentEndToEndTests(unittest.TestCase):
         self.loop.close()
 
     def _intent(self, llm, intent: dict, request: str) -> str:
-        client = XiaoxiaClient(settings=_settings(), store=self.store, llm=llm)
+        client = MaodouClient(settings=_settings(), store=self.store, llm=llm)
         return self.loop.run_until_complete(
             client._handle_intent(
                 intent=intent,
@@ -440,7 +440,7 @@ class TaskPersonaTests(unittest.TestCase):
         self.identity = IdentityContext(
             requester=_member("CL"), partner=_member("二十四桥明月夜")
         )
-        self.client = XiaoxiaClient(
+        self.client = MaodouClient(
             settings=_task_settings(), store=self.store, llm=SimpleNamespace()
         )
         self.client._now = lambda: NOW
@@ -451,8 +451,8 @@ class TaskPersonaTests(unittest.TestCase):
         asyncio.set_event_loop(None)
         self.loop.close()
 
-    def _client_with(self, llm) -> XiaoxiaClient:
-        client = XiaoxiaClient(settings=_task_settings(), store=self.store, llm=llm)
+    def _client_with(self, llm) -> MaodouClient:
+        client = MaodouClient(settings=_task_settings(), store=self.store, llm=llm)
         client._now = lambda: NOW
         return client
 
@@ -631,7 +631,7 @@ class AliasAndPrefPersonaTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = ChatStore(str(Path(self.tmp.name) / "alias-pref.sqlite3"))
         self.identity = IdentityContext(requester=_member("CL"), partner=_member("小虾"))
-        self.client = XiaoxiaClient(
+        self.client = MaodouClient(
             settings=_pref_settings(), store=self.store, llm=SimpleNamespace()
         )
 
@@ -717,7 +717,7 @@ class AliasAndPrefPersonaTests(unittest.TestCase):
             self.assertFalse(getattr(result, "persona", False), intent)
 
     def test_both_actions_are_routed_through_the_persona_layer(self) -> None:
-        source = inspect.getsource(XiaoxiaClient._handle_intent)
+        source = inspect.getsource(MaodouClient._handle_intent)
         for action in ("memory_alias", "bot_pref"):
             self.assertIn(f"speak(self._handle_{action}", source)
             self.assertIn(action, PERSONA_TOOL_LABELS)
@@ -738,7 +738,7 @@ class AliasPrefEndToEndTests(unittest.TestCase):
         self.loop.close()
 
     def _intent(self, llm, intent: dict, request: str) -> str:
-        client = XiaoxiaClient(settings=_pref_settings(), store=self.store, llm=llm)
+        client = MaodouClient(settings=_pref_settings(), store=self.store, llm=llm)
         return self.loop.run_until_complete(
             client._handle_intent(
                 intent=intent,
@@ -809,7 +809,7 @@ class FactToleranceTests(unittest.TestCase):
 
     def _polish(self, template: str, facts: tuple[str, ...], model_says: str) -> str:
         llm = FakeLLM(reply=model_says)
-        client = XiaoxiaClient(settings=_pref_settings(), store=self.store, llm=llm)
+        client = MaodouClient(settings=_pref_settings(), store=self.store, llm=llm)
         return self.loop.run_until_complete(
             client._persona_or_raw(
                 "bot_pref",

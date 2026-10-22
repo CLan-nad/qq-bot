@@ -18,11 +18,11 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-import xiaoxia.bot as bot_module
-import xiaoxia.store as store_module
-from xiaoxia.bot import EMPTY_AT_REQUEST, XiaoxiaClient
-from xiaoxia.llm import SYSTEM_PROMPT
-from xiaoxia.store import ChatStore
+import maodou.bot as bot_module
+import maodou.store as store_module
+from maodou.bot import EMPTY_AT_REQUEST, MaodouClient
+from maodou.llm import SYSTEM_PROMPT
+from maodou.store import ChatStore
 
 
 GROUP = "test-group"
@@ -82,8 +82,8 @@ class EmptyAtRequestTests(unittest.TestCase):
         asyncio.set_event_loop(None)
         self.loop.close()
 
-    def _client(self, **overrides) -> XiaoxiaClient:
-        client = XiaoxiaClient(
+    def _client(self, **overrides) -> MaodouClient:
+        client = MaodouClient(
             settings=_settings(**overrides), store=self.store, llm=SimpleNamespace()
         )
 
@@ -108,7 +108,7 @@ class EmptyAtRequestTests(unittest.TestCase):
         client._queue_image_backfill = lambda *args, **kwargs: None
         return client
 
-    def _run(self, client: XiaoxiaClient, message: SimpleNamespace) -> None:
+    def _run(self, client: MaodouClient, message: SimpleNamespace) -> None:
         self.loop.run_until_complete(
             client._process_at_message(message, "GROUP_AT_MESSAGE_CREATE")
         )
@@ -159,7 +159,7 @@ class EmptyAtRequestTests(unittest.TestCase):
         )
         self.assertFalse(OLD_SELF_INTRO in code_only, "空 @ 又被写死成一句假的用户消息了")
         self.assertIn(
-            "EMPTY_AT_REQUEST", inspect.getsource(bot_module.XiaoxiaClient._process_at_message)
+            "EMPTY_AT_REQUEST", inspect.getsource(bot_module.MaodouClient._process_at_message)
         )
 
     def test_the_stored_placeholder_does_not_smell_like_internals(self) -> None:

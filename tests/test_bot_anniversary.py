@@ -12,8 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from xiaoxia.bot import XiaoxiaClient
-from xiaoxia.store import ChatStore
+from maodou.bot import MaodouClient
+from maodou.store import ChatStore
 
 
 GROUP = "test-group"
@@ -36,7 +36,7 @@ class BotAnniversaryTests(unittest.TestCase):
         asyncio.set_event_loop(self.loop)
         self.tmp = tempfile.TemporaryDirectory()
         self.store = ChatStore(str(Path(self.tmp.name) / "bot.sqlite3"))
-        self.client = XiaoxiaClient(
+        self.client = MaodouClient(
             settings=SimpleNamespace(
                 timezone="Asia/Shanghai",
                 task_max_count=20,
@@ -129,7 +129,7 @@ class BotAnniversaryTests(unittest.TestCase):
         self.assertEqual(self.store.tasks(GROUP), [])
 
     def test_lunar_without_engine_reports_friendly_error(self) -> None:
-        import xiaoxia.calendar as cal
+        import maodou.calendar as cal
 
         zhdate, lunardate = cal._ZhDate, cal._LunarDate
         try:

@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 import httpx2
 
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) xiaoxia-qq-bot/0.2"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) maodou-qq-bot/0.2"
 
 
 @dataclass

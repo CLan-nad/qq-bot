@@ -12,10 +12,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-import xiaoxia.bot as bot_module
-from xiaoxia.bot import XiaoxiaClient
-from xiaoxia.images import ImageAttachment
-from xiaoxia.store import ChatStore
+import maodou.bot as bot_module
+from maodou.bot import MaodouClient
+from maodou.images import ImageAttachment
+from maodou.store import ChatStore
 
 
 GROUP = "test-group"
@@ -43,7 +43,7 @@ class ImageCacheTests(unittest.TestCase):
         asyncio.set_event_loop(None)
         self.loop.close()
 
-    def _client(self, *, cache_enabled: bool = True) -> XiaoxiaClient:
+    def _client(self, *, cache_enabled: bool = True) -> MaodouClient:
         settings = SimpleNamespace(
             vision_max_image_bytes=1024 * 1024,
             image_cache_enabled=cache_enabled,
@@ -55,7 +55,7 @@ class ImageCacheTests(unittest.TestCase):
             self.calls.append(image_ref)
             return "一只橘猫趴在键盘上"
 
-        client = XiaoxiaClient(
+        client = MaodouClient(
             settings=settings,
             store=self.store,
             llm=SimpleNamespace(describe_image=describe_image),

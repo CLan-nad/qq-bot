@@ -4,8 +4,8 @@
 $script:DeployDefaults = @{
     Server       = "ubuntu@124.222.100.81"
     IdentityFile = Join-Path $env:USERPROFILE ".ssh\xiaomaodou_deploy_ed25519"
-    RemoteDir    = "/opt/xiaoxia"
-    ServiceName  = "xiaoxia"
+    RemoteDir    = "/opt/maodou"
+    ServiceName  = "maodou"
     RepoUrl      = "https://github.com/CLan-nad/qq-bot.git"
     Branch       = "main"
 }
@@ -91,9 +91,9 @@ function Invoke-RemoteScript {
     if (-not $Server) { $Server = $script:DeployDefaults.Server }
     # 渲染后的脚本先落到 /tmp 再执行：日志可追溯，失败时能在服务器上原样复跑
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $localPath = Join-Path $env:TEMP ("xiaoxia-" + $Label + "-" + $PID + "-" + $stamp + ".sh")
+    $localPath = Join-Path $env:TEMP ("maodou-" + $Label + "-" + $PID + "-" + $stamp + ".sh")
     [System.IO.File]::WriteAllText($localPath, ($Body -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
-    $remotePath = "/tmp/xiaoxia-" + $Label + "-" + $stamp + ".sh"
+    $remotePath = "/tmp/maodou-" + $Label + "-" + $stamp + ".sh"
 
     $sshArgs = Get-SshArgs -IdentityFile $IdentityFile
     $copy = Invoke-Native -FilePath "scp" -ArgList ($sshArgs + @($localPath, ($Server + ":" + $remotePath)))
@@ -119,7 +119,7 @@ function Get-RemoteStateValue {
     if (-not $Server) { $Server = $script:DeployDefaults.Server }
     if ($Key -notmatch "^[a-z-]+$") { throw "非法的 state 键名：$Key" }
     $sshArgs = Get-SshArgs -IdentityFile $IdentityFile
-    $run = Invoke-Native -FilePath "ssh" -ArgList ($sshArgs + @($Server, "cat /var/lib/xiaoxia-deploy/$Key 2>/dev/null || true"))
+    $run = Invoke-Native -FilePath "ssh" -ArgList ($sshArgs + @($Server, "cat /var/lib/maodou-deploy/$Key 2>/dev/null || true"))
     return $run.Stdout.Trim()
 }
 

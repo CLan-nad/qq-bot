@@ -8,8 +8,8 @@
 
 脚本只搬数据，不写死任何群号、日期、人名：源群和目标群一律命令行给出。
 
-    python scripts/migrate_group.py --db data/xiaoxia.sqlite3 --list
-    python scripts/migrate_group.py --db data/xiaoxia.sqlite3 \
+    python scripts/migrate_group.py --db data/maodou.sqlite3 --list
+    python scripts/migrate_group.py --db data/maodou.sqlite3 \
         --from <旧群openid> --to <新群openid> --dry-run
     确认无误后去掉 --dry-run 才真正写库；写库前自动做一次快照备份（--no-backup 可关）。
 
@@ -225,7 +225,7 @@ def backup_database(conn: sqlite3.Connection, db_path: Path) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="把小毛豆的群数据从一个群搬到另一个群")
-    parser.add_argument("--db", default="data/xiaoxia.sqlite3", help="sqlite 数据库路径")
+    parser.add_argument("--db", default="data/maodou.sqlite3", help="sqlite 数据库路径")
     parser.add_argument("--from", dest="src", help="源群 group_openid")
     parser.add_argument("--to", dest="dst", help="目标群 group_openid")
     parser.add_argument("--list", action="store_true", help="只列出各个群的数据量")

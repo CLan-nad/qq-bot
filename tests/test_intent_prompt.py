@@ -8,14 +8,14 @@ from __future__ import annotations
 import inspect
 import unittest
 
-from xiaoxia.llm import (
+from maodou.llm import (
     CARE_SYSTEM_PROMPT,
     INTENT_SYSTEM_PROMPT,
     MEMORY_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
-    XiaoxiaLLM,
+    MaodouLLM,
 )
-from xiaoxia.bot import XiaoxiaClient
+from maodou.bot import MaodouClient
 
 
 class IntentPromptTests(unittest.TestCase):
@@ -40,31 +40,31 @@ class IntentPromptTests(unittest.TestCase):
         self.assertIn("不要写完整描述句", INTENT_SYSTEM_PROMPT)
 
     def test_parse_intent_takes_topic_context(self) -> None:
-        params = inspect.signature(XiaoxiaLLM.parse_intent).parameters
+        params = inspect.signature(MaodouLLM.parse_intent).parameters
         self.assertIn("topic_context", params)
 
     def test_parse_intent_takes_memory_context(self) -> None:
         # 意图解析也要看长期记忆，才能把指代补全、把称呼统一，写出自包含的检索词。
-        params = inspect.signature(XiaoxiaLLM.parse_intent).parameters
+        params = inspect.signature(MaodouLLM.parse_intent).parameters
         self.assertIn("memory_context", params)
-        self.assertIn("长期记忆", inspect.getsource(XiaoxiaLLM.parse_intent))
+        self.assertIn("长期记忆", inspect.getsource(MaodouLLM.parse_intent))
 
     def test_generate_reply_splits_topic_and_background(self) -> None:
-        params = inspect.signature(XiaoxiaLLM.generate_reply).parameters
+        params = inspect.signature(MaodouLLM.generate_reply).parameters
         self.assertIn("topic_context", params)
         self.assertIn("background_context", params)
 
     def test_generate_reply_takes_summaries_context(self) -> None:
-        params = inspect.signature(XiaoxiaLLM.generate_reply).parameters
+        params = inspect.signature(MaodouLLM.generate_reply).parameters
         self.assertIn("summaries_context", params)
 
     def test_memory_context_is_facts_only(self) -> None:
         # 摘要不能再混进「长期记忆」，否则模型把剧情当人设（“主人多次骂我”）。摘要单独走
         # _summaries_context，长期记忆只剩记忆卡。
-        source = inspect.getsource(XiaoxiaClient._memory_context)
+        source = inspect.getsource(MaodouClient._memory_context)
         self.assertNotIn("[摘要]", source)
         self.assertIn("format_memory_cards", source)
-        self.assertIn("_summaries_context", inspect.getsource(XiaoxiaClient))
+        self.assertIn("_summaries_context", inspect.getsource(MaodouClient))
 
 class AnniversaryPromptTests(unittest.TestCase):
     """生日/纪念日/农历这套要靠提示词里的字段说明才能真正被解析出来。"""
@@ -90,13 +90,13 @@ class AnniversaryPromptTests(unittest.TestCase):
             self.assertIn(field, INTENT_SYSTEM_PROMPT)
 
     def test_parse_intent_receives_festival_context(self) -> None:
-        params = inspect.signature(XiaoxiaLLM.parse_intent).parameters
+        params = inspect.signature(MaodouLLM.parse_intent).parameters
         self.assertIn("festival_context", params)
-        self.assertIn("节日表", inspect.getsource(XiaoxiaLLM.parse_intent))
+        self.assertIn("节日表", inspect.getsource(MaodouLLM.parse_intent))
 
     def test_memory_batch_only_summarizes(self) -> None:
         # 用户要求：只有明确说「记住 xx」才写长期记忆。后台归档只出摘要。
-        params = inspect.signature(XiaoxiaLLM.process_memory_batch).parameters
+        params = inspect.signature(MaodouLLM.process_memory_batch).parameters
         self.assertNotIn("existing", params)
         self.assertNotIn("recent_context", params)
         self.assertIn("不要输出 memories", MEMORY_SYSTEM_PROMPT)
@@ -104,7 +104,7 @@ class AnniversaryPromptTests(unittest.TestCase):
 
     def test_compaction_never_writes_memory_cards(self) -> None:
         # bot 层也要守住：_compact_memories 里不能再出现自动落记忆卡的做法。
-        source = inspect.getsource(XiaoxiaClient._compact_memories)
+        source = inspect.getsource(MaodouClient._compact_memories)
         self.assertIn("memories=[]", source)
         self.assertNotIn("existing_memory_lines", source)
 

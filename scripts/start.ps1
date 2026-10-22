@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $logDir = Join-Path $root "logs"
-$pidFile = Join-Path $logDir "xiaoxia.pid"
+$pidFile = Join-Path $logDir "maodou.pid"
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
@@ -17,8 +17,8 @@ if (Test-Path $pidFile) {
 
 $env:PYTHONUTF8 = "1"
 $python = Join-Path $root ".venv\Scripts\python.exe"
-$stdout = Join-Path $logDir "xiaoxia.out.log"
-$stderr = Join-Path $logDir "xiaoxia.err.log"
+$stdout = Join-Path $logDir "maodou.out.log"
+$stderr = Join-Path $logDir "maodou.err.log"
 
 $process = Start-Process `
     -FilePath $python `

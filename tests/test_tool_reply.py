@@ -13,15 +13,15 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from xiaoxia.bot import TOOL_REPLY_MAX_CHARS, XiaoxiaClient
-from xiaoxia.llm import SYSTEM_PROMPT, XiaoxiaLLM
-from xiaoxia.store import ChatStore
+from maodou.bot import TOOL_REPLY_MAX_CHARS, MaodouClient
+from maodou.llm import SYSTEM_PROMPT, MaodouLLM
+from maodou.store import ChatStore
 
 
 GROUP = "test-group"
 
 
-def _llm(**overrides) -> XiaoxiaLLM:
+def _llm(**overrides) -> MaodouLLM:
     settings = SimpleNamespace(
         llm_api_key="k",
         llm_base_url="https://example.invalid",
@@ -32,7 +32,7 @@ def _llm(**overrides) -> XiaoxiaLLM:
     )
     for key, value in overrides.items():
         setattr(settings, key, value)
-    return XiaoxiaLLM(settings)
+    return MaodouLLM(settings)
 
 
 class GenerateToolReplyTests(unittest.TestCase):
@@ -101,7 +101,7 @@ class GenerateToolReplyTests(unittest.TestCase):
         self.assertEqual(len(out), 3)
 
     def test_signature_has_persona_and_cap(self) -> None:
-        params = inspect.signature(XiaoxiaLLM.generate_tool_reply).parameters
+        params = inspect.signature(MaodouLLM.generate_tool_reply).parameters
         for name in ("identity_context", "memory_context", "topic_context", "max_chars"):
             self.assertIn(name, params)
 
@@ -118,7 +118,7 @@ class ToolHandlerPersonaTests(unittest.TestCase):
             self.captured.update(kwargs)
             return "算好了"
 
-        self.client = XiaoxiaClient(
+        self.client = MaodouClient(
             settings=SimpleNamespace(
                 timezone="Asia/Shanghai",
                 task_max_count=20,

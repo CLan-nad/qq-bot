@@ -26,7 +26,7 @@ if ($Rev) {
 }
 else {
     $target = Get-RemoteStateValue -Key "prev-rev" -Server $Server -IdentityFile $IdentityFile
-    if (-not $target) { throw "/var/lib/xiaoxia-deploy/prev-rev 是空的，说明还没用 deploy.ps1 部署过；请显式给 -Rev" }
+    if (-not $target) { throw "/var/lib/maodou-deploy/prev-rev 是空的，说明还没用 deploy.ps1 部署过；请显式给 -Rev" }
 }
 foreach ($pair in @(@("Server", $Server), @("RemoteDir", $RemoteDir), @("ServiceName", $ServiceName),
                    @("RepoUrl", $RepoUrl), @("Rev", $target))) {

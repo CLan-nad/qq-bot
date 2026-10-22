@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up Xiaomaodou SQLite database
+After=maodou.service
+
+[Service]
+Type=oneshot
+User=maodou
+Group=maodou
+WorkingDirectory=/opt/maodou
+ExecStart=/opt/maodou/scripts/backup.sh

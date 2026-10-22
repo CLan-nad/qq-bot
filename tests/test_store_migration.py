@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from xiaoxia.store import ChatStore
+from maodou.store import ChatStore
 
 
 GROUP = "test-group"

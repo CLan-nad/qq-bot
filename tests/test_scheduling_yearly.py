@@ -4,8 +4,8 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from xiaoxia.scheduling import advance_task, resolve_next_run, schedule_label
-from xiaoxia.store import ChatStore, ScheduledTask
+from maodou.scheduling import advance_task, resolve_next_run, schedule_label
+from maodou.store import ChatStore, ScheduledTask
 
 
 TZ = "Asia/Shanghai"

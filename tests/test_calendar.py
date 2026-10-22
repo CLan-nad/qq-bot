@@ -4,7 +4,7 @@ import unittest
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from xiaoxia import calendar as cal
+from maodou import calendar as cal
 
 
 TZ = ZoneInfo("Asia/Shanghai")

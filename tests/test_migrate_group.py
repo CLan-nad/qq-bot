@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from xiaoxia.store import ChatStore
+from maodou.store import ChatStore
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "migrate_group.py"
@@ -31,7 +31,7 @@ DST = "DSTGROUP02"
 class MigrateGroupTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.db = Path(self.tmp.name) / "xiaoxia.sqlite3"
+        self.db = Path(self.tmp.name) / "maodou.sqlite3"
         self.store = ChatStore(str(self.db))
         self.seed()
 

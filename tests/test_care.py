@@ -12,10 +12,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from xiaoxia.bot import XiaoxiaClient
-from xiaoxia.care import matched_signals, normalize_care_text, should_ask_model
-from xiaoxia.llm import CARE_JUDGE_ATTEMPTS, CARE_MAX_TOKENS, XiaoxiaLLM
-from xiaoxia.store import ChatStore
+from maodou.bot import MaodouClient
+from maodou.care import matched_signals, normalize_care_text, should_ask_model
+from maodou.llm import CARE_JUDGE_ATTEMPTS, CARE_MAX_TOKENS, MaodouLLM
+from maodou.store import ChatStore
 
 
 GROUP = "test-group"
@@ -100,10 +100,10 @@ class CareBase(unittest.TestCase):
         asyncio.set_event_loop(None)
         self.loop.close()
 
-    def build(self, **overrides) -> XiaoxiaClient:
+    def build(self, **overrides) -> MaodouClient:
         for key, value in overrides.items():
             setattr(self.settings, key, value)
-        self.client = XiaoxiaClient(
+        self.client = MaodouClient(
             settings=self.settings, store=self.store, llm=self.llm
         )
         # _remember_bot_reply 会读 robot.name，裸实例没有连接，这里塞个假的。
@@ -440,7 +440,7 @@ class JudgeCareModelTests(unittest.TestCase):
         asyncio.set_event_loop(None)
         self.loop.close()
 
-    def _llm(self, **overrides) -> XiaoxiaLLM:
+    def _llm(self, **overrides) -> MaodouLLM:
         settings = SimpleNamespace(
             llm_api_key="k",
             llm_base_url="https://example.invalid",
@@ -450,7 +450,7 @@ class JudgeCareModelTests(unittest.TestCase):
         )
         for key, value in overrides.items():
             setattr(settings, key, value)
-        return XiaoxiaLLM(settings)
+        return MaodouLLM(settings)
 
     def test_falls_back_to_the_cheap_vision_model(self) -> None:
         captured: dict = {}

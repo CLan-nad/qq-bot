@@ -11,7 +11,7 @@ SKIP_TESTS="__SKIP_TESTS__"
 
 OWNER="$(stat -c '%U' "$DIR")"
 RUNAS="sudo -u $OWNER -H"
-STATE_DIR=/var/lib/xiaoxia-deploy
+STATE_DIR=/var/lib/maodou-deploy
 say() { printf '%s %s\n' "[$1]" "$2"; }
 
 # 服务器到 github.com 的 git 通道时通时断，而且是"挂着不动"而不是干脆报错——
@@ -39,7 +39,7 @@ fi
 # 服务器在国内，api.github.com 通、github.com 的 git 传输通道却经常超时，
 # 照原来的写法每次部署都要赌一次网络。deploy.ps1 会把同一分支的完整 bundle
 # 一起传上来；正常路径不碰它，只有 fetch 不动时才拿来顶上。
-BUNDLE=/tmp/xiaoxia-deploy-bundle.bundle
+BUNDLE=/tmp/maodou-deploy-bundle.bundle
 # bundle 里记的 ref 名随本地怎么打包而变（refs/heads/main 或 refs/remotes/origin/main），
 # 所以不猜名字，直接问 bundle 自己要，优先取指向 TARGET 的那条。
 bundle_ref_for_target() {
@@ -139,8 +139,8 @@ fi
 # ---- 6. back up database and code ----
 stamp="$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$DIR/backups"
-if [ -f "$DIR/data/xiaoxia.sqlite3" ]; then
-  $RUNAS sqlite3 "$DIR/data/xiaoxia.sqlite3" ".backup '$DIR/backups/pre-deploy-$stamp.sqlite3'" \
+if [ -f "$DIR/data/maodou.sqlite3" ]; then
+  $RUNAS sqlite3 "$DIR/data/maodou.sqlite3" ".backup '$DIR/backups/pre-deploy-$stamp.sqlite3'" \
     && say backup "database -> backups/pre-deploy-$stamp.sqlite3"
   $RUNAS bash -c "ls -t $DIR/backups/pre-deploy-*.sqlite3 2>/dev/null | tail -n +9 | xargs -r rm -f"
 fi

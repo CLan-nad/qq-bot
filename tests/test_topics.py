@@ -8,8 +8,8 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta
 
-from xiaoxia.store import StoredMessage
-from xiaoxia.topics import format_topic, speaker_label, split_topic
+from maodou.store import StoredMessage
+from maodou.topics import format_topic, speaker_label, split_topic
 
 
 BASE = datetime(2026, 10, 14, 15, 0)

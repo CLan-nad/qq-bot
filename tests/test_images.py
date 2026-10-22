@@ -9,10 +9,10 @@ from types import SimpleNamespace
 
 import httpx2
 
-import xiaoxia.bot as bot_module
-import xiaoxia.images as images_module
-import xiaoxia.llm as llm_module
-from xiaoxia.images import (
+import maodou.bot as bot_module
+import maodou.images as images_module
+import maodou.llm as llm_module
+from maodou.images import (
     fetch_image_bytes,
     format_message_content,
     image_attachments,
@@ -25,8 +25,8 @@ from xiaoxia.images import (
     strip_image_placeholders,
     to_data_url,
 )
-from xiaoxia.llm import XiaoxiaLLM
-from xiaoxia.store import ChatStore
+from maodou.llm import MaodouLLM
+from maodou.store import ChatStore
 
 
 GROUP = "test-group"
@@ -62,7 +62,7 @@ class _FakeCompletions:
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
-def _fake_llm() -> tuple[XiaoxiaLLM, _FakeCompletions]:
+def _fake_llm() -> tuple[MaodouLLM, _FakeCompletions]:
     settings = SimpleNamespace(
         llm_api_key="test-key",
         llm_base_url="https://api.deepseek.com",
@@ -70,7 +70,7 @@ def _fake_llm() -> tuple[XiaoxiaLLM, _FakeCompletions]:
         vision_model="deepseek-flash",
         reply_max_chars=900,
     )
-    llm = XiaoxiaLLM(settings)
+    llm = MaodouLLM(settings)
     completions = _FakeCompletions()
     llm.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     return llm, completions
@@ -382,7 +382,7 @@ class _ScriptedCompletions:
         return SimpleNamespace(choices=[choice], usage=None)
 
 
-def _scripted_llm(contents: list[str]) -> tuple[XiaoxiaLLM, _ScriptedCompletions]:
+def _scripted_llm(contents: list[str]) -> tuple[MaodouLLM, _ScriptedCompletions]:
     settings = SimpleNamespace(
         llm_api_key="test-key",
         llm_base_url="https://api.deepseek.com",
@@ -390,7 +390,7 @@ def _scripted_llm(contents: list[str]) -> tuple[XiaoxiaLLM, _ScriptedCompletions
         vision_model="deepseek-flash",
         reply_max_chars=900,
     )
-    llm = XiaoxiaLLM(settings)
+    llm = MaodouLLM(settings)
     completions = _ScriptedCompletions(contents)
     llm.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     return llm, completions
@@ -502,7 +502,7 @@ class StickerDescribeTests(unittest.TestCase):
         async def describe_image(url, hint=""):
             return "一只白色垂耳兔闭着眼抱爪"
 
-        client = bot_module.XiaoxiaClient(
+        client = bot_module.MaodouClient(
             settings=self._settings(),
             store=self.store,
             llm=SimpleNamespace(describe_image=describe_image),
@@ -528,7 +528,7 @@ class StickerDescribeTests(unittest.TestCase):
 
     def test_small_face_message_without_attachment_is_left_alone(self) -> None:
         self._save("face-1", SMALL_FACE_TAG, {})
-        client = bot_module.XiaoxiaClient(
+        client = bot_module.MaodouClient(
             settings=self._settings(),
             store=self.store,
             llm=SimpleNamespace(),

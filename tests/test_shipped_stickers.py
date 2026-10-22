@@ -10,7 +10,7 @@ import struct
 import unittest
 from pathlib import Path
 
-from xiaoxia.stickers import FACE_NAME_PATTERN, StickerLibrary
+from maodou.stickers import FACE_NAME_PATTERN, StickerLibrary
 
 
 LIBRARY = Path(__file__).resolve().parents[1] / "assets" / "stickers"

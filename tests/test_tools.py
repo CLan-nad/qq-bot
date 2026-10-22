@@ -5,8 +5,8 @@ import unittest
 from io import BytesIO
 from types import SimpleNamespace
 
-import xiaoxia.tools as tools
-from xiaoxia.tools import (
+import maodou.tools as tools
+from maodou.tools import (
     ToolResult,
     document_attachments,
     eval_math,

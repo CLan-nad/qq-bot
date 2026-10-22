@@ -23,10 +23,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-import xiaoxia.bot as bot_module
-from xiaoxia.bot import XiaoxiaClient
-from xiaoxia.llm import NO_ACTION_NOTE, SYSTEM_PROMPT, TOOL_REPLY_ADDENDUM, XiaoxiaLLM
-from xiaoxia.store import ChatStore
+import maodou.bot as bot_module
+from maodou.bot import MaodouClient
+from maodou.llm import NO_ACTION_NOTE, SYSTEM_PROMPT, TOOL_REPLY_ADDENDUM, MaodouLLM
+from maodou.store import ChatStore
 
 
 GROUP = "test-group"
@@ -37,7 +37,7 @@ def _rule_numbers(text: str) -> list[int]:
     return [int(match) for match in RULE_PATTERN.findall(text)]
 
 
-def _llm() -> XiaoxiaLLM:
+def _llm() -> MaodouLLM:
     settings = SimpleNamespace(
         llm_api_key="k",
         llm_base_url="https://example.invalid",
@@ -46,7 +46,7 @@ def _llm() -> XiaoxiaLLM:
         vision_model="cheap-model",
         reply_max_chars=900,
     )
-    return XiaoxiaLLM(settings)
+    return MaodouLLM(settings)
 
 
 class SystemPromptRuleTests(unittest.TestCase):
@@ -123,7 +123,7 @@ class ExecutedActionsTests(unittest.TestCase):
         return captured["user_prompt"]
 
     def test_generate_reply_takes_executed_actions(self) -> None:
-        params = inspect.signature(XiaoxiaLLM.generate_reply).parameters
+        params = inspect.signature(MaodouLLM.generate_reply).parameters
         self.assertIn("executed_actions", params)
         self.assertEqual(params["executed_actions"].default, "")
 
@@ -161,14 +161,14 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
         asyncio.set_event_loop(None)
         self.loop.close()
 
-    def _client(self) -> XiaoxiaClient:
+    def _client(self) -> MaodouClient:
         async def fake_chat(**kwargs):
             self.captured.update(kwargs)
             return "收到收到，我这就标★"
 
         llm = _llm()
         llm._chat = fake_chat
-        return XiaoxiaClient(
+        return MaodouClient(
             settings=SimpleNamespace(
                 timezone="Asia/Shanghai",
                 allowed_group_openids=frozenset(),
@@ -184,7 +184,7 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
             llm=llm,
         )
 
-    def _run_intent(self, client: XiaoxiaClient, action: str, **extra) -> str:
+    def _run_intent(self, client: MaodouClient, action: str, **extra) -> str:
         return self.loop.run_until_complete(
             client._handle_intent(
                 intent={"action": action, **extra},
@@ -231,8 +231,8 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
         self.assertEqual(self.captured, {})
 
     def test_chat_branch_does_not_pass_executed_actions(self) -> None:
-        source = inspect.getsource(bot_module.XiaoxiaClient._handle_intent)
-        self.assertIn("executed_actions", inspect.getsource(bot_module.XiaoxiaClient._handle_memory_search))
+        source = inspect.getsource(bot_module.MaodouClient._handle_intent)
+        self.assertIn("executed_actions", inspect.getsource(bot_module.MaodouClient._handle_memory_search))
         tail = source[source.index("return await self.llm.generate_reply"):]
         self.assertNotIn("executed_actions", tail)
 

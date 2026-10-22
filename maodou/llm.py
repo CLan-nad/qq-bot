@@ -201,14 +201,14 @@ CARE_MAX_TOKENS = 1024
 CARE_JUDGE_ATTEMPTS = 2
 
 
-class XiaoxiaLLM:
+class MaodouLLM:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.client = AsyncOpenAI(
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
             default_headers={
-                "User-Agent": "xiaoxia-qq-bot/0.1",
+                "User-Agent": "maodou-qq-bot/0.1",
             },
         )
 

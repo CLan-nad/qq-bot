@@ -10,9 +10,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from xiaoxia.bot import IdentityContext, XiaoxiaClient
-from xiaoxia.llm import INTENT_SYSTEM_PROMPT, SYSTEM_PROMPT, TOOL_REPLY_ADDENDUM
-from xiaoxia.store import ChatStore, StoredMessage
+from maodou.bot import IdentityContext, MaodouClient
+from maodou.llm import INTENT_SYSTEM_PROMPT, SYSTEM_PROMPT, TOOL_REPLY_ADDENDUM
+from maodou.store import ChatStore, StoredMessage
 
 
 GROUP = "test-group"
@@ -108,7 +108,7 @@ class BotAddressTests(unittest.TestCase):
         asyncio.set_event_loop(self.loop)
         self.tmp = tempfile.TemporaryDirectory()
         self.store = ChatStore(str(Path(self.tmp.name) / "bot-addr.sqlite3"))
-        self.client = XiaoxiaClient(
+        self.client = MaodouClient(
             settings=SimpleNamespace(timezone="Asia/Shanghai"),
             store=self.store,
             llm=SimpleNamespace(),

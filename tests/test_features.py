@@ -6,9 +6,9 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from xiaoxia.llm import XiaoxiaLLM
-from xiaoxia.scheduling import advance_task, parse_time_of_day, resolve_next_run
-from xiaoxia.store import ChatStore
+from maodou.llm import MaodouLLM
+from maodou.scheduling import advance_task, parse_time_of_day, resolve_next_run
+from maodou.store import ChatStore
 
 
 GROUP = "test-group"
@@ -295,11 +295,11 @@ class FeatureTests(unittest.TestCase):
         self.assertIn("每年农历 冬月初五 08:30", ChatStore.format_tasks([task]))
 
     def test_json_extraction(self) -> None:
-        parsed = XiaoxiaLLM._json_content('```json\n{"action":"chat"}\n```')
+        parsed = MaodouLLM._json_content('```json\n{"action":"chat"}\n```')
         self.assertEqual(parsed, {"action": "chat"})
 
     def test_reply_prompt_keeps_focus_on_current_topic(self) -> None:
-        from xiaoxia.llm import SYSTEM_PROMPT
+        from maodou.llm import SYSTEM_PROMPT
 
         # 抑制“翻旧账 / 重复旧话题”的约束必须留在系统提示词里，
         # 否则机器人每轮都会把长期记忆和历史旧事拎出来复述。

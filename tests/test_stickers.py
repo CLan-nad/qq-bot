@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from xiaoxia.bot import XiaoxiaClient
-from xiaoxia.stickers import (
+from maodou.bot import MaodouClient
+from maodou.stickers import (
     FaceToken,
     face_book,
     face_names_in,
@@ -18,7 +18,7 @@ from xiaoxia.stickers import (
     face_tokens,
     render_faces,
 )
-from xiaoxia.store import ChatStore
+from maodou.store import ChatStore
 
 
 GROUP = "test-group"
@@ -110,7 +110,7 @@ class RenderFacesTests(unittest.TestCase):
     def test_prompt_with_stickers_still_forbids_small_face_names(self) -> None:
         # 表情包让它写 [抱抱]，小表情又让它别写方括号——两段话必须互相说明白，
         # 不然模型只会记住一条，另一条就被否掉了（线上就是这么出 [秃头] 的）。
-        from xiaoxia.stickers import Sticker, StickerLibrary
+        from maodou.stickers import Sticker, StickerLibrary
 
         library = StickerLibrary(
             Path("."), {"抱抱": Sticker(name="抱抱", path=Path("a.gif"), emoji="🤗")}
@@ -247,7 +247,7 @@ class OutgoingFaceTests(unittest.TestCase):
         )
         self.sent: list[str] = []
         self.remembered: list[str] = []
-        self.client = XiaoxiaClient(
+        self.client = MaodouClient(
             settings=SimpleNamespace(timezone="Asia/Shanghai", face_tags=True),
             store=self.store,
             llm=SimpleNamespace(),

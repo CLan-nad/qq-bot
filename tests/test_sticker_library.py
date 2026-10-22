@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from xiaoxia.stickers import StickerLibrary
+from maodou.stickers import StickerLibrary
 
 
 GIF_BYTES = b"GIF89a-not-really-a-gif"

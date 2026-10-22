@@ -8,9 +8,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from xiaoxia.bot import XiaoxiaClient
-from xiaoxia.llm import XiaoxiaLLM
-from xiaoxia.store import ChatStore, StoredMessage, clip_summary
+from maodou.bot import MaodouClient
+from maodou.llm import MaodouLLM
+from maodou.store import ChatStore, StoredMessage, clip_summary
 
 
 GROUP = "test-group"
@@ -95,7 +95,7 @@ class SummariesContextTests(unittest.TestCase):
         asyncio.set_event_loop(self.loop)
         self.tmp = tempfile.TemporaryDirectory()
         self.store = ChatStore(str(Path(self.tmp.name) / "ctx.sqlite3"))
-        self.client = XiaoxiaClient(
+        self.client = MaodouClient(
             settings=SimpleNamespace(timezone="Asia/Shanghai", max_context_chars=4000),
             store=self.store,
             llm=SimpleNamespace(),
@@ -159,7 +159,7 @@ class ReplyPromptOrderTests(unittest.TestCase):
             vision_model="cheap-model",
             reply_max_chars=900,
         )
-        llm = XiaoxiaLLM(settings)
+        llm = MaodouLLM(settings)
         llm._chat = fake_chat
         try:
             loop.run_until_complete(

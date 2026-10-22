@@ -1,7 +1,7 @@
 $ErrorActionPreference = "SilentlyContinue"
 
 $root = Split-Path -Parent $PSScriptRoot
-$pidFile = Join-Path $root "logs\xiaoxia.pid"
+$pidFile = Join-Path $root "logs\maodou.pid"
 
 if (-not (Test-Path $pidFile)) {
     Write-Host "Xiaomaodou is stopped."

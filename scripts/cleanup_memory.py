@@ -1,7 +1,7 @@
 """一次性清理脚本：删重复记忆卡、截断超长摘要。
 
 用法（先停服再跑，避免和 bot 抢写锁）：
-    python scripts/cleanup_memory.py --db /opt/xiaoxia/data/xiaoxia.sqlite3
+    python scripts/cleanup_memory.py --db /opt/maodou/data/maodou.sqlite3
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default="data/xiaoxia.sqlite3")
+    parser.add_argument("--db", default="data/maodou.sqlite3")
     parser.add_argument("--backup-dir", default="")
     args = parser.parse_args()
 
@@ -30,7 +30,7 @@ def main() -> int:
     shutil.copy2(db, backup)
     print(f"backup -> {backup}")
 
-    from xiaoxia.store import ChatStore
+    from maodou.store import ChatStore
 
     store = ChatStore(str(db))
     try:

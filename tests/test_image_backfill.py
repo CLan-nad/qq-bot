@@ -16,10 +16,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-import xiaoxia.bot as bot_module
-from xiaoxia.bot import XiaoxiaClient
-from xiaoxia.images import UNRECOGNIZED_IMAGE_MARK, ImageAttachment
-from xiaoxia.store import ChatStore
+import maodou.bot as bot_module
+from maodou.bot import MaodouClient
+from maodou.images import UNRECOGNIZED_IMAGE_MARK, ImageAttachment
+from maodou.store import ChatStore
 
 
 GROUP = "test-group"
@@ -51,8 +51,8 @@ def _settings(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
-def _client(store=None, llm=None, **overrides) -> XiaoxiaClient:
-    return XiaoxiaClient(
+def _client(store=None, llm=None, **overrides) -> MaodouClient:
+    return MaodouClient(
         settings=_settings(**overrides),
         store=store if store is not None else SimpleNamespace(face_book=lambda group: {}),
         llm=llm if llm is not None else SimpleNamespace(),
@@ -343,7 +343,7 @@ class ReplyIsNotBlockedByBackfillTests(_LoopTestCase):
         self.tmp.cleanup()
         super().tearDown()
 
-    def _wire(self, client: XiaoxiaClient, sent: list[tuple[int, str]], answer: str) -> None:
+    def _wire(self, client: MaodouClient, sent: list[tuple[int, str]], answer: str) -> None:
         async def parse_intent(**kwargs):
             return {"action": "chat", "reply": answer}
 
@@ -484,7 +484,7 @@ class SyncImageBatchBeforeReplyTests(_LoopTestCase):
 
     def _wire(
         self,
-        client: XiaoxiaClient,
+        client: MaodouClient,
         sent: list[tuple[int, str]],
         topics: list[str],
         fetched: list[str],

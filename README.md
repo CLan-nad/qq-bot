@@ -76,7 +76,7 @@ QQ 开放平台选择 WebSocket 连接，并开启接收群消息。
 
 ## 部署
 
-生产环境在 Linux 服务器上以 `xiaoxia.service` 运行，代码位于 `/opt/xiaoxia`。
+生产环境在 Linux 服务器上以 `maodou.service` 运行，代码位于 `/opt/maodou`。
 本地改完 push 之后，一条命令完成部署：
 
 ```powershell
@@ -87,11 +87,11 @@ QQ 开放平台选择 WebSocket 连接，并开启接收群消息。
 
 `deploy.ps1` 会先确认工作区干净且本地已 push；服务器上 `requirements.txt` 有变化才
 `pip install`；测试不通过直接中止；健康检查失败自动回滚上一个版本。推送和回滚版本
-记录在服务器的 `/var/lib/xiaoxia-deploy/`。
+记录在服务器的 `/var/lib/maodou-deploy/`。
 
 服务器在国内，偶尔会遇到 `api.github.com` 通、但 `github.com` 的 git 通道超时，远端
 `git fetch origin` 拿不到新提交。为此 `deploy.ps1` 每次都会把同一分支的完整 bundle
-一并传到 `/tmp/xiaoxia-deploy-bundle.bundle`：走 origin 正常时不会用到它，fetch 失败时
+一并传到 `/tmp/maodou-deploy-bundle.bundle`：走 origin 正常时不会用到它，fetch 失败时
 自动改从 bundle 补齐对象，日志里出现 `used offline bundle` 说明走了这条旁路。
 
 GitHub Actions（`.github/workflows/ci.yml`）在每次 push 和 PR 上跑 `compileall` 和全部
@@ -104,9 +104,9 @@ GitHub Actions（`.github/workflows/ci.yml`）在每次 push 和 PR 上跑 `comp
 长期记忆」）。这时用 `scripts/migrate_group.py` 把旧群的数据搬过去：
 
 ```bash
-cd /opt/xiaoxia
-sudo -u xiaoxia .venv/bin/python scripts/migrate_group.py --db data/xiaoxia.sqlite3 --list
-sudo -u xiaoxia .venv/bin/python scripts/migrate_group.py --db data/xiaoxia.sqlite3 \
+cd /opt/maodou
+sudo -u maodou .venv/bin/python scripts/migrate_group.py --db data/maodou.sqlite3 --list
+sudo -u maodou .venv/bin/python scripts/migrate_group.py --db data/maodou.sqlite3 \
     --from <旧群openid> --to <新群openid> --dry-run   # 先看清楚会搬多少
 # 去掉 --dry-run 才真正写库，写库前自动留一份 .bak-migrate-<时间戳> 快照
 ```

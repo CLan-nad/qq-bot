@@ -10,8 +10,8 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 
-import xiaoxia.bot as bot_module
-from xiaoxia.bot import ACK_TEXT, ACK_TEXT_CHAT, XiaoxiaClient
+import maodou.bot as bot_module
+from maodou.bot import ACK_TEXT, ACK_TEXT_CHAT, MaodouClient
 
 
 def _client(ack_after_seconds: float = 0.05):
@@ -21,7 +21,7 @@ def _client(ack_after_seconds: float = 0.05):
         allowed_group_openids=frozenset(),
         face_tags=True,
     )
-    client = XiaoxiaClient(
+    client = MaodouClient(
         settings=settings,
         store=SimpleNamespace(face_book=lambda group: {}),
         llm=SimpleNamespace(),

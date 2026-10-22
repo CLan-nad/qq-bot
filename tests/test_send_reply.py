@@ -11,9 +11,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-import xiaoxia.bot as bot_module
-from xiaoxia.bot import XiaoxiaClient
-from xiaoxia.stickers import Sticker, StickerLibrary
+import maodou.bot as bot_module
+from maodou.bot import MaodouClient
+from maodou.stickers import Sticker, StickerLibrary
 
 
 DEDUP = RuntimeError("消息被去重，请检查请求msgseq code=40054005")
@@ -27,7 +27,7 @@ def _client(script):
     每项是 None（成功）或一个异常（失败）。用完之后一律成功。
     返回 (client, message, sent, proactive)。
     """
-    client = XiaoxiaClient(
+    client = MaodouClient(
         settings=SimpleNamespace(timezone="Asia/Shanghai", face_tags=True),
         store=SimpleNamespace(face_book=lambda group: {}),
         llm=SimpleNamespace(),
@@ -144,9 +144,9 @@ class SendReplyTests(unittest.TestCase):
         self.assertEqual(remembered, [])
 
     def test_dedup_detection(self) -> None:
-        self.assertTrue(XiaoxiaClient._is_dedup_error(DEDUP))
-        self.assertFalse(XiaoxiaClient._is_dedup_error(NETWORK))
-        self.assertFalse(XiaoxiaClient._is_dedup_error(THROTTLED))
+        self.assertTrue(MaodouClient._is_dedup_error(DEDUP))
+        self.assertFalse(MaodouClient._is_dedup_error(NETWORK))
+        self.assertFalse(MaodouClient._is_dedup_error(THROTTLED))
 
 
 class StickerSendTests(unittest.TestCase):
@@ -174,7 +174,7 @@ class StickerSendTests(unittest.TestCase):
 
     def _client(self, script, *, upload="file-info-1"):
         """script 同 _client：依次决定每次发送的成败，用完之后一律成功。"""
-        client = XiaoxiaClient(
+        client = MaodouClient(
             settings=SimpleNamespace(timezone="Asia/Shanghai", face_tags=True),
             store=SimpleNamespace(face_book=lambda group: {}),
             llm=SimpleNamespace(),

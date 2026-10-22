@@ -9,7 +9,7 @@ TARGET="__TARGET__"
 
 OWNER="$(stat -c '%U' "$DIR")"
 RUNAS="sudo -u $OWNER -H"
-STATE_DIR=/var/lib/xiaoxia-deploy
+STATE_DIR=/var/lib/maodou-deploy
 line() { printf -- '--- %s ---\n' "$1"; }
 
 # 和 deploy-remote.sh 一样：到 github.com 的 fetch 会挂着不动，探测也不能被它卡住
@@ -49,7 +49,7 @@ printf 'HEAD=%s branch=%s\n' \
   "$($RUNAS git -C "$DIR" rev-parse HEAD 2>/dev/null)" \
   "$($RUNAS git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)"
 # 与 deploy-remote.sh 一致：origin 连不上就退回离线 bundle，探测不该被网络卡住
-BUNDLE=/tmp/xiaoxia-deploy-bundle.bundle
+BUNDLE=/tmp/maodou-deploy-bundle.bundle
 if ! net_fetch fetch -q origin; then
   # 不猜 bundle 里的 ref 名，问它自己；优先取指向 TARGET 的那条
   bref="$($RUNAS git -C "$DIR" bundle list-heads "$BUNDLE" 2>/dev/null | awk -v want="$TARGET" '$1 == want { print $2; exit }')"
@@ -94,9 +94,9 @@ else
 fi
 
 line "db summary"
-if [ -f "$DIR/data/xiaoxia.sqlite3" ]; then
-  printf 'size=%s bytes\n' "$(stat -c '%s' "$DIR/data/xiaoxia.sqlite3")"
-  $RUNAS sqlite3 "$DIR/data/xiaoxia.sqlite3" \
+if [ -f "$DIR/data/maodou.sqlite3" ]; then
+  printf 'size=%s bytes\n' "$(stat -c '%s' "$DIR/data/maodou.sqlite3")"
+  $RUNAS sqlite3 "$DIR/data/maodou.sqlite3" \
     "SELECT 'messages='||count(*) FROM messages; SELECT 'memory_cards='||count(*) FROM memory_cards; SELECT 'tasks='||count(*) FROM scheduled_tasks;" 2>/dev/null
 else
   echo "(no database file)"

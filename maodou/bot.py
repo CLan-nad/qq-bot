@@ -37,7 +37,7 @@ from .images import (
     normalize_face_tags,
     to_data_url,
 )
-from .llm import ACTION_REPLY_ADDENDUM, XiaoxiaLLM
+from .llm import ACTION_REPLY_ADDENDUM, MaodouLLM
 from .scheduling import advance_task, parse_datetime, resolve_next_run, schedule_label
 from .store import ChatStore, MemoryCard, ScheduledTask, StoredMessage, clip_summary
 from .stickers import Sticker, StickerLibrary, face_prompt, render_faces
@@ -53,7 +53,7 @@ from .tools import (
 )
 
 
-logger = logging.getLogger("xiaoxia")
+logger = logging.getLogger("maodou")
 
 
 class RichGroupMessage(GroupMessage):
@@ -299,13 +299,13 @@ class IdentityContext:
         return "\n".join(lines)
 
 
-class XiaoxiaClient(botpy.Client):
+class MaodouClient(botpy.Client):
     def __init__(
         self,
         *,
         settings: Settings,
         store: ChatStore,
-        llm: XiaoxiaLLM,
+        llm: MaodouLLM,
     ) -> None:
         super().__init__(
             intents=botpy.Intents(public_messages=True),

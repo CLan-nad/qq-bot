@@ -12,9 +12,9 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 
-from xiaoxia.bot import IdentityContext, XiaoxiaClient
-from xiaoxia.llm import XiaoxiaLLM
-from xiaoxia.store import StoredMessage
+from maodou.bot import IdentityContext, MaodouClient
+from maodou.llm import MaodouLLM
+from maodou.store import StoredMessage
 
 
 GROUP = "test-group"
@@ -31,7 +31,7 @@ def _member(username: str, openid: str | None = None) -> StoredMessage:
     )
 
 
-def _llm() -> XiaoxiaLLM:
+def _llm() -> MaodouLLM:
     settings = SimpleNamespace(
         llm_api_key="k",
         llm_base_url="https://example.invalid",
@@ -40,7 +40,7 @@ def _llm() -> XiaoxiaLLM:
         vision_model="cheap-model",
         reply_max_chars=900,
     )
-    return XiaoxiaLLM(settings)
+    return MaodouLLM(settings)
 
 
 class GenerateReplyPromptTests(unittest.TestCase):
@@ -139,13 +139,13 @@ class TopicContextLabelTests(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        from xiaoxia.store import ChatStore
+        from maodou.store import ChatStore
 
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.tmp = tempfile.TemporaryDirectory()
         self.store = ChatStore(str(Path(self.tmp.name) / "labels.sqlite3"))
-        self.client = XiaoxiaClient(
+        self.client = MaodouClient(
             settings=SimpleNamespace(
                 timezone="Asia/Shanghai",
                 recent_messages=50,
