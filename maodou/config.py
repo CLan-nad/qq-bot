@@ -50,9 +50,6 @@ class Settings:
     stickers_enabled: bool
     sticker_dir: str
     ack_after_seconds: float
-    search_provider: str
-    tavily_api_key: str
-    bocha_api_key: str
     search_max_results: int
     search_timeout_seconds: int
     web_fetch_max_chars: int
@@ -122,9 +119,6 @@ def load_settings() -> Settings:
         sticker_dir=os.getenv("MAODOU_STICKER_DIR", "assets/stickers").strip()
         or "assets/stickers",
         ack_after_seconds=float(os.getenv("MAODOU_ACK_AFTER_SECONDS", "6")),
-        search_provider=os.getenv("MAODOU_SEARCH_PROVIDER", "auto").strip().lower(),
-        tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
-        bocha_api_key=os.getenv("BOCHA_API_KEY", "").strip(),
         search_max_results=int(os.getenv("MAODOU_SEARCH_MAX_RESULTS", "5")),
         search_timeout_seconds=int(os.getenv("MAODOU_SEARCH_TIMEOUT_SECONDS", "12")),
         web_fetch_max_chars=int(os.getenv("MAODOU_WEB_FETCH_MAX_CHARS", "8000")),

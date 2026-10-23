@@ -2264,8 +2264,22 @@ class MaodouClient(botpy.Client):
             snippet = (item.get("snippet") or "").strip()
             if len(snippet) > 200:
                 snippet = snippet[:200] + "…"
-            site = urlparse(url).netloc if url else ""
-            suffix = f"（来源：{site}）" if site else ""
+            site = (item.get("site_name") or "").strip()
+            if not site and url:
+                site = urlparse(url).netloc
+            meta: list[str] = []
+            if site:
+                meta.append(f"来源：{site}")
+            date = str(item.get("date") or "").strip()
+            if date:
+                meta.append(date[:10])
+            try:
+                authority = int(item.get("authority"))
+            except (TypeError, ValueError):
+                authority = -1
+            if authority >= 3:
+                meta.append("权威度：高")
+            suffix = f"（{'，'.join(meta)}）" if meta else ""
             lines.append(f"{index}. {title}{suffix}\n   {url}\n   {snippet}")
         return "\n".join(lines)
 
@@ -2279,19 +2293,19 @@ class MaodouClient(botpy.Client):
         topic_context: str = "",
     ) -> str:
         query = self._optional_str(intent.get("query")) or request
-        logger.info("web_search query=%r provider=%s", query, self.settings.search_provider)
+        logger.info("web_search query=%r provider=deepseek", query)
         result = await search_web(
             query,
             limit=self.settings.search_max_results,
-            provider=self.settings.search_provider,
-            tavily_api_key=self.settings.tavily_api_key,
-            bocha_api_key=self.settings.bocha_api_key,
+            api_key=self.settings.llm_api_key,
+            base_url=self.settings.llm_base_url,
+            original_question=request,
             timeout=self.settings.search_timeout_seconds,
         )
         if not result.ok:
             logger.warning("web search failed: %s", result.error)
             if "没有配置" in (result.error or ""):
-                return "我还没配好联网搜索，需要先在服务器上填 BOCHA_API_KEY，配好后就能查了。"
+                return "我还没配好联网搜索，需要先在服务器上填 LLM_API_KEY，配好后就能查了。"
             detail = (result.error or "未知错误").replace("联网搜索没有配置：", "")[:80]
             return f"搜索服务这次没返回可用结果：{detail}，要不换个说法再让我查一次？"
         return await self.llm.generate_tool_reply(
@@ -2321,7 +2335,12 @@ class MaodouClient(botpy.Client):
                 memory_context=memory_context,
                 topic_context=topic_context,
             )
-        result = await fetch_page(url, max_chars=self.settings.web_fetch_max_chars)
+        result = await fetch_page(
+            url,
+            api_key=self.settings.llm_api_key,
+            base_url=self.settings.llm_base_url,
+            max_chars=self.settings.web_fetch_max_chars,
+        )
         if not result.ok:
             return result.error or "网页读取失败。"
         return await self.llm.generate_tool_reply(

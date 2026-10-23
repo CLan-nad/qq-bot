@@ -133,110 +133,151 @@ async def _download_bytes(
     return data, content_type
 
 
+DEEPSEEK_SEARCH_PATH = "/v1/tools/search"
+DEEPSEEK_FETCH_PATH = "/v1/tools/fetch"
+DEEPSEEK_RETRY_DELAY_SECONDS = 0.25
+_DEEPSEEK_RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _deepseek_tools_url(base_url: str, path: str) -> str:
+    base = (base_url or "https://api.deepseek.com").strip().rstrip("/")
+    if base.endswith("/v1"):
+        return base + path[len("/v1") :]
+    return base + path
+
+
+def _deepseek_error_detail(response: httpx2.Response) -> str:
+    try:
+        payload = response.json()
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error")
+    if isinstance(error, dict):
+        return str(error.get("message") or "").strip()[:120]
+    return str(error or "").strip()[:120]
+
+
+def _deepseek_error_message(response: httpx2.Response, *, action: str) -> str:
+    status = response.status_code
+    if status == 401:
+        return "DeepSeek 鉴权失败，请检查服务器上的 LLM_API_KEY"
+    if status == 402:
+        return "DeepSeek 余额不足，请先充值"
+    if status == 403:
+        return "DeepSeek 拒绝了这次请求"
+    if status == 404:
+        return "DeepSeek 没有找到可用的网页正文"
+    if status == 429:
+        return "DeepSeek 请求过于频繁，请稍后再试"
+    if status in {500, 502, 503, 504}:
+        return f"DeepSeek {action}服务暂时不可用（HTTP {status}）"
+    detail = _deepseek_error_detail(response)
+    suffix = f"：{detail}" if detail else ""
+    return f"DeepSeek {action}失败（HTTP {status}）{suffix}"
+
+
+async def _post_deepseek_tool(
+    *,
+    api_key: str,
+    base_url: str,
+    path: str,
+    payload: dict[str, Any],
+    timeout: float,
+    action: str,
+) -> tuple[dict[str, Any] | None, str]:
+    url = _deepseek_tools_url(base_url, path)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    last_error = f"DeepSeek {action}失败"
+    for attempt in range(2):
+        try:
+            async with httpx2.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, headers=headers, json=payload)
+        except httpx2.TimeoutException:
+            last_error = f"DeepSeek {action}超时"
+        except httpx2.HTTPError as exc:
+            last_error = f"DeepSeek {action}网络错误：{exc}"
+        except Exception as exc:
+            last_error = f"DeepSeek {action}失败：{exc}"
+        else:
+            if response.status_code < 400:
+                try:
+                    body = response.json()
+                except Exception:
+                    return None, f"DeepSeek {action}返回了无法解析的数据"
+                if not isinstance(body, dict):
+                    return None, f"DeepSeek {action}返回格式不正确"
+                return body, ""
+            last_error = _deepseek_error_message(response, action=action)
+            if response.status_code not in _DEEPSEEK_RETRYABLE_STATUSES:
+                return None, last_error
+        if attempt == 0:
+            await asyncio.sleep(DEEPSEEK_RETRY_DELAY_SECONDS)
+    return None, last_error
+
+
 async def search_web(
     query: str,
     *,
     limit: int = 5,
-    provider: str = "auto",
-    tavily_api_key: str = "",
-    bocha_api_key: str = "",
+    api_key: str = "",
+    base_url: str = "https://api.deepseek.com",
+    original_question: str = "",
     timeout: float = 12.0,
 ) -> ToolResult:
     query = query.strip()
     if not query:
         return ToolResult(ok=False, error="搜索词为空")
+    if not api_key.strip():
+        return ToolResult(ok=False, error="联网搜索没有配置：缺少 LLM_API_KEY")
 
-    provider = (provider or "auto").lower()
-    keys = {"bocha": bocha_api_key, "tavily": tavily_api_key}
-    if provider == "auto":
-        chain = [name for name in ("bocha", "tavily") if keys.get(name)]
-        if not chain:
-            return ToolResult(ok=False, error="联网搜索没有配置：请在 .env 填 BOCHA_API_KEY")
-    elif provider in keys:
-        chain = [provider]
-    else:
-        return ToolResult(ok=False, error=f"不支持的搜索提供方：{provider}，只支持 bocha / tavily")
+    payload: dict[str, Any] = {
+        "query": query,
+        "count": max(1, min(limit, 50)),
+        "need_content": False,
+    }
+    original_question = original_question.strip()[:128]
+    if original_question:
+        payload["ori_question"] = original_question
 
-    errors: list[str] = []
-    for name in chain:
-        if not keys.get(name):
-            errors.append(f"{name} 未配置 key")
-            continue
-        if name == "tavily":
-            result = await _tavily_search(query, limit, tavily_api_key, timeout)
-        else:
-            result = await _bocha_search(query, limit, bocha_api_key, timeout)
-
-        if result.ok and (result.data or result.output):
-            return result
-        errors.append(result.error or f"{name} 没有返回结果")
-
-    return ToolResult(ok=False, error="搜索失败：" + "；".join(errors))
-
-
-async def _tavily_search(query: str, limit: int, api_key: str, timeout: float) -> ToolResult:
-    try:
-        async with httpx2.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                "https://api.tavily.com/search",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={
-                    "query": query,
-                    "max_results": max(1, min(limit, 10)),
-                    "search_depth": "basic",
-                    "include_answer": True,
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
-    except Exception as exc:
-        return ToolResult(ok=False, error=f"Tavily 搜索失败：{exc}")
+    body, error = await _post_deepseek_tool(
+        api_key=api_key,
+        base_url=base_url,
+        path=DEEPSEEK_SEARCH_PATH,
+        payload=payload,
+        timeout=timeout,
+        action="搜索",
+    )
+    if body is None:
+        return ToolResult(ok=False, error=error)
 
     data: list[dict[str, Any]] = []
-    for item in payload.get("results") or []:
+    for item in body.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        summary = str(item.get("summary") or "").strip()
+        snippet = str(item.get("snippet") or summary).strip()
         data.append(
             {
-                "title": item.get("title") or "",
-                "url": item.get("url") or "",
-                "snippet": item.get("content") or item.get("snippet") or "",
+                "title": str(item.get("title") or "").strip(),
+                "url": url,
+                "snippet": snippet,
+                "summary": summary,
+                "site_name": str(item.get("site_name") or "").strip(),
+                "date": str(item.get("date") or "").strip(),
+                "authority": item.get("authority"),
+                "rerank_score": item.get("rerank_score"),
             }
         )
-    return ToolResult(ok=True, output=str(payload.get("answer") or "").strip(), data=data)
-
-
-async def _bocha_search(query: str, limit: int, api_key: str, timeout: float) -> ToolResult:
-    """博查搜索：中文结果质量好，境内直连稳定。"""
-    try:
-        async with httpx2.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                "https://api.bochaai.com/v1/web-search",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "query": query,
-                    "count": max(1, min(limit, 10)),
-                    "summary": True,
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
-    except Exception as exc:
-        return ToolResult(ok=False, error=f"博查搜索失败：{exc}")
-
-    pages = ((payload.get("data") or {}).get("webPages") or {}).get("value") or []
-    data = [
-        {
-            "title": item.get("name") or "",
-            "url": item.get("url") or "",
-            "snippet": item.get("summary") or item.get("snippet") or "",
-        }
-        for item in pages
-        if isinstance(item, dict)
-    ]
     if not data:
-        return ToolResult(ok=False, error="博查没有返回可用结果")
+        return ToolResult(ok=False, error="DeepSeek 搜索没有返回可用结果")
     return ToolResult(ok=True, data=data)
 
 
@@ -342,18 +383,39 @@ async def read_document(
 async def fetch_page(
     url: str,
     *,
+    api_key: str = "",
+    base_url: str = "https://api.deepseek.com",
     max_chars: int = 8000,
-    max_bytes: int = 2 * 1024 * 1024,
+    timeout: float = 20.0,
 ) -> ToolResult:
-    downloaded = await _download_bytes(url, max_bytes=max_bytes, timeout=20)
-    if downloaded is None:
-        return ToolResult(ok=False, error="网页抓取失败、超时或链接指向内网地址")
-    data, content_type = downloaded
-    try:
-        text = _plain_text(data, content_type)
-    except Exception as exc:
-        return ToolResult(ok=False, error=f"网页解析失败：{exc}")
-    return ToolResult(ok=True, output=text[:max_chars])
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ToolResult(ok=False, error="链接格式不正确")
+    if is_private_host(parsed.hostname):
+        return ToolResult(ok=False, error="链接指向内网地址，不能读取")
+    if not api_key.strip():
+        return ToolResult(ok=False, error="网页抓取没有配置：缺少 LLM_API_KEY")
+
+    body, error = await _post_deepseek_tool(
+        api_key=api_key,
+        base_url=base_url,
+        path=DEEPSEEK_FETCH_PATH,
+        payload={"url": url},
+        timeout=timeout,
+        action="网页抓取",
+    )
+    if body is None:
+        return ToolResult(ok=False, error=error)
+
+    content = str(body.get("content") or "").strip()
+    if not content:
+        return ToolResult(
+            ok=False,
+            error="DeepSeek 没有提取到网页正文，页面可能被目标站点拦截",
+        )
+    title = str(body.get("title") or "").strip()
+    output = f"标题：{title}\n\n{content}" if title else content
+    return ToolResult(ok=True, output=output[:max_chars])
 
 
 _SAFE_FUNCS: dict[str, Any] = {
