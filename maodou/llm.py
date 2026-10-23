@@ -79,6 +79,7 @@ INTENT_SYSTEM_PROMPT = """你是小毛豆的意图解析器。你只输出一个
 - memory_pin: 把某条记忆标成永久置顶，不许忘
 - memory_unpin: 取消某条记忆的置顶
 - memory_search: 查询或搜索历史聊天/记忆
+- message_stats: 统计某个时间段里每个人发了多少条消息
 - memory_forget: 删除某条记忆
 - memory_alias: 把同一个人的几种叫法统一成一个
 - address_set: 定下、取消或查看“我该怎么称呼某个人”
@@ -112,7 +113,14 @@ memory_remember 输出 memories 数组，每项包含 kind、person、content。
 用户说“一定要记住/别忘了/这个记牢”时，那一项加 "pin": true；说“先记一下/临时的/过阵子就忘”时加 "temporary": true。
 memory_list 输出 page（页码，从 1 开始）；用户说“第二页”就填 2，没说就留空。
 memory_list 还可以带筛选：只看置顶/永久的填 pinned=true，只看某一类填 kind（preference/fact/agreement/event/relationship），只看某个人的记忆填 person，按关键词筛填 match；没提到就都留空。
-memory_search 输出 query：写 2-5 个能出现在原消息里的短关键词（如“说说 主人”“纪念日 12月”），用空格分隔；不要写完整描述句，也不要补写原文里没有的称呼或解释。
+memory_search 输出 query：写 2-5 个能出现在原消息里的短关键词（如“说说 主人”“纪念日 12月”），用空格分隔；不要写完整描述句，也不要补写原文里没有的称呼或解释。memory_search 只负责找相关原话，不能回答数量统计。
+message_stats 输出 period（时间范围）和 include_bot（是否统计小毛豆，默认 false）：
+- period 只能是 today / yesterday / last_3_days / last_7_days / this_week / last_week / this_month / all / custom。
+- “今天”=today，“昨天”=yesterday，“这三天/最近三天”=last_3_days，“这一周/最近一周”=last_7_days，“本周”=this_week，“上周”=last_week，“这个月/本月”=this_month，“所有/全部记录”=all。
+- 只有用户给出明确的起止日期、且不符合上面任何固定范围时才用 custom，并输出 start_date、end_date（格式 YYYY-MM-DD，含首尾两天）。
+- 问“谁发得多”“统计消息数量”“我们各发了多少条”“谁最活跃”时一律用 message_stats，绝不能解析成 memory_search 让模型从片段里猜。
+- 只有明确问“小毛豆发了多少条”时才把 include_bot 设为 true；普通比较两人消息量时保持 false。
+- 用户接着上一轮问“那这三天呢”时，结合【当前话题】判断仍是在统计消息数量，继续用 message_stats。
 memory_forget、memory_pin、memory_unpin 输出 memory_id 或 match。
 memory_id 可以是数组，一次说好几个编号时全部填进去；说“全部/所有”时留空并加 "all": true。
 memory_alias 输出 op（set/clear/show）、alias、canonical：

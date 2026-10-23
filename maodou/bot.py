@@ -39,7 +39,15 @@ from .images import (
 )
 from .llm import ACTION_REPLY_ADDENDUM, MaodouLLM
 from .scheduling import advance_task, parse_datetime, resolve_next_run, schedule_label
-from .store import ChatStore, MemoryCard, ScheduledTask, StoredMessage, clip_summary
+from .store import (
+    ChatStore,
+    MemberMessageCount,
+    MemoryCard,
+    MessageStats,
+    ScheduledTask,
+    StoredMessage,
+    clip_summary,
+)
 from .stickers import Sticker, StickerLibrary, face_prompt, render_faces
 from .topics import format_topic, split_topic
 from .tools import (
@@ -627,6 +635,70 @@ class MaodouClient(botpy.Client):
 
     def _now(self) -> datetime:
         return datetime.now(ZoneInfo(self.settings.timezone))
+
+    @staticmethod
+    def _message_stats_range(
+        intent: dict,
+        now: datetime,
+    ) -> tuple[datetime | None, datetime, str]:
+        """把意图里的 period 换成 [since, until) 和给人看的范围说明。"""
+        raw_period = str(intent.get("period") or "").strip().lower()
+        raw_period = raw_period.replace("-", "_").replace(" ", "_")
+        aliases = {
+            "3_days": "last_3_days",
+            "three_days": "last_3_days",
+            "最近三天": "last_3_days",
+            "这三天": "last_3_days",
+            "7_days": "last_7_days",
+            "seven_days": "last_7_days",
+            "最近一周": "last_7_days",
+            "这一周": "last_7_days",
+            "这周": "last_7_days",
+            "本周": "this_week",
+            "上周": "last_week",
+            "这个月": "this_month",
+            "本月": "this_month",
+            "全部": "all",
+            "所有": "all",
+            "今天的": "today",
+            "昨天的": "yesterday",
+        }
+        period = aliases.get(raw_period, raw_period or "last_7_days")
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        if period == "today":
+            return today, now, "今天"
+        if period == "yesterday":
+            return today - timedelta(days=1), today, "昨天"
+        if period == "last_3_days":
+            return now - timedelta(days=3), now, "最近 3 天"
+        if period in {"last_7_days", "this_week"}:
+            return now - timedelta(days=7), now, "最近 7 天"
+        if period == "last_week":
+            this_monday = today - timedelta(days=today.weekday())
+            return this_monday - timedelta(days=7), this_monday, "上周"
+        if period == "this_month":
+            month_start = today.replace(day=1)
+            return month_start, now, "本月"
+        if period == "all":
+            return None, now, "全部历史记录"
+        if period == "custom":
+            start_text = str(intent.get("start_date") or "").strip()
+            end_text = str(intent.get("end_date") or "").strip()
+            if not start_text or not end_text:
+                raise ValueError("自定义统计需要开始日期和结束日期")
+            try:
+                start_day = datetime.strptime(start_text, "%Y-%m-%d").replace(tzinfo=now.tzinfo)
+                end_day = datetime.strptime(end_text, "%Y-%m-%d").replace(tzinfo=now.tzinfo)
+            except ValueError as exc:
+                raise ValueError("日期格式应为 YYYY-MM-DD") from exc
+            if end_day < start_day:
+                raise ValueError("结束日期不能早于开始日期")
+            until = end_day + timedelta(days=1)
+            if until > now:
+                until = now
+            return start_day, until, f"{start_day:%Y-%m-%d} 至 {end_day:%Y-%m-%d}"
+        return now - timedelta(days=7), now, "最近 7 天"
 
     def _identity_context(
         self,
@@ -1510,6 +1582,14 @@ class MaodouClient(botpy.Client):
             return self._handle_calendar_query(intent)
         if action == "bot_pref":
             return await speak(self._handle_bot_pref(intent, message))
+        if action == "message_stats":
+            return await self._handle_message_stats(
+                intent=intent,
+                message=message,
+                request=request,
+                topic=topic,
+                identity=identity,
+            )
         if action == "memory_search":
             return await self._handle_memory_search(
                 intent=intent,
@@ -2209,6 +2289,117 @@ class MaodouClient(botpy.Client):
             persona=True,
             facts=("忘记", str(deleted)),
         )
+
+    @staticmethod
+    def _message_stats_label(
+        member: MemberMessageCount,
+        labels: dict[str, str],
+    ) -> str:
+        if member.is_bot:
+            return "小毛豆"
+        openid = member.member_key.removeprefix("openid:")
+        if member.member_key.startswith("openid:"):
+            label = labels.get(openid)
+            if label:
+                return label
+        return labels.get(member.username) or member.username or "未知成员"
+
+    def _format_message_stats(
+        self,
+        stats: MessageStats,
+        *,
+        since: datetime | None,
+        until: datetime,
+        range_label: str,
+        labels: dict[str, str],
+        include_bot: bool,
+    ) -> str:
+        """生成一份事实锁死的统计文本，模型只负责把它说得像小毛豆。"""
+        if range_label == "全部历史记录":
+            range_line = "统计范围：全部历史记录"
+        elif " 至 " in range_label:
+            range_line = f"统计范围：{range_label}（含首尾两天）"
+        elif since is not None:
+            range_line = (
+                f"统计范围：{range_label}"
+                f"（{since:%Y-%m-%d %H:%M} 至 {until:%Y-%m-%d %H:%M}）"
+            )
+        else:
+            range_line = f"统计范围：{range_label}"
+
+        if not stats.members:
+            return f"{range_line}\n这段时间没有聊天记录。"
+
+        scope = "含小毛豆" if include_bot else "不含小毛豆"
+        lines = [range_line, f"共 {stats.total} 条（{scope}）"]
+        for member in stats.members:
+            label = self._message_stats_label(member, labels)
+            share = member.count / stats.total * 100 if stats.total else 0.0
+            lines.append(f"{label}：{member.count} 条（{share:.1f}%）")
+
+        top = stats.members[0]
+        top_label = self._message_stats_label(top, labels)
+        if len(stats.members) == 1:
+            lines.append(f"只有 {top_label} 发了消息。")
+        else:
+            lines.append(f"发得最多的是 {top_label}，{top.count} 条。")
+        return "\n".join(lines)
+
+    async def _handle_message_stats(
+        self,
+        *,
+        intent: dict,
+        message: RichGroupMessage,
+        request: str,
+        topic: str,
+        identity: IdentityContext,
+    ) -> str:
+        try:
+            since, until, range_label = self._message_stats_range(intent, self._now())
+        except ValueError as exc:
+            return f"时间范围我没看懂：{exc}。可以说“最近三天”或“10月1日到10月3日”。"
+
+        include_bot = bool(intent.get("include_bot"))
+        stats = self.store.message_stats(
+            message.group_openid,
+            since=since.isoformat(timespec="seconds") if since else None,
+            until=until.isoformat(timespec="seconds"),
+            include_bot=include_bot,
+        )
+        labels = identity.speaker_labels or self.store.speaker_labels(message.group_openid)
+        template = self._format_message_stats(
+            stats,
+            since=since,
+            until=until,
+            range_label=range_label,
+            labels=labels,
+            include_bot=include_bot,
+        )
+        if not stats.members:
+            return template
+
+        try:
+            reply = await self.llm.generate_tool_reply(
+                request=request,
+                tool_name="message_stats",
+                tool_output=template,
+                identity_context=identity.prompt(),
+                memory_context=self._memory_context(message.group_openid),
+                topic_context=topic,
+            )
+        except Exception as exc:
+            logger.warning("message stats persona reply failed: %s", exc)
+            return template
+
+        reply = (reply or "").strip()
+        # 条数必须原样出现。模型要是把 415 说成“四百多”或直接写反，退回事实模板。
+        numbers = [stats.total, *(member.count for member in stats.members)]
+        if not reply or any(
+            re.search(rf"(?<!\d){number}(?!\d)", reply) is None for number in numbers
+        ):
+            logger.info("message stats reply dropped exact counts, fell back to template")
+            return template
+        return reply
 
     async def _handle_memory_search(
         self,

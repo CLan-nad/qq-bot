@@ -39,6 +39,26 @@ class IntentPromptTests(unittest.TestCase):
         self.assertIn("能出现在原消息里的短关键词", INTENT_SYSTEM_PROMPT)
         self.assertIn("不要写完整描述句", INTENT_SYSTEM_PROMPT)
 
+    def test_message_stats_is_not_confused_with_memory_search(self) -> None:
+        self.assertIn("- message_stats:", INTENT_SYSTEM_PROMPT)
+        self.assertIn("绝不能解析成 memory_search", INTENT_SYSTEM_PROMPT)
+        for phrase in ("谁发得多", "统计消息数量", "我们各发了多少条"):
+            self.assertIn(phrase, INTENT_SYSTEM_PROMPT)
+
+    def test_message_stats_periods_are_described(self) -> None:
+        for period in (
+            "today",
+            "yesterday",
+            "last_3_days",
+            "last_7_days",
+            "this_week",
+            "this_month",
+            "all",
+            "custom",
+        ):
+            self.assertIn(period, INTENT_SYSTEM_PROMPT)
+        self.assertIn("include_bot", INTENT_SYSTEM_PROMPT)
+
     def test_parse_intent_takes_topic_context(self) -> None:
         params = inspect.signature(MaodouLLM.parse_intent).parameters
         self.assertIn("topic_context", params)

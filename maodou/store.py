@@ -39,6 +39,20 @@ class SearchResult:
 
 
 @dataclass(frozen=True)
+class MemberMessageCount:
+    member_key: str
+    username: str
+    count: int
+    is_bot: bool = False
+
+
+@dataclass(frozen=True)
+class MessageStats:
+    total: int
+    members: list[MemberMessageCount]
+
+
+@dataclass(frozen=True)
 class MemoryCard:
     id: int
     kind: str
@@ -677,6 +691,77 @@ class ChatStore:
             )
             for row in reversed(rows)
         ]
+
+    def message_stats(
+        self,
+        group_openid: str,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        include_bot: bool = False,
+    ) -> MessageStats:
+        """按成员统计消息条数。
+
+        人数统计必须走 SQL 聚合，不能拿 memory_search 的几十条片段让模型猜。
+        同一个人按 member_openid 聚合，昵称改了也不会被拆成两个人；老数据没有
+        openid 时才退回显示名。默认不统计机器人自己的消息。
+        """
+        member_key = """
+            CASE
+                WHEN COALESCE(role, '') = 'bot' THEN 'bot'
+                WHEN TRIM(COALESCE(member_openid, '')) != ''
+                    THEN 'openid:' || member_openid
+                ELSE 'name:' || COALESCE(NULLIF(TRIM(username), ''), 'unknown')
+            END
+        """
+        conditions = ["group_openid = ?"]
+        params: list[Any] = [group_openid]
+        if since:
+            conditions.append("timestamp >= ?")
+            params.append(since)
+        if until:
+            conditions.append("timestamp < ?")
+            params.append(until)
+        if not include_bot:
+            conditions.append("COALESCE(role, '') != 'bot'")
+
+        rows = self._conn.execute(
+            f"""
+            SELECT {member_key} AS member_key,
+                   COUNT(*) AS count,
+                   MAX(row_id) AS latest_row_id
+            FROM messages
+            WHERE {' AND '.join(conditions)}
+            GROUP BY member_key
+            ORDER BY count DESC, latest_row_id DESC
+            """,
+            params,
+        ).fetchall()
+
+        members: list[MemberMessageCount] = []
+        for row in rows:
+            latest = self._conn.execute(
+                "SELECT username FROM messages WHERE row_id = ?",
+                (row["latest_row_id"],),
+            ).fetchone()
+            key = str(row["member_key"])
+            username = str((latest["username"] if latest else "") or "").strip()
+            if key == "bot":
+                username = username or "小毛豆"
+            else:
+                username = username or "unknown"
+            members.append(
+                MemberMessageCount(
+                    member_key=key,
+                    username=username,
+                    count=int(row["count"] or 0),
+                    is_bot=key == "bot",
+                )
+            )
+        return MessageStats(
+            total=sum(member.count for member in members),
+            members=members,
+        )
 
     def known_members(self, group_openid: str, limit: int = 20) -> list[StoredMessage]:
         rows = self._conn.execute(
