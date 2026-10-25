@@ -11,12 +11,13 @@ from maodou.llm import MaodouLLM
 
 
 class _Completions:
-    def __init__(self) -> None:
+    def __init__(self, content: str = "ok") -> None:
         self.calls: list[dict] = []
+        self.content = content
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
-        message = SimpleNamespace(content="ok")
+        message = SimpleNamespace(content=self.content)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
@@ -99,6 +100,44 @@ class ReasoningEffortConfigTests(unittest.TestCase):
 
     def test_invalid_value_falls_back_to_low(self) -> None:
         self.assertEqual(self._load("turbo"), "low")
+
+
+class IntentModelTests(unittest.TestCase):
+    """意图解析单独走快模型：它只输出一个小 JSON，不该拖慢每一条闲聊。"""
+
+    def _llm_with_intent(self, **settings) -> tuple[MaodouLLM, _Completions]:
+        llm, _ = _llm("low")
+        completions = _Completions(content='{"action":"chat"}')
+        llm.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        for key, value in settings.items():
+            setattr(llm.settings, key, value)
+        return llm, completions
+
+    def test_parse_intent_uses_its_own_model_and_effort(self) -> None:
+        llm, completions = self._llm_with_intent(
+            intent_model="deepseek-flash", intent_reasoning_effort="none"
+        )
+        result = asyncio.run(
+            llm.parse_intent(
+                request="在吗",
+                current_time="2026-10-25T23:00:00+08:00",
+                tasks_summary="",
+            )
+        )
+        self.assertEqual(result, {"action": "chat"})
+        self.assertEqual(completions.calls[0]["model"], "deepseek-flash")
+        self.assertEqual(completions.calls[0]["reasoning_effort"], "none")
+
+    def test_parse_intent_falls_back_to_reply_model_without_setting(self) -> None:
+        llm, completions = self._llm_with_intent()
+        asyncio.run(
+            llm.parse_intent(
+                request="在吗",
+                current_time="2026-10-25T23:00:00+08:00",
+                tasks_summary="",
+            )
+        )
+        self.assertEqual(completions.calls[0]["model"], "deepseek-chat")
 
 
 if __name__ == "__main__":

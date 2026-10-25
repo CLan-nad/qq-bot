@@ -1070,6 +1070,9 @@ class MaodouClient(botpy.Client):
     async def _process_at_message(self, message: RichGroupMessage, source: str) -> None:
         if not self._group_allowed(message.group_openid):
             return
+        started = time.perf_counter()
+        intent_ms = 0.0
+        action = "-"
 
         key = ChatStore.message_key(message.id, message.msg_seq)
         if not self.store.mark_at_processed(key):
@@ -1162,6 +1165,7 @@ class MaodouClient(botpy.Client):
                     request = message_with_image_descriptions(request, descriptions)
                 request = request or EMPTY_AT_REQUEST
 
+                intent_started = time.perf_counter()
                 intent = await self.llm.parse_intent(
                     request=request,
                     current_time=self._now().isoformat(timespec="seconds"),
@@ -1174,6 +1178,8 @@ class MaodouClient(botpy.Client):
                     ),
                     memory_context=self._memory_context(message.group_openid),
                 )
+                intent_ms = (time.perf_counter() - intent_started) * 1000
+                action = str(intent.get("action") or "chat")
                 acked = await self._answer_with_ack(
                     message=message,
                     intent=intent,
@@ -1187,6 +1193,13 @@ class MaodouClient(botpy.Client):
                     pre_acked=pre_acked,
                 )
                 logger.info("handled @ request %s from %s", intent.get("action"), message.username)
+                logger.info(
+                    "perf at action=%s intent=%.0fms total=%.0fms images=%d",
+                    action,
+                    intent_ms,
+                    (time.perf_counter() - started) * 1000,
+                    len(descriptions),
+                )
             except Exception:
                 logger.exception("failed to generate or send reply")
                 await self._send_reply(
@@ -1244,6 +1257,7 @@ class MaodouClient(botpy.Client):
         http = getattr(self.api, "_http", None)
         if http is None:
             return ""
+        started = time.perf_counter()
         data = await asyncio.to_thread(sticker.read)
         route = Route("POST", "/v2/groups/{group_openid}/files", group_openid=group_openid)
         result = await http.request(
@@ -1254,7 +1268,43 @@ class MaodouClient(botpy.Client):
                 "srv_send_msg": False,
             },
         )
-        return str((result or {}).get("file_info") or "")
+        file_info = str((result or {}).get("file_info") or "")
+        logger.info(
+            "perf sticker upload=%s %.0fms bytes=%d ok=%s",
+            sticker.name,
+            (time.perf_counter() - started) * 1000,
+            len(data),
+            bool(file_info),
+        )
+        return file_info
+
+    async def _post_sticker_message(
+        self,
+        group_openid: str,
+        file_info: str,
+        *,
+        msg_id: str | None = None,
+        msg_seq: int | None = None,
+    ) -> None:
+        """file_info 已经上传好时，只发图片消息这一步。"""
+        payload: dict[str, Any] = {
+            "group_openid": group_openid,
+            "msg_type": 7,
+            # msg_type=7 时 content 必须为空，否则 QQ 会在图下面画出一行空白。
+            "content": None,
+            "media": {"file_info": file_info},
+        }
+        if msg_id is not None:
+            payload["msg_id"] = msg_id
+        if msg_seq is not None:
+            payload["msg_seq"] = msg_seq
+        started = time.perf_counter()
+        await self.api.post_group_message(**payload)
+        logger.info(
+            "perf sticker send seq=%s %.0fms",
+            msg_seq,
+            (time.perf_counter() - started) * 1000,
+        )
 
     async def _send_sticker(
         self,
@@ -1268,18 +1318,9 @@ class MaodouClient(botpy.Client):
         file_info = await self._upload_group_image(group_openid, sticker)
         if not file_info:
             raise RuntimeError(f"sticker upload returned no file_info: {sticker.name}")
-        payload: dict[str, Any] = {
-            "group_openid": group_openid,
-            "msg_type": 7,
-            # msg_type=7 时 content 必须为空，否则 QQ 会在图下面画出一行空白。
-            "content": None,
-            "media": {"file_info": file_info},
-        }
-        if msg_id is not None:
-            payload["msg_id"] = msg_id
-        if msg_seq is not None:
-            payload["msg_seq"] = msg_seq
-        await self.api.post_group_message(**payload)
+        await self._post_sticker_message(
+            group_openid, file_info, msg_id=msg_id, msg_seq=msg_seq
+        )
 
     async def _send_reply_proactive(
         self, message: RichGroupMessage, text: str, source: str
@@ -1340,100 +1381,156 @@ class MaodouClient(botpy.Client):
             logger.error("refusing to send an empty group reply, seq=%s", current)
             return False
 
-        if has_text:
-            text_sent = False
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    await self.api.post_group_message(
-                        group_openid=message.group_openid,
-                        msg_id=message.id,
-                        msg_seq=current,
-                        content=content,
+        # 表情图要先读文件再 base64 上传，这一步往往比发一条文字还慢。用户要求
+        # 「先文字、后单独发图」，所以可见顺序不能动，但上传可以提前：文字发送的
+        # 同时在后台把图传好，文字一到，紧接着用现成的 file_info 发图。
+        upload_task: asyncio.Task[str] | None = None
+        pre_upload = sticker is not None and has_text
+        if pre_upload:
+            upload_task = asyncio.create_task(
+                self._upload_group_image(message.group_openid, sticker)
+            )
+
+        try:
+            if has_text:
+                text_started = time.perf_counter()
+                text_seq = current
+                text_sent = False
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        await self.api.post_group_message(
+                            group_openid=message.group_openid,
+                            msg_id=message.id,
+                            msg_seq=current,
+                            content=content,
+                        )
+                    except Exception as exc:
+                        if self._is_dedup_error(exc):
+                            if attempt > 1:
+                                logger.info(
+                                    "group reply already delivered, seq=%s", current
+                                )
+                                current += 1
+                                text_sent = True
+                                break
+                            logger.warning(
+                                "msg_seq %s already taken (ack landed?), resending as %s",
+                                current,
+                                current + 1,
+                            )
+                            current += 1
+                            continue
+                        logger.warning(
+                            "failed to send group reply, attempt %s/%s, seq=%s: %s",
+                            attempt,
+                            max_attempts,
+                            current,
+                            exc,
+                        )
+                        if attempt < max_attempts:
+                            await asyncio.sleep(SEND_RETRY_DELAY_SECONDS)
+                            continue
+                        if proactive_fallback:
+                            return await self._send_reply_proactive(
+                                message, text, source
+                            )
+                        logger.error("giving up on group reply, seq=%s", current)
+                        return False
+                    else:
+                        current += 1
+                        text_sent = True
+                        break
+                if text_sent:
+                    logger.info(
+                        "perf text send seq=%s %.0fms chars=%d",
+                        text_seq,
+                        (time.perf_counter() - text_started) * 1000,
+                        len(content),
                     )
+                if not text_sent:
+                    if proactive_fallback:
+                        return await self._send_reply_proactive(message, text, source)
+                    logger.error("giving up on group reply, seq=%s", current)
+                    return False
+
+            if sticker is None:
+                remember_delivery()
+                return True
+
+            file_info = ""
+            if upload_task is not None:
+                try:
+                    file_info = await upload_task
+                except Exception as exc:
+                    logger.warning(
+                        "sticker pre-upload failed (%s): %s", sticker.name, exc
+                    )
+                upload_task = None
+            if not file_info and pre_upload:
+                # 上传已经试过一次并失败了：文字早就发出去了，再传一次只会让整轮更慢。
+                logger.warning(
+                    "sticker %s upload failed, keep the text only", sticker.name
+                )
+                remember_delivery()
+                return True
+
+            for attempt in range(1, max(1, attempts) + 1):
+                try:
+                    if file_info:
+                        await self._post_sticker_message(
+                            message.group_openid,
+                            file_info,
+                            msg_id=message.id,
+                            msg_seq=current,
+                        )
+                    else:
+                        await self._send_sticker(
+                            message.group_openid,
+                            sticker,
+                            msg_id=message.id,
+                            msg_seq=current,
+                        )
                 except Exception as exc:
                     if self._is_dedup_error(exc):
                         if attempt > 1:
-                            logger.info(
-                                "group reply already delivered, seq=%s", current
-                            )
-                            current += 1
-                            text_sent = True
-                            break
+                            logger.info("sticker already delivered, seq=%s", current)
+                            remember_delivery()
+                            return True
                         logger.warning(
-                            "msg_seq %s already taken (ack landed?), resending as %s",
+                            "sticker msg_seq %s already taken, resending as %s",
                             current,
                             current + 1,
                         )
                         current += 1
                         continue
+                    self._note_rate_limit(message.group_openid, exc)
                     logger.warning(
-                        "failed to send group reply, attempt %s/%s, seq=%s: %s",
-                        attempt,
-                        max_attempts,
-                        current,
-                        exc,
+                        "sticker %s failed (%s), seq=%s", sticker.name, exc, current
                     )
-                    if attempt < max_attempts:
-                        await asyncio.sleep(SEND_RETRY_DELAY_SECONDS)
-                        continue
-                    if proactive_fallback:
-                        return await self._send_reply_proactive(message, text, source)
-                    logger.error("giving up on group reply, seq=%s", current)
-                    return False
-                else:
-                    current += 1
-                    text_sent = True
-                    break
-            if not text_sent:
-                if proactive_fallback:
-                    return await self._send_reply_proactive(message, text, source)
-                logger.error("giving up on group reply, seq=%s", current)
-                return False
-
-        if sticker is None:
-            remember_delivery()
-            return True
-
-        for attempt in range(1, max(1, attempts) + 1):
-            try:
-                await self._send_sticker(
-                    message.group_openid,
-                    sticker,
-                    msg_id=message.id,
-                    msg_seq=current,
-                )
-            except Exception as exc:
-                if self._is_dedup_error(exc):
-                    if attempt > 1:
-                        logger.info("sticker already delivered, seq=%s", current)
+                    if has_text:
+                        # 文字已经发出去了，图失败不能再重发文字，也不能让人以为整轮没回复。
                         remember_delivery()
                         return True
-                    logger.warning(
-                        "sticker msg_seq %s already taken, resending as %s",
-                        current,
-                        current + 1,
+                    logger.error(
+                        "sticker failed and there is no text to send, seq=%s", current
                     )
-                    current += 1
-                    continue
-                self._note_rate_limit(message.group_openid, exc)
-                logger.warning(
-                    "sticker %s failed (%s), seq=%s", sticker.name, exc, current
-                )
-                if has_text:
-                    # 文字已经发出去了，图失败不能再重发文字，也不能让人以为整轮没回复。
+                    return False
+                else:
                     remember_delivery()
                     return True
-                logger.error("sticker failed and there is no text to send, seq=%s", current)
-                return False
-            else:
+
+            if has_text:
                 remember_delivery()
                 return True
-
-        if has_text:
-            remember_delivery()
-            return True
-        logger.error("giving up on sticker, seq=%s", current)
-        return False
+            logger.error("giving up on sticker, seq=%s", current)
+            return False
+        finally:
+            if upload_task is not None:
+                upload_task.cancel()
+                try:
+                    await upload_task
+                except BaseException:
+                    pass
 
     async def _answer_with_ack(
         self,
@@ -1451,6 +1548,7 @@ class MaodouClient(botpy.Client):
     ) -> bool:
         """执行 intent，返回是否已经发过 ack（决定正式回复用哪个 msg_seq）。"""
         action = str(intent.get("action") or "chat")
+        handle_started = time.perf_counter()
         task = asyncio.create_task(
             self._handle_intent(
                 intent=intent,
@@ -1485,7 +1583,16 @@ class MaodouClient(botpy.Client):
         except Exception:
             logger.exception("failed to build reply for action %s", action)
             answer = FALLBACK_TEXT
+        handle_ms = (time.perf_counter() - handle_started) * 1000
+        send_started = time.perf_counter()
         await self._send_reply(message, answer, seq, f"{source}:REPLY")
+        logger.info(
+            "perf reply action=%s handle=%.0fms send=%.0fms ack=%s",
+            action,
+            handle_ms,
+            (time.perf_counter() - send_started) * 1000,
+            acked,
+        )
         return acked
 
     @staticmethod

@@ -25,6 +25,8 @@ class Settings:
     llm_base_url: str
     model: str
     reasoning_effort: str
+    intent_model: str
+    intent_reasoning_effort: str
     allowed_group_openids: frozenset[str]
     db_path: str
     recent_messages: int
@@ -76,6 +78,11 @@ def load_settings() -> Settings:
     reasoning_effort = os.getenv("MAODOU_REASONING_EFFORT", "low").strip().lower()
     if reasoning_effort not in {"none", "low", "high", "max"}:
         reasoning_effort = "low"
+    intent_reasoning_effort = os.getenv(
+        "MAODOU_INTENT_REASONING_EFFORT", "none"
+    ).strip().lower()
+    if intent_reasoning_effort not in {"none", "low", "high", "max"}:
+        intent_reasoning_effort = "none"
 
     return Settings(
         qq_app_id=os.environ["QQ_APP_ID"],
@@ -84,6 +91,10 @@ def load_settings() -> Settings:
         llm_base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com"),
         model=os.getenv("MAODOU_MODEL", "deepseek-chat"),
         reasoning_effort=reasoning_effort,
+        # 意图解析只输出一个小 JSON，不需要写作能力，但要快：默认用 flash 且关掉思考。
+        # 最终回复仍然走 MAODOU_MODEL，人设和文笔不受影响。
+        intent_model=os.getenv("MAODOU_INTENT_MODEL", "deepseek-flash"),
+        intent_reasoning_effort=intent_reasoning_effort,
         allowed_group_openids=groups,
         db_path=os.getenv("MAODOU_DB_PATH", "data/maodou.sqlite3"),
         recent_messages=int(os.getenv("MAODOU_RECENT_MESSAGES", "60")),
@@ -123,7 +134,7 @@ def load_settings() -> Settings:
         not in {"0", "false", "no"},
         sticker_dir=os.getenv("MAODOU_STICKER_DIR", "assets/stickers").strip()
         or "assets/stickers",
-        ack_after_seconds=float(os.getenv("MAODOU_ACK_AFTER_SECONDS", "6")),
+        ack_after_seconds=float(os.getenv("MAODOU_ACK_AFTER_SECONDS", "4")),
         search_max_results=int(os.getenv("MAODOU_SEARCH_MAX_RESULTS", "5")),
         search_timeout_seconds=int(os.getenv("MAODOU_SEARCH_TIMEOUT_SECONDS", "12")),
         web_fetch_max_chars=int(os.getenv("MAODOU_WEB_FETCH_MAX_CHARS", "8000")),

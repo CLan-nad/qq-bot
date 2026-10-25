@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -234,6 +235,7 @@ class MaodouLLM:
         model: str | None = None,
         reasoning_effort: str | None = None,
     ) -> str:
+        started = time.perf_counter()
         response = await self._chat_response(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -242,6 +244,15 @@ class MaodouLLM:
             json_mode=json_mode,
             model=model,
             reasoning_effort=reasoning_effort,
+        )
+        usage = getattr(response, "usage", None)
+        logger.info(
+            "llm call model=%s json=%s %.0fms prompt_tokens=%s completion_tokens=%s",
+            model or self.settings.model,
+            json_mode,
+            (time.perf_counter() - started) * 1000,
+            getattr(usage, "prompt_tokens", None),
+            getattr(usage, "completion_tokens", None),
         )
         return (response.choices[0].message.content or "").strip()
 
@@ -395,8 +406,10 @@ class MaodouLLM:
             system_prompt=INTENT_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             temperature=0.1,
-            max_tokens=600,
+            max_tokens=400,
             json_mode=True,
+            model=getattr(self.settings, "intent_model", "") or self.settings.model,
+            reasoning_effort=getattr(self.settings, "intent_reasoning_effort", None),
         )
         return self._json_content(content)
 

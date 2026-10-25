@@ -252,6 +252,34 @@ class StickerSendTests(unittest.TestCase):
         self.assertEqual(remembered, [("抱抱你呀[抱抱]", "GROUP_MESSAGE_CREATE:REPLY")])
         self.assertEqual(uploads["n"], 1)
 
+    def test_sticker_upload_runs_while_the_text_is_being_sent(self) -> None:
+        """图的上传和文字发送并行：用户看到的顺序仍是文字在前，但少等一次上传。"""
+        client, message, _sent, _remembered, _uploads = self._client([None, None])
+        events: list[str] = []
+
+        async def slow_text_post(**kwargs):
+            if kwargs.get("msg_type") == 7:
+                return
+            events.append("text-start")
+            await asyncio.sleep(0.05)
+            events.append("text-done")
+
+        async def upload(_group, _sticker):
+            events.append("upload")
+            await asyncio.sleep(0.01)
+            return "file-info"
+
+        client.api.post_group_message = slow_text_post
+        client._upload_group_image = upload
+        ok = self.loop.run_until_complete(
+            client._send_reply(message, "抱抱你呀[抱抱]", 1, "TEST")
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(events[0], "text-start")
+        self.assertIn("upload", events)
+        self.assertLess(events.index("upload"), events.index("text-done"))
+
     def test_upload_failure_keeps_the_text_and_does_not_retry(self) -> None:
         ok, sent, remembered, uploads = self._send([None], "抱抱你呀[抱抱]", upload="")
         self.assertTrue(ok)
