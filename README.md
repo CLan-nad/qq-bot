@@ -73,20 +73,20 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    QQ[QQ 群消息] --> AT{@ 小毛豆？}
+    QQ["QQ 群消息"] --> AT{"@ 小毛豆？"}
 
-    AT -- 否 --> KEY{关键词预筛命中？}
-    KEY -- 否 --> QUIET[保持安静]
-    KEY -- 是 --> CARE{模型判断值得关心？}
-    CARE -- 是 --> CARE_YES[主动发一句关心]
-    CARE -- 否 --> QUIET[保持安静]
+    AT -->|否| KEY{"关键词预筛命中？"}
+    KEY -->|否| QUIET["保持安静"]
+    KEY -->|是| CARE{"模型判断值得关心？"}
+    CARE -->|是| CARE_YES["主动发一句关心"]
+    CARE -->|否| QUIET
 
-    AT -- 是 --> SAVE[按 message_id + msg_seq 去重<br/>消息入库]
-    SAVE --> IMG{本条带图<br/>或前面还有待识别图？}
-    IMG -- 是 --> VISION[并行识图<br/>先垫一句「我看看图」]
-    IMG -- 否 --> CTX[组装上下文]
+    AT -->|是| SAVE["按 message_id + msg_seq 去重<br/>消息入库"]
+    SAVE --> IMG{"本条带图<br/>或前面还有待识别图？"}
+    IMG -->|是| VISION["并行识图<br/>先垫一句「我看看图」"]
+    IMG -->|否| CTX["组装上下文"]
     VISION --> CTX
-    CTX --> INTENT[parse_intent<br/>输出 JSON action]
+    CTX --> INTENT["parse_intent<br/>输出 JSON action"]
 
     INTENT --> TASK["任务 6 个<br/>create · list · cancel<br/>pause · resume · skip"]
     INTENT --> MEMORY["记忆 6 个<br/>remember · list · pin<br/>unpin · forget · alias"]
@@ -95,25 +95,25 @@ flowchart TD
     INTENT --> AGENT["工具 1 个<br/>agent_run"]
     INTENT --> CHAT["聊天 1 个<br/>chat"]
 
-    TASK --> LOCAL[确定性 handler<br/>读写 SQLite]
+    TASK --> LOCAL["确定性 handler<br/>读写 SQLite"]
     MEMORY --> LOCAL
     PREF --> LOCAL
-    CALENDAR --> CALC[calendar.py<br/>本地计算]
+    CALENDAR --> CALC["calendar.py<br/>本地计算"]
 
-    AGENT --> LOOP[工具循环<br/>fast 3 步 / deep 8 步]
-    LOOP --> TOOLS[8 个工具<br/>搜索 · 网页 · 文档 · shell<br/>数学 · 节日 · 消息统计 · 记忆检索]
-    TOOLS --> TOOL_REPLY[调用过工具时<br/>generate_tool_reply]
+    AGENT --> LOOP["工具循环<br/>fast 3 步 / deep 8 步"]
+    LOOP --> TOOLS["8 个工具<br/>搜索 · 网页 · 文档 · shell<br/>数学 · 节日 · 消息统计 · 记忆检索"]
+    TOOLS --> TOOL_REPLY["调用过工具时<br/>generate_tool_reply"]
 
-    CHAT --> REPLY[generate_reply<br/>人设化回复]
+    CHAT --> REPLY["generate_reply<br/>人设化回复"]
 
-    LOCAL --> POLISH[_persona_or_raw<br/>保留编号、报错和事实]
-    CALC --> FINAL[出站加工]
+    LOCAL --> POLISH["按需人设润色<br/>列表、报错和多条匹配保原文"]
+    CALC --> FINAL["出站加工"]
     TOOL_REPLY --> FINAL
     REPLY --> FINAL
     POLISH --> FINAL
 
-    FINAL --> TEXT[先发文字]
-    TEXT --> STICKER[如有表情包<br/>再单独发一张图]
+    FINAL --> TEXT["先发文字"]
+    TEXT --> STICKER["如有表情包<br/>再单独发一张图"]
 ```
 
 几个实现细节：
