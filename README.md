@@ -45,53 +45,83 @@ QQ 开放平台选 WebSocket 连接，并开启接收群消息。
 
 ## 代码架构
 
-小毛豆是一个单进程、全异步的 QQ 群机器人：QQ WebSocket 事件进来后，由 `bot.py` 跑完整条消息流水线，需要模型时调用 `llm.py`，需要查资料或翻记录时交给 `agent.py` 的工具循环，所有长期状态写在本地 SQLite。
+小毛豆是单进程、事件循环驱动的 QQ 群机器人：QQ WebSocket 事件进来后，由 `bot.py` 跑完整条消息流水线；理解、执行、表达和状态各自分层，所有长期状态落在本地 SQLite。
 
-```text
-QQ 群消息
-   │
-   ▼
-main.py                 装配配置 / 数据库 / 模型客户端 / botpy
-   │
-   ▼
-maodou/bot.py          事件、去重、图片、上下文、意图分发、发送
-   ├─ maodou/llm.py    提示词与模型调用
-   ├─ maodou/agent.py  有界 function-calling 工具循环
-   ├─ maodou/tools.py  搜索、网页、文档、shell、数学
-   ├─ maodou/store.py  SQLite 持久层
-   └─ maodou/topics.py 话题切分与消息渲染
+```mermaid
+flowchart LR
+    MAIN["main.py + config.py<br/>装配配置、数据库、模型与 QQ 客户端"]
+    QQ["QQ 群消息"]
+    BOT["bot.py<br/>消息流水线 · 意图分发 · 后台任务 · 出站"]
+    UNDERSTAND["理解层<br/>llm · topics · images · care"]
+    EXECUTE["执行层<br/>agent · tools · scheduling · calendar"]
+    EXPRESS["表达层<br/>stickers"]
+    DB[("SQLite<br/>data/maodou.sqlite3")]
+
+    MAIN --> BOT
+    QQ --> BOT
+    BOT --> UNDERSTAND
+    BOT --> EXECUTE
+    BOT --> EXPRESS
+    BOT --> DB
+    UNDERSTAND --> DB
+    EXECUTE --> DB
 ```
 
-### 模块职责
+### 消息与 action 分支
 
-| 文件 | 职责 |
-| --- | --- |
-| `main.py` | 启动入口：读配置 → 打开数据库 → 创建模型客户端 → 启动 `MaodouClient`，退出时关闭数据库 |
-| `maodou/config.py` | 把 `.env` 读成只读的 `Settings`；兼容旧的 `XIAOXIA_*` 配置名，但新配置统一用 `MAODOU_*` |
-| `maodou/bot.py` | 最大的模块。QQ 事件适配、消息入库、图片批次、身份上下文、意图分发、本地 action、定时任务、主动关心、出站发送和后台循环都在这里 |
-| `maodou/llm.py` | `MaodouLLM` 封装 OpenAI 兼容接口；集中管理聊天、意图解析、看图、摘要和关心判定的提示词与参数 |
-| `maodou/agent.py` | 8 个工具的 JSON Schema、`AgentContext`、工具执行器和 `fast/deep` 两档有界循环 |
-| `maodou/tools.py` | 工具的实际实现：DeepSeek 搜索/抓取、网页正文提取、PDF/Word/Excel 读取、受限 shell、数学计算 |
-| `maodou/store.py` | SQLite 建表、增量迁移、消息检索、记忆卡、任务、称呼、群偏好、图片缓存等全部数据操作 |
-| `maodou/topics.py` | 把最近消息切成【当前话题】和【更早的背景】，并统一渲染成「时间 + 【说话人】 + 正文」 |
-| `maodou/images.py` | 解析 QQ 图片附件、下载并内联图片、清洗占位符、把看图结果与用户原话分开渲染 |
-| `maodou/stickers.py` | 小表情名字映射，以及 8 张表情包的选择、摘取和出站处理 |
-| `maodou/scheduling.py` | 单次 / 每天 / 每周 / 每年 / 农历每年的下次运行时间计算与文案 |
-| `maodou/calendar.py` | 公历农历互转、固定节日和网络节日表、未来 30 天节日查询 |
-| `maodou/care.py` | 主动关心的第一层关键词预筛；命中后才值得调用模型做第二层判断 |
-| `scripts/` | 部署、回滚、换群迁移、记忆清理和服务器探针 |
-| `tests/` | 全部离线单测；外部模型与 QQ 接口都在测试里替换掉 |
+群里每条消息只有两个出口：没 @ 小毛豆时走主动关心；@ 了才进入主流程，由 `parse_intent` 分类到 17 个 action，再汇合到统一出站。
 
-### 一次 @ 的完整链路
+```mermaid
+flowchart TD
+    QQ[QQ 群消息] --> AT{@ 小毛豆？}
 
-1. **收消息**：`on_group_message_create` 先把群消息落库，再判断有没有 @ 小毛豆；没 @ 就只走主动关心预筛。这样即使先发几句话、下一条才 @，前文也已经在数据库里。
-2. **去重与补存**：`on_group_at_message_create` 或全量消息里的 mention 进入 `_process_at_message`；按 `message_id + msg_seq` 去重，避免 QQ 重推导致重复回答。
-3. **处理图片**：只在本轮需要回复时识别图片。支持本条附件、向前回看连续的一批未识别图片，以及后台补识别旧图；同一张图按字节 SHA-256 缓存描述，不重复调用视觉模型。识图与回复并行，通常会先发一句「我看看图～」，正式答案随后用下一个 `msg_seq` 发出。
-4. **组装上下文**：`_topic_context()` 从最近记录切出当前话题与背景，`_identity_context()` 绑定触发者、另一位成员、称呼和记录里的说话人标签。
-5. **解析意图**：`llm.parse_intent()` 输出一个 JSON action。输入包含身份、当前话题、任务、节日表、长期记忆等；这里只做分类和抽取参数，不负责最终回复。
-6. **执行 action**：任务、记忆、称呼、群偏好等本地操作走确定性 handler；`chat` 走 `generate_reply()`；`agent_run` 进入工具循环，拿到结果后再由 `generate_tool_reply()` 用小毛豆的语气整理。
-7. **等待策略**：`chat` 和 `agent_run` 超过 `MAODOU_ACK_AFTER_SECONDS`（默认 6 秒）还没完成时，先用 `msg_seq=1` 发一句垫场，正式回复用 `msg_seq=2`。
-8. **出站**：先处理小表情和表情包；文字用一条消息发送，表情图再单独发下一条。发送失败会重试，`msg_seq` 撞车会自动换槽，被动回复彻底失败时才退回主动消息。机器人自己的话也会入库，下一轮能看到。
+    AT -- 否 --> KEY{关键词预筛命中？}
+    KEY -- 否 --> QUIET[保持安静]
+    KEY -- 是 --> CARE{模型判断值得关心？}
+    CARE -- 是 --> CARE_YES[主动发一句关心]
+    CARE -- 否 --> QUIET[保持安静]
+
+    AT -- 是 --> SAVE[按 message_id + msg_seq 去重<br/>消息入库]
+    SAVE --> IMG{本条带图<br/>或前面还有待识别图？}
+    IMG -- 是 --> VISION[并行识图<br/>先垫一句「我看看图」]
+    IMG -- 否 --> CTX[组装上下文]
+    VISION --> CTX
+    CTX --> INTENT[parse_intent<br/>输出 JSON action]
+
+    INTENT --> TASK["任务 6 个<br/>create · list · cancel<br/>pause · resume · skip"]
+    INTENT --> MEMORY["记忆 6 个<br/>remember · list · pin<br/>unpin · forget · alias"]
+    INTENT --> PREF["身份与设置 2 个<br/>address_set · bot_pref"]
+    INTENT --> CALENDAR["节日 1 个<br/>calendar_query"]
+    INTENT --> AGENT["工具 1 个<br/>agent_run"]
+    INTENT --> CHAT["聊天 1 个<br/>chat"]
+
+    TASK --> LOCAL[确定性 handler<br/>读写 SQLite]
+    MEMORY --> LOCAL
+    PREF --> LOCAL
+    CALENDAR --> CALC[calendar.py<br/>本地计算]
+
+    AGENT --> LOOP[工具循环<br/>fast 3 步 / deep 8 步]
+    LOOP --> TOOLS[8 个工具<br/>搜索 · 网页 · 文档 · shell<br/>数学 · 节日 · 消息统计 · 记忆检索]
+    TOOLS --> TOOL_REPLY[调用过工具时<br/>generate_tool_reply]
+
+    CHAT --> REPLY[generate_reply<br/>人设化回复]
+
+    LOCAL --> POLISH[_persona_or_raw<br/>保留编号、报错和事实]
+    CALC --> FINAL[出站加工]
+    TOOL_REPLY --> FINAL
+    REPLY --> FINAL
+    POLISH --> FINAL
+
+    FINAL --> TEXT[先发文字]
+    TEXT --> STICKER[如有表情包<br/>再单独发一张图]
+```
+
+几个实现细节：
+
+- 本地 action 先算出确定结果，再决定是否交给模型换语气；失败、列表和「匹配到多条」保持模板原文。
+- `agent_run` 没调用工具时直接返回；调用过工具才走 `generate_tool_reply`，避免工具结果被改写失真。
+- 图片按字节 SHA-256 缓存描述；识图与回复并行，所以用户通常先看到「我看看图」，随后才收到正式答案。
+- 出站先发文字，再用下一个 `msg_seq` 单独发表情图；QQ 的 `msg_seq` 撞车和频控都有兜底。
 
 ### 上下文工程
 
@@ -111,7 +141,7 @@ maodou/bot.py          事件、去重、图片、上下文、意图分发、发
 
 ### 意图与工具
 
-意图解析器共 16 个 action：
+意图解析器共 17 个 action：
 
 | 类别 | action | 执行方式 |
 | --- | --- | --- |
@@ -172,7 +202,7 @@ maodou/bot.py          事件、去重、图片、上下文、意图分发、发
 
 | 调用 | 用途 |
 | --- | --- |
-| `parse_intent()` | 自然语言 → 16 种 action 的 JSON |
+| `parse_intent()` | 自然语言 → 17 种 action 的 JSON |
 | `generate_reply()` | 普通聊天，按上下文分层组装 prompt |
 | `generate_tool_reply()` | 把工具结果整理成人设回复 |
 | `describe_image()` | 视觉模型描述图片；失败自动重试并升到 `high` |
