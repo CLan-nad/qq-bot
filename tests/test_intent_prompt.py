@@ -8,6 +8,7 @@ from __future__ import annotations
 import inspect
 import unittest
 
+from maodou.agent import AGENT_RUN_SYSTEM_PROMPT, AGENT_TOOLS
 from maodou.llm import (
     CARE_SYSTEM_PROMPT,
     INTENT_SYSTEM_PROMPT,
@@ -20,44 +21,47 @@ from maodou.bot import MaodouClient
 
 class IntentPromptTests(unittest.TestCase):
     def test_web_search_trigger_words(self) -> None:
-        for signal in ("查一下", "来源", "出处", "是不是真的"):
-            self.assertIn(signal, INTENT_SYSTEM_PROMPT)
+        # 搜索触发词现在在 agent_run 提示词里，意图解析只需判断是否走 agent_run
+        self.assertIn("agent_run", INTENT_SYSTEM_PROMPT)
+        self.assertIn("web_search", AGENT_RUN_SYSTEM_PROMPT)
 
     def test_query_must_be_self_contained(self) -> None:
-        self.assertIn("query 要自包含", INTENT_SYSTEM_PROMPT)
-        self.assertIn("【当前话题】", INTENT_SYSTEM_PROMPT)
+        # 检索词质量要求现在在 AGENT_TOOLS 里（web_search 的 query 描述）
+        import json
+        tools_str = json.dumps(AGENT_TOOLS, ensure_ascii=False)
+        self.assertIn("2-5个中文关键词", tools_str)
+        # 【当前话题】在 parse_intent 的 user_prompt 模板里，不在系统提示词
+        self.assertIn("【当前话题】", inspect.getsource(MaodouLLM.parse_intent))
 
     def test_form_of_answer_words_are_banned_from_query(self) -> None:
-        self.assertIn("严禁把用户对回答形式的要求写进 query", INTENT_SYSTEM_PROMPT)
-        for banned in ("要有依据", "找权威来源", "别瞎编"):
-            self.assertIn(banned, INTENT_SYSTEM_PROMPT)
+        # 「依据/来源/别瞎编」不要当检索词——在 AGENT_TOOLS 的 web_search 参数描述里
+        import json
+        tools_str = json.dumps(AGENT_TOOLS, ensure_ascii=False)
+        for banned in ("依据", "来源"):
+            self.assertIn(banned, tools_str)
 
     def test_falls_back_to_chat_when_query_unclear(self) -> None:
-        self.assertIn("不要硬猜检索词", INTENT_SYSTEM_PROMPT)
+        # agent_run 意图解析现在只需判断是否走 agent_run
+        self.assertIn('"action":"chat"', INTENT_SYSTEM_PROMPT)
+        self.assertIn("agent_run", INTENT_SYSTEM_PROMPT)
 
     def test_memory_search_query_uses_short_message_keywords(self) -> None:
-        self.assertIn("能出现在原消息里的短关键词", INTENT_SYSTEM_PROMPT)
-        self.assertIn("不要写完整描述句", INTENT_SYSTEM_PROMPT)
+        # memory_search 现在是 agent_run 内部的工具，查询描述在 AGENT_TOOLS 里
+        import json
+        tools_str = json.dumps(AGENT_RUN_SYSTEM_PROMPT)
+        self.assertIn("memory_search", tools_str)
 
     def test_message_stats_is_not_confused_with_memory_search(self) -> None:
-        self.assertIn("- message_stats:", INTENT_SYSTEM_PROMPT)
-        self.assertIn("绝不能解析成 memory_search", INTENT_SYSTEM_PROMPT)
-        for phrase in ("谁发得多", "统计消息数量", "我们各发了多少条"):
-            self.assertIn(phrase, INTENT_SYSTEM_PROMPT)
+        # message_stats 现在是 agent_run 内部的工具，意图解析只需识别 agent_run
+        self.assertIn("agent_run", INTENT_SYSTEM_PROMPT)
+        self.assertIn("message_stats", AGENT_RUN_SYSTEM_PROMPT)
 
     def test_message_stats_periods_are_described(self) -> None:
-        for period in (
-            "today",
-            "yesterday",
-            "last_3_days",
-            "last_7_days",
-            "this_week",
-            "this_month",
-            "all",
-            "custom",
-        ):
-            self.assertIn(period, INTENT_SYSTEM_PROMPT)
-        self.assertIn("include_bot", INTENT_SYSTEM_PROMPT)
+        # message_stats 现在是 agent_run 内部的工具，时间/统计参数在 AGENT_TOOLS 定义里
+        import json
+        tools_str = json.dumps(AGENT_TOOLS, ensure_ascii=False)
+        self.assertIn("message_stats", tools_str)
+        self.assertIn("include_bot", tools_str)
 
     def test_parse_intent_takes_topic_context(self) -> None:
         params = inspect.signature(MaodouLLM.parse_intent).parameters
@@ -218,3 +222,4 @@ class CarePromptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

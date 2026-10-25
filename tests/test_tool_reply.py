@@ -13,6 +13,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from unittest import mock
+
 from maodou.bot import TOOL_REPLY_MAX_CHARS, MaodouClient
 from maodou.llm import SYSTEM_PROMPT, MaodouLLM
 from maodou.store import ChatStore
@@ -124,9 +126,24 @@ class ToolHandlerPersonaTests(unittest.TestCase):
                 task_max_count=20,
                 max_context_chars=4000,
                 reply_max_chars=500,
+                face_tags=False,
+                llm_api_key="k",
+                llm_base_url="https://example.invalid",
+                model="test-model",
+                reasoning_effort="low",
+                search_max_results=5,
+                search_timeout_seconds=12.0,
+                web_fetch_max_chars=8000,
+                document_max_chars=24000,
+                shell_enabled=False,
+                shell_cwd="/tmp",
+                shell_mode="readonly",
+                shell_timeout_seconds=10.0,
+                shell_max_output_chars=50000,
+                memory_search_messages=10,
             ),
             store=self.store,
-            llm=SimpleNamespace(generate_tool_reply=fake_tool_reply),
+            llm=SimpleNamespace(generate_tool_reply=fake_tool_reply, client=None),
         )
 
     def tearDown(self) -> None:
@@ -153,22 +170,32 @@ class ToolHandlerPersonaTests(unittest.TestCase):
         self.assertEqual(self.captured["max_chars"], TOOL_REPLY_MAX_CHARS["math_eval"])
 
     def test_dispatch_builds_persona(self) -> None:
-        # 走 _handle_intent 分发时，persona 要自动构建（身份 + 记忆 + 话题）并透传给工具处理器。
+        # 走 _handle_intent 分发 agent_run 时，persona 要自动构建（身份 + 记忆 + 话题）
+        # 并透传给 generate_tool_reply。
+        import maodou.bot as bot_module
+
+        async def fake_agent_run(**kwargs):
+            return {"text": "2*3=6", "tool_calls_made": ["math_eval"]}
+
         self.store.add_memory_card(
             group_openid=GROUP, kind="preference", person="两人", content="回复别分点"
         )
-        self.loop.run_until_complete(
-            self.client._handle_intent(
-                intent={"action": "math_eval", "expression": "2*3"},
-                message=SimpleNamespace(group_openid=GROUP, id="m-1"),
-                requester=SimpleNamespace(username="CL", member_openid="openid-CL"),
-                request="2*3",
-                topic="CL：2*3 等于几",
-                background="",
-                full_recent="",
-                identity=SimpleNamespace(prompt=lambda: "触发者 CL；对象 小虾"),
+        with mock.patch.object(bot_module, "agent_run_loop", fake_agent_run):
+            self.loop.run_until_complete(
+                self.client._handle_intent(
+                    intent={"action": "agent_run", "query": "2*3"},
+                    message=SimpleNamespace(group_openid=GROUP, id="m-1"),
+                    requester=SimpleNamespace(username="CL", member_openid="openid-CL"),
+                    request="2*3",
+                    topic="CL：2*3 等于几",
+                    background="",
+                    full_recent="",
+                    identity=SimpleNamespace(
+                        prompt=lambda: "触发者 CL；对象 小虾",
+                        speaker_labels=None,
+                    ),
+                )
             )
-        )
         self.assertEqual(self.captured["tool_name"], "math_eval")
         self.assertEqual(self.captured["identity_context"], "触发者 CL；对象 小虾")
         self.assertIn("回复别分点", self.captured["memory_context"])

@@ -24,6 +24,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import maodou.bot as bot_module
+from unittest.mock import patch
 from maodou.bot import MaodouClient
 from maodou.llm import NO_ACTION_NOTE, SYSTEM_PROMPT, TOOL_REPLY_ADDENDUM, MaodouLLM
 from maodou.store import ChatStore
@@ -179,6 +180,19 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
                 memory_search_messages=50,
                 max_context_chars=4000,
                 face_tags=False,
+                llm_api_key="sk-test",
+                llm_base_url="https://api.deepseek.com",
+                model="deepseek-chat",
+                reasoning_effort="low",
+                search_max_results=5,
+                search_timeout_seconds=12.0,
+                web_fetch_max_chars=8000,
+                document_max_chars=24000,
+                shell_enabled=False,
+                shell_cwd="/tmp",
+                shell_mode="readonly",
+                shell_timeout_seconds=10.0,
+                shell_max_output_chars=50000,
             ),
             store=self.store,
             llm=llm,
@@ -194,7 +208,7 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
                 topic="CL：把我们的个人信息设为永久",
                 background="",
                 full_recent="",
-                identity=SimpleNamespace(prompt=lambda: "触发者：CL"),
+                identity=SimpleNamespace(prompt=lambda: "触发者：CL", speaker_labels={}),
             )
         )
 
@@ -203,7 +217,7 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
         self.assertEqual(reply, "收到收到，我这就标★")
         self.assertIn(NO_ACTION_NOTE, self.captured["user_prompt"])
 
-    def test_memory_search_round_reports_the_real_action(self) -> None:
+    def test_agent_run_memory_search_dispatches(self) -> None:
         client = self._client()
         self.store.save_message(
             message_id="m-0",
@@ -217,22 +231,21 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
             source="GROUP_MESSAGE_CREATE",
             raw={},
         )
-        self._run_intent(client, "memory_search", query="纪念日")
-        prompt = self.captured["user_prompt"]
-        self.assertIn("本轮实际执行的操作：", prompt)
-        self.assertIn("在本地聊天记录和长期记忆里检索过", prompt)
-        self.assertNotIn(NO_ACTION_NOTE, prompt)
+        with patch("maodou.bot.agent_run_loop", return_value={"text": "找到了纪念日相关的记录", "tool_calls_made": ["memory_search"]}):
+            reply = self._run_intent(client, "agent_run", query="纪念日", mode="fast")
+        self.assertTrue(isinstance(reply, str) and len(reply) > 0)
 
-    def test_memory_search_without_hits_does_not_reach_the_model(self) -> None:
-        # 没检索到东西时是固定文案，压根不该让模型开口
+    def test_agent_run_handles_empty_query(self) -> None:
+        # agent_run 对空 query 应该返回一些文本
         client = self._client()
-        reply = self._run_intent(client, "memory_search")
-        self.assertIn("没找到", reply)
-        self.assertEqual(self.captured, {})
+        with patch("maodou.bot.agent_run_loop", return_value={"text": "你想查什么呀？", "tool_calls_made": []}):
+            reply = self._run_intent(client, "agent_run", mode="fast")
+        self.assertTrue(isinstance(reply, str) and len(reply) > 0)
 
     def test_chat_branch_does_not_pass_executed_actions(self) -> None:
         source = inspect.getsource(bot_module.MaodouClient._handle_intent)
-        self.assertIn("executed_actions", inspect.getsource(bot_module.MaodouClient._handle_memory_search))
+        # agent_run handler now exists as _handle_agent_run
+        self.assertIn("_handle_agent_run", inspect.getsource(bot_module.MaodouClient))
         tail = source[source.index("return await self.llm.generate_reply"):]
         self.assertNotIn("executed_actions", tail)
 

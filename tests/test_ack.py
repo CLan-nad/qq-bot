@@ -72,7 +72,7 @@ class AckTests(unittest.TestCase):
             await asyncio.sleep(0.2)
             return "查到啦"
 
-        acked = asyncio.run(client._answer_with_ack(**_args(client, message, "web_search", slow)))
+        acked = asyncio.run(client._answer_with_ack(**_args(client, message, "agent_run", slow)))
         self.assertTrue(acked)
         self.assertEqual(sent, [(1, ACK_TEXT), (2, "查到啦")])
 
@@ -104,7 +104,7 @@ class AckTests(unittest.TestCase):
             await asyncio.sleep(0.05)
             return "结果"
 
-        acked = asyncio.run(client._answer_with_ack(**_args(client, message, "web_search", slow)))
+        acked = asyncio.run(client._answer_with_ack(**_args(client, message, "agent_run", slow)))
         self.assertFalse(acked)
         self.assertEqual(sent, [(1, "结果")])
 
@@ -115,7 +115,7 @@ class AckTests(unittest.TestCase):
             await asyncio.sleep(0.2)
             raise RuntimeError("boom")
 
-        acked = asyncio.run(client._answer_with_ack(**_args(client, message, "web_search", broken)))
+        acked = asyncio.run(client._answer_with_ack(**_args(client, message, "agent_run", broken)))
         self.assertTrue(acked)
         self.assertEqual(sent[0], (1, ACK_TEXT))
         self.assertEqual(sent[1][0], 2)
@@ -147,12 +147,11 @@ class AckTests(unittest.TestCase):
             await asyncio.sleep(0.1)
             return "答案"
 
-        acked = asyncio.run(client._answer_with_ack(**_args(client, message, "web_search", slow)))
+        acked = asyncio.run(client._answer_with_ack(**_args(client, message, "agent_run", slow)))
         self.assertFalse(acked)
 
     def test_ack_actions_cover_slow_tools(self) -> None:
-        for action in ("web_search", "web_fetch", "document_read", "shell_run", "memory_search"):
-            self.assertIn(action, bot_module.ACK_ACTIONS)
+        self.assertIn("agent_run", bot_module.ACK_ACTIONS)
 
     def test_slow_chat_acks_with_thinking_text(self) -> None:
         client, message, sent = _client()

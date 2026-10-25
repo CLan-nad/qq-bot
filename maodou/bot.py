@@ -50,6 +50,7 @@ from .store import (
 )
 from .stickers import Sticker, StickerLibrary, face_prompt, render_faces
 from .topics import format_topic, split_topic
+from .agent import AgentContext, agent_run_loop
 from .tools import (
     ToolResult,
     document_attachments,
@@ -105,7 +106,7 @@ ROLE_LABELS = {
 # chat 也在里面：它是占比最高的一类，带图或模型排队时同样会卡十几秒，
 # 而 ack 只在超过 ack_after_seconds 才发，快的时候一条消息都不会多。
 ACK_ACTIONS = frozenset(
-    {"chat", "web_search", "web_fetch", "document_read", "shell_run", "memory_search"}
+    {"chat", "agent_run"}
 )
 TASK_SCHEDULE_TYPES = frozenset({"once", "daily", "weekly", "yearly", "lunar_yearly"})
 TEMPORARY_MEMORY_DAYS = 14
@@ -1536,6 +1537,67 @@ class MaodouClient(botpy.Client):
             return self.store.find_memory_cards(group_openid, query=match), False
         return [], False
 
+    async def _handle_agent_run(
+        self,
+        *,
+        intent: dict,
+        message: RichGroupMessage,
+        request: str,
+        topic: str,
+        identity: "IdentityContext",
+    ) -> str:
+        """agent_run：把查询交给工具调用循环，结果用 generate_tool_reply 润色。"""
+        query = self._optional_str(intent.get("query")) or request
+        mode = str(intent.get("mode") or "fast")
+        if mode not in {"fast", "deep"}:
+            mode = "fast"
+
+        ctx = AgentContext(
+            llm_api_key=self.settings.llm_api_key,
+            llm_base_url=self.settings.llm_base_url,
+            model=self.settings.model,
+            reasoning_effort=getattr(self.settings, "reasoning_effort", "low"),
+            search_max_results=self.settings.search_max_results,
+            search_timeout_seconds=self.settings.search_timeout_seconds,
+            web_fetch_max_chars=self.settings.web_fetch_max_chars,
+            document_max_chars=self.settings.document_max_chars,
+            shell_enabled=self.settings.shell_enabled,
+            shell_cwd=self.settings.shell_cwd,
+            shell_mode=self.settings.shell_mode,
+            shell_timeout_seconds=self.settings.shell_timeout_seconds,
+            shell_max_output_chars=self.settings.shell_max_output_chars,
+            memory_search_messages=self.settings.memory_search_messages,
+            store=self.store,
+            group_openid=message.group_openid,
+            now=self._now(),
+            speaker_labels=identity.speaker_labels or self.store.speaker_labels(message.group_openid),
+        )
+
+        result = await agent_run_loop(
+            client=self.llm.client,
+            ctx=ctx,
+            query=query,
+            mode=mode,
+        )
+        raw_text = result.get("text", "") or "抱歉，我没查到结果。"
+        tool_calls_made = result.get("tool_calls_made", [])
+
+        if not tool_calls_made:
+            # 没调用任何工具——模型直接给答案了，直接返回
+            return raw_text
+
+        # 调用过工具 → 用 generate_tool_reply 润色，保证称呼和语气不走样
+        tools_label = "、".join(tool_calls_made)
+        return await self.llm.generate_tool_reply(
+            request=request,
+            tool_name=tools_label,
+            tool_output=raw_text,
+            identity_context=identity.prompt(),
+            memory_context=self._memory_context(message.group_openid),
+            topic_context=topic,
+        )
+
+
     async def _handle_intent(
         self,
         *,
@@ -1582,40 +1644,14 @@ class MaodouClient(botpy.Client):
             return self._handle_calendar_query(intent)
         if action == "bot_pref":
             return await speak(self._handle_bot_pref(intent, message))
-        if action == "message_stats":
-            return await self._handle_message_stats(
+        if action == "agent_run":
+            return await self._handle_agent_run(
                 intent=intent,
                 message=message,
                 request=request,
                 topic=topic,
                 identity=identity,
             )
-        if action == "memory_search":
-            return await self._handle_memory_search(
-                intent=intent,
-                message=message,
-                requester=requester,
-                request=request,
-                recent=full_recent,
-                identity=identity,
-            )
-        # 工具回复也要接人设：把身份/记忆/话题一并带过去，否则检索类回复全是分点堆来源、
-        # 不像小毛豆、还会把两个人叫混。
-        persona = {
-            "identity_context": identity.prompt(),
-            "memory_context": self._memory_context(message.group_openid),
-            "topic_context": topic,
-        }
-        if action == "web_search":
-            return await self._handle_web_search(request, intent, **persona)
-        if action == "web_fetch":
-            return await self._handle_web_fetch(request, intent, **persona)
-        if action == "document_read":
-            return await self._handle_document_read(request, intent, message, **persona)
-        if action == "shell_run":
-            return await self._handle_shell_run(request, intent, **persona)
-        if action == "math_eval":
-            return await self._handle_math_eval(request, intent, **persona)
 
         face_context = face_prompt(
             self.store.face_book(message.group_openid),
@@ -1628,9 +1664,9 @@ class MaodouClient(botpy.Client):
             request=request,
             topic_context=topic,
             background_context=background,
-            memory_context=persona["memory_context"],
+            memory_context=self._memory_context(message.group_openid),
             summaries_context=self._summaries_context(message.group_openid),
-            identity_context=persona["identity_context"],
+            identity_context=identity.prompt(),
             face_context=face_context,
         )
 
