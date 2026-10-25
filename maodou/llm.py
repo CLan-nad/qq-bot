@@ -229,6 +229,7 @@ class MaodouLLM:
         max_tokens: int,
         json_mode: bool = False,
         model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> Any:
         kwargs: dict[str, Any] = {
             "model": model or self.settings.model,
@@ -238,6 +239,8 @@ class MaodouLLM:
             ],
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "reasoning_effort": reasoning_effort
+            or getattr(self.settings, "reasoning_effort", "low"),
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
@@ -252,6 +255,7 @@ class MaodouLLM:
         max_tokens: int,
         json_mode: bool = False,
         model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> str:
         response = await self._chat_response(
             system_prompt=system_prompt,
@@ -260,6 +264,7 @@ class MaodouLLM:
             max_tokens=max_tokens,
             json_mode=json_mode,
             model=model,
+            reasoning_effort=reasoning_effort,
         )
         return (response.choices[0].message.content or "").strip()
 
@@ -278,6 +283,12 @@ class MaodouLLM:
         # readable image is not permanently marked as unrecognized.
         last_error: Exception | None = None
         for attempt in range(1, VISION_DESCRIBE_ATTEMPTS + 1):
+            # 第一次走全局低档位；空正文/超时等失败后升到 high，把预算留给推理。
+            effort = (
+                getattr(self.settings, "reasoning_effort", "low")
+                if attempt == 1
+                else "high"
+            )
             try:
                 response = await self._chat_response(
                     system_prompt=VISION_SYSTEM_PROMPT,
@@ -285,6 +296,7 @@ class MaodouLLM:
                     temperature=0.2,
                     max_tokens=VISION_MAX_TOKENS,
                     model=self.settings.vision_model,
+                    reasoning_effort=effort,
                 )
             except Exception as exc:  # noqa: BLE001
                 last_error = exc

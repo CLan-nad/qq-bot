@@ -24,6 +24,7 @@ class Settings:
     llm_api_key: str
     llm_base_url: str
     model: str
+    reasoning_effort: str
     allowed_group_openids: frozenset[str]
     db_path: str
     recent_messages: int
@@ -72,6 +73,9 @@ def load_settings() -> Settings:
 
     raw_groups = os.getenv("MAODOU_ALLOWED_GROUP_OPENIDS", "")
     groups = frozenset(item.strip() for item in raw_groups.split(",") if item.strip())
+    reasoning_effort = os.getenv("MAODOU_REASONING_EFFORT", "low").strip().lower()
+    if reasoning_effort not in {"none", "low", "high", "max"}:
+        reasoning_effort = "low"
 
     return Settings(
         qq_app_id=os.environ["QQ_APP_ID"],
@@ -79,6 +83,7 @@ def load_settings() -> Settings:
         llm_api_key=os.environ["LLM_API_KEY"],
         llm_base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com"),
         model=os.getenv("MAODOU_MODEL", "deepseek-chat"),
+        reasoning_effort=reasoning_effort,
         allowed_group_openids=groups,
         db_path=os.getenv("MAODOU_DB_PATH", "data/maodou.sqlite3"),
         recent_messages=int(os.getenv("MAODOU_RECENT_MESSAGES", "60")),

@@ -415,6 +415,10 @@ class VisionRetryTests(unittest.TestCase):
         for call in completions.calls:
             self.assertEqual(call["max_tokens"], llm_module.VISION_MAX_TOKENS)
             self.assertEqual(call["model"], "deepseek-flash")
+        self.assertEqual(
+            [call["reasoning_effort"] for call in completions.calls],
+            ["low", "high", "high"],
+        )
 
     def test_describe_image_gives_up_after_max_attempts(self) -> None:
         llm, completions = _scripted_llm([""])
@@ -430,9 +434,11 @@ class VisionRetryTests(unittest.TestCase):
         class _Flaky:
             def __init__(self) -> None:
                 self.calls = 0
+                self.efforts: list[str] = []
 
             async def create(self, **kwargs):
                 self.calls += 1
+                self.efforts.append(kwargs.get("reasoning_effort"))
                 if self.calls == 1:
                     raise RuntimeError("boom")
                 message = SimpleNamespace(content="a course timetable")
@@ -446,6 +452,7 @@ class VisionRetryTests(unittest.TestCase):
         )
         self.assertEqual(description, "a course timetable")
         self.assertEqual(flaky.calls, 2)
+        self.assertEqual(flaky.efforts, ["low", "high"])
 
 
 class StickerDescribeTests(unittest.TestCase):

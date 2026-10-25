@@ -41,6 +41,7 @@ Windows 下也可以用 `scripts\start.ps1` / `status.ps1` / `stop.ps1`。
 QQ 开放平台选 WebSocket 连接，并开启接收群消息。
 
 联网搜索和网页抓取由 DeepSeek 提供，直接复用 `.env` 里的 `LLM_API_KEY`；没配好时会明确说查不了，不会编造结果。
+模型思考强度默认 `low`（`MAODOU_REASONING_EFFORT`，可选 `none/low/high/max`）；图片识别失败时会自动升到 `high` 再试。
 
 ## 部署
 
