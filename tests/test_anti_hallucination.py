@@ -182,8 +182,10 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
                 face_tags=False,
                 llm_api_key="sk-test",
                 llm_base_url="https://api.deepseek.com",
-                model="deepseek-chat",
-                reasoning_effort="low",
+                model="deepseek-v4-pro",
+                reasoning_effort="none",
+                deep_reasoning_effort="low",
+                vision_reasoning_effort="low",
                 search_max_results=5,
                 search_timeout_seconds=12.0,
                 web_fetch_max_chars=8000,
@@ -241,6 +243,22 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
         with patch("maodou.bot.agent_run_loop", return_value={"text": "你想查什么呀？", "tool_calls_made": []}):
             reply = self._run_intent(client, "agent_run", mode="fast")
         self.assertTrue(isinstance(reply, str) and len(reply) > 0)
+
+    def test_agent_run_uses_fast_effort_for_fast_and_low_for_deep(self) -> None:
+        client = self._client()
+        captured: dict[str, tuple[str, str]] = {}
+
+        async def fake_agent_run_loop(**kwargs):
+            ctx = kwargs["ctx"]
+            captured[kwargs["mode"]] = (ctx.model, ctx.reasoning_effort)
+            return {"text": "查到了", "tool_calls_made": []}
+
+        with patch("maodou.bot.agent_run_loop", side_effect=fake_agent_run_loop):
+            self._run_intent(client, "agent_run", query="查天气", mode="fast")
+            self._run_intent(client, "agent_run", query="做个本周小报", mode="deep")
+
+        self.assertEqual(captured["fast"], ("deepseek-v4-pro", "none"))
+        self.assertEqual(captured["deep"], ("deepseek-v4-pro", "low"))
 
     def test_chat_branch_does_not_pass_executed_actions(self) -> None:
         source = inspect.getsource(bot_module.MaodouClient._handle_intent)

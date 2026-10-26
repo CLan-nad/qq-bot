@@ -25,7 +25,7 @@ def _llm(effort: str | None) -> tuple[MaodouLLM, _Completions]:
     settings = SimpleNamespace(
         llm_api_key="test-key",
         llm_base_url="https://api.deepseek.com",
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         vision_model="deepseek-flash",
         reply_max_chars=900,
     )
@@ -38,7 +38,7 @@ def _llm(effort: str | None) -> tuple[MaodouLLM, _Completions]:
 
 
 class ReasoningEffortTests(unittest.TestCase):
-    def test_chat_defaults_to_low_when_setting_missing(self) -> None:
+    def test_chat_defaults_to_none_when_setting_missing(self) -> None:
         llm, completions = _llm(None)
         asyncio.run(
             llm._chat(
@@ -48,7 +48,7 @@ class ReasoningEffortTests(unittest.TestCase):
                 max_tokens=64,
             )
         )
-        self.assertEqual(completions.calls[0]["reasoning_effort"], "low")
+        self.assertEqual(completions.calls[0]["reasoning_effort"], "none")
 
     def test_chat_uses_configured_effort(self) -> None:
         llm, completions = _llm("none")
@@ -77,7 +77,7 @@ class ReasoningEffortTests(unittest.TestCase):
 
 
 class ReasoningEffortConfigTests(unittest.TestCase):
-    def _load(self, value: str | None) -> str:
+    def _load_settings(self, value: str | None):
         env = {
             "QQ_APP_ID": "app",
             "QQ_APP_SECRET": "secret",
@@ -88,18 +88,24 @@ class ReasoningEffortConfigTests(unittest.TestCase):
         with mock.patch.object(config_module, "load_dotenv"), mock.patch.dict(
             os.environ, env, clear=True
         ):
-            return config_module.load_settings().reasoning_effort
+            return config_module.load_settings()
 
-    def test_default_is_low(self) -> None:
-        self.assertEqual(self._load(None), "low")
+    def test_defaults_use_v4_pro_without_chat_reasoning(self) -> None:
+        settings = self._load_settings(None)
+        self.assertEqual(settings.model, "deepseek-v4-pro")
+        self.assertEqual(settings.reasoning_effort, "none")
+        self.assertEqual(settings.deep_reasoning_effort, "low")
+        self.assertEqual(settings.vision_reasoning_effort, "low")
 
     def test_valid_values_are_kept(self) -> None:
         for value in ("none", "low", "high", "max", "LOW"):
             with self.subTest(value=value):
-                self.assertEqual(self._load(value), value.lower())
+                self.assertEqual(
+                    self._load_settings(value).reasoning_effort, value.lower()
+                )
 
-    def test_invalid_value_falls_back_to_low(self) -> None:
-        self.assertEqual(self._load("turbo"), "low")
+    def test_invalid_value_falls_back_to_none(self) -> None:
+        self.assertEqual(self._load_settings("turbo").reasoning_effort, "none")
 
 
 class IntentModelTests(unittest.TestCase):
@@ -137,7 +143,7 @@ class IntentModelTests(unittest.TestCase):
                 tasks_summary="",
             )
         )
-        self.assertEqual(completions.calls[0]["model"], "deepseek-chat")
+        self.assertEqual(completions.calls[0]["model"], "deepseek-v4-pro")
 
 
 if __name__ == "__main__":

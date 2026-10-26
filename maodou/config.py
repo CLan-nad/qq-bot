@@ -27,6 +27,8 @@ class Settings:
     reasoning_effort: str
     intent_model: str
     intent_reasoning_effort: str
+    deep_reasoning_effort: str
+    vision_reasoning_effort: str
     allowed_group_openids: frozenset[str]
     db_path: str
     recent_messages: int
@@ -75,26 +77,32 @@ def load_settings() -> Settings:
 
     raw_groups = os.getenv("MAODOU_ALLOWED_GROUP_OPENIDS", "")
     groups = frozenset(item.strip() for item in raw_groups.split(",") if item.strip())
-    reasoning_effort = os.getenv("MAODOU_REASONING_EFFORT", "low").strip().lower()
-    if reasoning_effort not in {"none", "low", "high", "max"}:
-        reasoning_effort = "low"
-    intent_reasoning_effort = os.getenv(
-        "MAODOU_INTENT_REASONING_EFFORT", "none"
-    ).strip().lower()
-    if intent_reasoning_effort not in {"none", "low", "high", "max"}:
-        intent_reasoning_effort = "none"
+    def _effort(name: str, default: str) -> str:
+        value = os.getenv(name, default).strip().lower()
+        return value if value in {"none", "low", "high", "max"} else default
+
+    # 日常闲聊默认关思考：实测同一个 flash 模型，带 low 思考会多烧 200+ 个推理
+    # token、多花 1.5 秒，回一句 30 字的话完全用不上。需要推理的只有 deep 工具循环。
+    reasoning_effort = _effort("MAODOU_REASONING_EFFORT", "none")
+    intent_reasoning_effort = _effort("MAODOU_INTENT_REASONING_EFFORT", "none")
+    deep_reasoning_effort = _effort("MAODOU_DEEP_REASONING_EFFORT", "low")
+    vision_reasoning_effort = _effort("MAODOU_VISION_REASONING_EFFORT", "low")
 
     return Settings(
         qq_app_id=os.environ["QQ_APP_ID"],
         qq_app_secret=os.environ["QQ_APP_SECRET"],
         llm_api_key=os.environ["LLM_API_KEY"],
         llm_base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com"),
-        model=os.getenv("MAODOU_MODEL", "deepseek-chat"),
+        # 这个账号实际只有 deepseek-flash 和 deepseek-v4-pro；deepseek-chat 是旧别名，
+        # 会被网关悄悄改成 flash。闲聊用 v4-pro 关思考：比 flash 想半天还快，文笔更好。
+        model=os.getenv("MAODOU_MODEL", "deepseek-v4-pro"),
         reasoning_effort=reasoning_effort,
         # 意图解析只输出一个小 JSON，不需要写作能力，但要快：默认用 flash 且关掉思考。
         # 最终回复仍然走 MAODOU_MODEL，人设和文笔不受影响。
         intent_model=os.getenv("MAODOU_INTENT_MODEL", "deepseek-flash"),
         intent_reasoning_effort=intent_reasoning_effort,
+        deep_reasoning_effort=deep_reasoning_effort,
+        vision_reasoning_effort=vision_reasoning_effort,
         allowed_group_openids=groups,
         db_path=os.getenv("MAODOU_DB_PATH", "data/maodou.sqlite3"),
         recent_messages=int(os.getenv("MAODOU_RECENT_MESSAGES", "60")),

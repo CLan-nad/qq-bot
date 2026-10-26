@@ -218,7 +218,7 @@ class MaodouLLM:
             "temperature": temperature,
             "max_tokens": max_tokens,
             "reasoning_effort": reasoning_effort
-            or getattr(self.settings, "reasoning_effort", "low"),
+            or getattr(self.settings, "reasoning_effort", "none"),
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
@@ -271,9 +271,10 @@ class MaodouLLM:
         # readable image is not permanently marked as unrecognized.
         last_error: Exception | None = None
         for attempt in range(1, VISION_DESCRIBE_ATTEMPTS + 1):
-            # 第一次走全局低档位；空正文/超时等失败后升到 high，把预算留给推理。
+            # 第一次走视觉专用档位（默认 low，跟闲聊的 none 解耦）；空正文/超时等
+            # 失败后升到 high，把预算留给推理。
             effort = (
-                getattr(self.settings, "reasoning_effort", "low")
+                getattr(self.settings, "vision_reasoning_effort", "low")
                 if attempt == 1
                 else "high"
             )

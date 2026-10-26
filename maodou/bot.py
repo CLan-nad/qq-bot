@@ -1659,11 +1659,17 @@ class MaodouClient(botpy.Client):
         if mode not in {"fast", "deep"}:
             mode = "fast"
 
+        # fast 只是查一下，关思考最省时；deep 才值得让模型多想一会儿。
+        agent_effort = (
+            getattr(self.settings, "deep_reasoning_effort", "low")
+            if mode == "deep"
+            else getattr(self.settings, "reasoning_effort", "none")
+        )
         ctx = AgentContext(
             llm_api_key=self.settings.llm_api_key,
             llm_base_url=self.settings.llm_base_url,
             model=self.settings.model,
-            reasoning_effort=getattr(self.settings, "reasoning_effort", "low"),
+            reasoning_effort=agent_effort,
             search_max_results=self.settings.search_max_results,
             search_timeout_seconds=self.settings.search_timeout_seconds,
             web_fetch_max_chars=self.settings.web_fetch_max_chars,

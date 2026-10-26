@@ -186,7 +186,7 @@ class AgentContext:
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com"
     model: str = ""
-    reasoning_effort: str = "low"
+    reasoning_effort: str = "none"
     search_max_results: int = 5
     search_timeout_seconds: float = 12.0
     web_fetch_max_chars: int = 8000
@@ -414,7 +414,7 @@ async def agent_run_loop(
     返回 {"text": "最终回复", "tool_calls_made": ["web_search", ...]}
     """
     max_steps = 3 if mode == "fast" else 8
-    model = ctx.model or "deepseek-chat"
+    model = ctx.model or "deepseek-v4-pro"
     tool_calls_made: list[str] = []
 
     messages: list[dict[str, Any]] = [

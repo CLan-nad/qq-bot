@@ -41,7 +41,9 @@ Windows 下也可以用 `scripts\start.ps1` / `status.ps1` / `stop.ps1`。
 QQ 开放平台选 WebSocket 连接，并开启接收群消息。
 
 联网搜索和网页抓取由 DeepSeek 提供，直接复用 `.env` 里的 `LLM_API_KEY`；没配好时会明确说查不了，不会编造结果。
-模型思考强度默认 `low`（`MAODOU_REASONING_EFFORT`，可选 `none/low/high/max`）；图片识别失败时会自动升到 `high` 再试。
+当前账号可用的模型是 `deepseek-flash` 和 `deepseek-v4-pro`；`deepseek-chat` 只是旧别名，实际会被网关路由到 `flash`。
+日常闲聊默认用 `deepseek-v4-pro` 并关闭思考（`MAODOU_MODEL` / `MAODOU_REASONING_EFFORT=none`），图片识别和 deep 工具循环分别由
+`MAODOU_VISION_REASONING_EFFORT` / `MAODOU_DEEP_REASONING_EFFORT` 控制，默认都是 `low`；识图失败会自动升到 `high` 再试。
 闲聊类消息要先做一次意图分类、再生成回复，所以意图解析单独走快模型：默认 `deepseek-flash` +
 `none`（`MAODOU_INTENT_MODEL` / `MAODOU_INTENT_REASONING_EFFORT`），最终回复仍用 `MAODOU_MODEL`，人设不受影响。
 
