@@ -34,13 +34,35 @@ SYSTEM_PROMPT = """你是 QQ 群里的“小毛豆”，外形和脾气取自洛
 """
 
 
-TOOL_REPLY_ADDENDUM = """
+FAST_TOOL_REPLY_ADDENDUM = """
 
 补充规则（你刚调用了一个工具，它的执行结果附在用户消息末尾）：
 8. 忠于工具结果，不编造；结果里没有的信息就说不知道，信息不足时坦率说明。
 9. 工具结果和当前请求明显无关、或者根本没有结果时，必须直说没找到相关资料，不许拿无关内容凑答案。
 10. 引用资料时写出来源站点名，方便对方自己核实。
-11. 仍然是发进 QQ 群的一句话：口语、简洁、像小毛豆在说话，不要写成报告；除非用户明确要清单，不要分点堆砌，也不要输出 Markdown 标题或代码块。"""
+11. 这是简单查询：优先直接说结论，口语、简短、像小毛豆在说话；不要为了显得详细硬凑成长报告，也不要输出 Markdown 标题或代码块。"""
+
+
+DEEP_RESEARCH_REPLY_ADDENDUM = """
+
+补充规则（你已经通过工具拿到资料，现在要完成一次调研或分析）：
+8. 基于已有资料直接完成分析和回答，不要继续证明“我搜过”。已经查到的内容绝不能说成“完全没查到”；只有确实缺失的关键资料才说明缺口。
+9. 用户明确要调研、分析、周报、年报或比较时，可以分点、分段写完整，不要为了像日常闲聊而删掉结论、依据或细节。
+10. 关键事实和结论尽量写出来源站点名；资料之间冲突时说明分歧，不要把推断说成资料原文。
+11. 区分“资料里写了什么”“我据此怎么判断”“目前还缺什么”，方便对方判断可信度。
+12. 不要输出「小毛豆：」、Markdown 一级/二级标题或代码块；正文中的有序列表可以用。"""
+
+
+STRUCTURED_DATA_REPLY_ADDENDUM = """
+
+补充规则（执行结果是代码算出的确定性数据）：
+8. 总数、每个人的条数、百分比、日期范围和任务编号必须原样保留，不能四舍五入、概括成“很多”或自行重算。
+9. 可以用小毛豆的语气组织句子，但不能改动事实方向，也不能添加执行结果里没有的统计结论。
+10. 用户要查看明细时保留必要的列表和数字；不要为了简短而省略核对所需的信息。"""
+
+
+# 兼容旧调用：一步式轻量工具默认仍使用 fast 策略。
+TOOL_REPLY_ADDENDUM = FAST_TOOL_REPLY_ADDENDUM
 
 
 # 本地操作（记住信息、登记称呼、置顶记忆）办成之后的那句确认话。
@@ -472,7 +494,7 @@ class MaodouLLM:
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,
             temperature=0.65,
-            max_tokens=900,
+            max_tokens=2200,
         )
         return content[: self.settings.reply_max_chars]
 
@@ -487,7 +509,7 @@ class MaodouLLM:
         memory_context: str = "",
         topic_context: str = "",
         max_chars: int | None = None,
-        addendum: str = TOOL_REPLY_ADDENDUM,
+        addendum: str = FAST_TOOL_REPLY_ADDENDUM,
     ) -> str:
         """把工具执行结果整理成一条适合发到群里的回复。
 
@@ -520,7 +542,7 @@ class MaodouLLM:
             system_prompt=SYSTEM_PROMPT + addendum,
             user_prompt=user_prompt,
             temperature=0.4,
-            max_tokens=900,
+            max_tokens=1400,
         )
         limit = self.settings.reply_max_chars if max_chars is None else max_chars
         return content[:limit]

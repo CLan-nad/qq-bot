@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import maodou.bot as bot_module
 from maodou.bot import MaodouClient
+from maodou.replies import split_reply_text
 from maodou.stickers import Sticker, StickerLibrary
 
 
@@ -148,6 +149,61 @@ class SendReplyTests(unittest.TestCase):
         self.assertFalse(MaodouClient._is_dedup_error(NETWORK))
         self.assertFalse(MaodouClient._is_dedup_error(THROTTLED))
 
+    def test_long_text_uses_one_contiguous_seq_per_chunk(self) -> None:
+        text = "一二三四。五六七八。九十"
+        expected = split_reply_text(text, 6)
+        client, message, sent, proactive, remembered = _client([None, None, None])
+        client.settings.reply_chunk_chars = 6
+
+        ok = asyncio.run(
+            client._send_reply(message, text, 1, "GROUP_MESSAGE_CREATE:REPLY")
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(sent, list(enumerate(expected, start=1)))
+        self.assertEqual(proactive, [])
+        self.assertEqual(remembered, [(text, "GROUP_MESSAGE_CREATE:REPLY")])
+
+    def test_ack_offset_leaves_a_contiguous_seq_range_for_all_text_chunks(self) -> None:
+        text = "一二三四。五六七八。九十"
+        expected = split_reply_text(text, 6)
+        client, message, sent, proactive, remembered = _client([None, None, None])
+        client.settings.reply_chunk_chars = 6
+
+        ok = asyncio.run(
+            client._send_reply(message, text, 2, "GROUP_MESSAGE_CREATE:REPLY")
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(sent, list(enumerate(expected, start=2)))
+        self.assertEqual(proactive, [])
+        self.assertEqual(remembered, [(text, "GROUP_MESSAGE_CREATE:REPLY")])
+
+    def test_partial_chunk_failure_only_falls_back_with_remaining_text(self) -> None:
+        text = "第一段。第二段。第三段。"
+        chunks = split_reply_text(text, 5)
+        self.assertEqual(chunks, ["第一段。", "第二段。", "第三段。"])
+        client, message, sent, proactive, remembered = _client(
+            [None, NETWORK, NETWORK, NETWORK, None, None]
+        )
+        client.settings.reply_chunk_chars = 5
+
+        ok = asyncio.run(
+            client._send_reply(
+                message,
+                text,
+                1,
+                "GROUP_MESSAGE_CREATE:REPLY",
+                attempts=3,
+            )
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(sent[0], (1, chunks[0]))
+        self.assertEqual(proactive, chunks[1:])
+        self.assertEqual((sent + [(None, item) for item in proactive]).count((1, chunks[0])), 1)
+        self.assertEqual(remembered, [(text, "GROUP_MESSAGE_CREATE:REPLY")])
+
 
 class StickerSendTests(unittest.TestCase):
     """表情图单独走图片消息：先发正文，再用下一个 seq 传图并发送。
@@ -172,10 +228,14 @@ class StickerSendTests(unittest.TestCase):
         asyncio.set_event_loop(None)
         self.loop.close()
 
-    def _client(self, script, *, upload="file-info-1"):
+    def _client(self, script, *, upload="file-info-1", reply_chunk_chars=900):
         """script 同 _client：依次决定每次发送的成败，用完之后一律成功。"""
         client = MaodouClient(
-            settings=SimpleNamespace(timezone="Asia/Shanghai", face_tags=True),
+            settings=SimpleNamespace(
+                timezone="Asia/Shanghai",
+                face_tags=True,
+                reply_chunk_chars=reply_chunk_chars,
+            ),
             store=SimpleNamespace(face_book=lambda group: {}),
             llm=SimpleNamespace(),
         )
@@ -217,8 +277,13 @@ class StickerSendTests(unittest.TestCase):
         attempts=3,
         fallback=True,
         remember=True,
+        reply_chunk_chars=900,
     ):
-        client, message, sent, remembered, uploads = self._client(script, upload=upload)
+        client, message, sent, remembered, uploads = self._client(
+            script,
+            upload=upload,
+            reply_chunk_chars=reply_chunk_chars,
+        )
         ok = self.loop.run_until_complete(
             client._send_reply(
                 message,
@@ -330,6 +395,28 @@ class StickerSendTests(unittest.TestCase):
         ok, sent, _, _ = self._send([DEDUP, None, None], "抱抱你呀[抱抱]", seq=1)
         self.assertTrue(ok)
         self.assertEqual([item[0] for item in sent], [2, 3])
+
+    def test_all_text_chunks_go_before_the_sticker(self) -> None:
+        text = "一二三四。五六七八。[抱抱]"
+        expected = split_reply_text("一二三四。五六七八。", 6)
+        self.assertEqual(len(expected), 2)
+
+        ok, sent, remembered, _ = self._send(
+            [None, None, None],
+            text,
+            reply_chunk_chars=6,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            sent,
+            [
+                (1, expected[0], "text"),
+                (2, expected[1], "text"),
+                (3, None, "sticker"),
+            ],
+        )
+        self.assertEqual(remembered, [(text, "GROUP_MESSAGE_CREATE:REPLY")])
 
 
 if __name__ == "__main__":

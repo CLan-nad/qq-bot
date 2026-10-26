@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -8,6 +9,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .calendar import format_festivals, lunar_label, next_festival, upcoming_festivals
+from .llm import (
+    DEEP_RESEARCH_REPLY_ADDENDUM,
+    FAST_TOOL_REPLY_ADDENDUM,
+    SYSTEM_PROMPT,
+)
 from .store import ChatStore, MemoryCard
 from .tools import (
     ToolResult,
@@ -155,9 +161,9 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     },
 ]
 
-AGENT_RUN_SYSTEM_PROMPT = """你是 QQ 情侣群里的“小毛豆”，外形和脾气取自洛克王国的大耳帽兜。你正在帮群友完成一个查询任务。
+AGENT_OPERATION_PROMPT = """你正在执行 agent_run 工具任务。下面是操作层规则，和前面的全局人设一起使用。
 
-你有以下工具可以调用：
+可用工具：
 - web_search：搜索互联网，获取最新信息
 - web_fetch：打开并阅读指定网页
 - document_read：读取 PDF/Word/Excel 等文档
@@ -168,16 +174,40 @@ AGENT_RUN_SYSTEM_PROMPT = """你是 QQ 情侣群里的“小毛豆”，外形�
 - memory_search：搜索聊天记录和长期记忆
 
 工作方式：
-1. 先理解用户想要什么，想清楚需要哪些工具
-2. 调用必要的工具，拿到结果
-3. 如果结果不够，可以再调用一次；如果够了就给出最终回答
-4. 最终回答要口语化、简洁、像小毛豆在说话，不要写成报告
+1. 先理解用户真正要完成的任务，只调用能补足信息的工具。
+2. 简单查询尽快收口；复杂任务先收集资料，再基于证据分析。不要为了显得努力而重复搜索同一个问题。
+3. 工具轨迹就是你本轮实际执行的操作；没有调用的能力不能声称已经用过。
+4. 结果与问题无关时直说没找到，不能拿无关内容凑答案，也不能编造来源。
+5. 如果资料已经足够，直接给出最终回答，不要为了再确认一遍继续查；如果资料不足，说明缺什么，不要继续证明自己搜过。
+6. 最终回答的形式服从当前模式追加的输出策略，不要套用固定客服模板。
 
-规则：
-- 结果与问题无关时必须直说没找到，不能编造
-- 引用资料时写出来源站点名
-- 不要输出「小毛豆：」、标题、代码块 Markdown
-- 说话像熟络的死党，不像客服"""
+预算：
+- fast：最多 3 次工具调用、3 个模型回合，适合简单事实查询。
+- deep：最多 12 次工具调用、8 个模型回合，适合调研、比较、周报、年报和需要多步分析的任务。
+- 单回合最多并行 3 个工具；预算用完后必须停止查资料，基于已有结果回答。"""
+
+
+AGENT_RUN_SYSTEM_PROMPT = SYSTEM_PROMPT + "\n\n" + AGENT_OPERATION_PROMPT
+
+
+FAST_MAX_STEPS = 3
+DEEP_MAX_STEPS = 8
+FAST_MAX_TOOL_CALLS = 3
+DEEP_MAX_TOOL_CALLS = 12
+MAX_PARALLEL_TOOLS = 3
+FAST_FINAL_MAX_TOKENS = 1000
+DEEP_FINAL_MAX_TOKENS = 3200
+TOOL_RESULT_MAX_CHARS = 4000
+
+
+def agent_system_prompt(mode: str) -> str:
+    """全局人设 + 工具操作说明 + 当前模式的最终输出契约。"""
+    addendum = (
+        DEEP_RESEARCH_REPLY_ADDENDUM
+        if mode == "deep"
+        else FAST_TOOL_REPLY_ADDENDUM
+    )
+    return AGENT_RUN_SYSTEM_PROMPT + addendum
 
 
 @dataclass
@@ -197,6 +227,7 @@ class AgentContext:
     shell_timeout_seconds: float = 10.0
     shell_max_output_chars: int = 50000
     memory_search_messages: int = 10
+    max_output_chars: int = 3000
     store: Any = None  # ChatStore
     group_openid: str = ""
     now: datetime = field(default_factory=datetime.now)
@@ -410,19 +441,58 @@ async def agent_run_loop(
 ) -> dict[str, Any]:
     """有界工具调用循环。
 
-    fast 模式最多 3 步（适合简单查询），deep 模式最多 8 步（适合复杂多步任务）。
+    fast 最多 3 个模型回合 / 3 次工具调用；deep 最多 8 个回合 / 12 次工具调用。
+    单回合最多并行 3 个工具。预算用完后不再暴露工具，强制基于已有证据收口。
     返回 {"text": "最终回复", "tool_calls_made": ["web_search", ...]}
     """
-    max_steps = 3 if mode == "fast" else 8
+    mode = "deep" if mode == "deep" else "fast"
+    max_steps = DEEP_MAX_STEPS if mode == "deep" else FAST_MAX_STEPS
+    max_tool_calls = (
+        DEEP_MAX_TOOL_CALLS if mode == "deep" else FAST_MAX_TOOL_CALLS
+    )
+    final_max_tokens = (
+        DEEP_FINAL_MAX_TOKENS if mode == "deep" else FAST_FINAL_MAX_TOKENS
+    )
     model = ctx.model or "deepseek-flash"
     tool_calls_made: list[str] = []
 
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": AGENT_RUN_SYSTEM_PROMPT},
+        {"role": "system", "content": agent_system_prompt(mode)},
         {"role": "user", "content": query},
     ]
 
+    def clip(text: str) -> str:
+        value = (text or "").strip()
+        limit = max(0, int(ctx.max_output_chars or 0))
+        return value[:limit] if limit else value
+
+    async def finish(reason: str) -> dict[str, Any]:
+        messages.append({"role": "user", "content": reason})
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.5,
+                max_tokens=final_max_tokens,
+                reasoning_effort=ctx.reasoning_effort,
+            )
+            final = response.choices[0].message.content or ""
+        except Exception as exc:
+            logger.warning("agent_run final reply failed: %r", exc)
+            return {
+                "text": "我查完了，但最后整理答案时卡住了，要不换个问法再试一次？",
+                "tool_calls_made": tool_calls_made,
+            }
+        text = clip(final)
+        if not text:
+            text = "我查到了些资料，但这次没能整理成回答，要不我再试一次？"
+        return {"text": text, "tool_calls_made": tool_calls_made}
+
     for _step in range(max_steps):
+        if len(tool_calls_made) >= max_tool_calls:
+            return await finish(
+                "工具调用预算已经用完。不要再请求工具，直接基于上面已有结果完成最终回答。"
+            )
         try:
             response = await client.chat.completions.create(
                 model=model,
@@ -434,68 +504,98 @@ async def agent_run_loop(
             )
         except Exception as exc:
             logger.warning("agent_run LLM call failed at step %d: %r", _step + 1, exc)
-            return {"text": f"抱歉，我在处理时出了点问题（{exc}），要不换个说法再试试？", "tool_calls_made": tool_calls_made}
+            return {
+                "text": "刚才查资料时出了点问题，要不换个说法再让我试一次？",
+                "tool_calls_made": tool_calls_made,
+            }
 
         msg = response.choices[0].message
 
-        # 模型直接给了文本回复——任务完成
+        # 模型直接给了文本回复：它已经是在完整工具轨迹上收口，不能再拿一段
+        # 丢失证据的短文去做第二次润色。
         if msg.content and not msg.tool_calls:
-            return {"text": msg.content.strip(), "tool_calls_made": tool_calls_made}
+            return {
+                "text": clip(msg.content),
+                "tool_calls_made": tool_calls_made,
+            }
 
-        # 模型要调工具
         if msg.tool_calls:
-            # 先把 assistant 消息加入历史
-            messages.append({
-                "role": "assistant",
-                "content": msg.content or "",
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ],
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ],
+                }
+            )
 
-            for tc in msg.tool_calls:
-                func_name = tc.function.name
+            remaining = max(0, max_tool_calls - len(tool_calls_made))
+            executable = list(msg.tool_calls[: min(MAX_PARALLEL_TOOLS, remaining)])
+            skipped = list(msg.tool_calls[len(executable):])
+            parsed: list[tuple[Any, str, dict[str, Any]]] = []
+            for tc in executable:
+                func_name = str(tc.function.name or "")
                 try:
-                    func_args = json.loads(tc.function.arguments)
-                except json.JSONDecodeError:
+                    loaded = json.loads(tc.function.arguments or "{}")
+                    func_args = loaded if isinstance(loaded, dict) else {}
+                except (json.JSONDecodeError, TypeError):
                     func_args = {}
-                logger.info("agent_run tool call: %s(%s)", func_name, func_args)
+                parsed.append((tc, func_name, func_args))
+
+            logger.info(
+                "agent_run mode=%s step=%d tools=%s skipped=%d budget=%d/%d",
+                mode,
+                _step + 1,
+                [name for _, name, _ in parsed],
+                len(skipped),
+                len(tool_calls_made) + len(parsed),
+                max_tool_calls,
+            )
+            results = await asyncio.gather(
+                *(
+                    _execute_tool(func_name, func_args, ctx)
+                    for _, func_name, func_args in parsed
+                )
+            )
+            for (tc, func_name, _func_args), result_text in zip(parsed, results):
                 tool_calls_made.append(func_name)
-
-                result_text = await _execute_tool(func_name, func_args, ctx)
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result_text[:4000],
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result_text[:TOOL_RESULT_MAX_CHARS],
+                    }
+                )
+            for tc in skipped:
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": (
+                            "工具调用预算已用完，这次调用没有执行。"
+                            "请不要再查新资料，基于已有结果完成回答。"
+                        ),
+                    }
+                )
+            if len(tool_calls_made) >= max_tool_calls:
+                return await finish(
+                    "工具调用预算已经用完。不要再请求工具，直接基于上面已有结果完成最终回答。"
+                )
         else:
-            # 既没有文本也没有工具调用——罕见，返回空
-            return {"text": "抱歉，我没想好怎么回答，能换个说法吗？", "tool_calls_made": tool_calls_made}
+            return {
+                "text": "抱歉，我没想好怎么回答，能换个说法吗？",
+                "tool_calls_made": tool_calls_made,
+            }
 
-    # 步数用尽，让模型给出最终回复
-    try:
-        messages.append({
-            "role": "user",
-            "content": "工具调用已经结束，请根据上面的结果给出最终回复。回答要口语、简洁，像小毛豆在说话。",
-        })
-        response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.5,
-            max_tokens=800,
-            reasoning_effort=ctx.reasoning_effort,
-        )
-        final = response.choices[0].message.content or ""
-        return {"text": final.strip(), "tool_calls_made": tool_calls_made}
-    except Exception as exc:
-        logger.warning("agent_run final reply failed: %r", exc)
-        return {"text": "我查完了但组织语言时卡住了，要不换个问法？", "tool_calls_made": tool_calls_made}
+    return await finish(
+        "模型回合已经用完。不要再请求工具，直接基于上面已有结果完成最终回答。"
+    )

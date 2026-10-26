@@ -34,6 +34,8 @@ class Settings:
     recent_messages: int
     max_context_chars: int
     reply_max_chars: int
+    reply_chunk_chars: int
+    deep_reply_max_chars: int
     timezone: str
     scheduler_interval_seconds: int
     memory_interval_seconds: int
@@ -106,7 +108,13 @@ def load_settings() -> Settings:
         db_path=os.getenv("MAODOU_DB_PATH", "data/maodou.sqlite3"),
         recent_messages=int(os.getenv("MAODOU_RECENT_MESSAGES", "60")),
         max_context_chars=int(os.getenv("MAODOU_MAX_CONTEXT_CHARS", "24000")),
-        reply_max_chars=int(os.getenv("MAODOU_REPLY_MAX_CHARS", "900")),
+        # 模型可以先写完整长回答，发送层再按 reply_chunk_chars 拆成多条 QQ 消息。
+        # 900 是旧版“整条硬截断”的上限；现在总上限放开，但单条仍默认 900。
+        reply_max_chars=int(os.getenv("MAODOU_REPLY_MAX_CHARS", "3000")),
+        reply_chunk_chars=int(os.getenv("MAODOU_REPLY_CHUNK_CHARS", "900")),
+        deep_reply_max_chars=int(
+            os.getenv("MAODOU_DEEP_REPLY_MAX_CHARS", "3000")
+        ),
         timezone=os.getenv("MAODOU_TIMEZONE", "Asia/Shanghai"),
         scheduler_interval_seconds=int(os.getenv("MAODOU_SCHEDULER_INTERVAL_SECONDS", "30")),
         memory_interval_seconds=int(os.getenv("MAODOU_MEMORY_INTERVAL_SECONDS", "300")),

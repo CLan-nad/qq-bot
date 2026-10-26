@@ -16,7 +16,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 from maodou.bot import TOOL_REPLY_MAX_CHARS, MaodouClient
-from maodou.llm import SYSTEM_PROMPT, MaodouLLM
+from maodou.agent import agent_system_prompt
+from maodou.llm import (
+    DEEP_RESEARCH_REPLY_ADDENDUM,
+    FAST_TOOL_REPLY_ADDENDUM,
+    SYSTEM_PROMPT,
+    MaodouLLM,
+)
 from maodou.store import ChatStore
 
 
@@ -170,18 +176,21 @@ class ToolHandlerPersonaTests(unittest.TestCase):
         self.assertEqual(self.captured["max_chars"], TOOL_REPLY_MAX_CHARS["math_eval"])
 
     def test_dispatch_builds_persona(self) -> None:
-        # 走 _handle_intent 分发 agent_run 时，persona 要自动构建（身份 + 记忆 + 话题）
-        # 并透传给 generate_tool_reply。
+        # agent_run 的工具循环已经持有完整证据并直接收口，不能再把结果交给
+        # generate_tool_reply 二次润色，否则搜索结果会在第二次生成时丢失。
         import maodou.bot as bot_module
 
+        captured: dict = {}
+
         async def fake_agent_run(**kwargs):
+            captured.update(kwargs)
             return {"text": "2*3=6", "tool_calls_made": ["math_eval"]}
 
         self.store.add_memory_card(
             group_openid=GROUP, kind="preference", person="两人", content="回复别分点"
         )
         with mock.patch.object(bot_module, "agent_run_loop", fake_agent_run):
-            self.loop.run_until_complete(
+            reply = self.loop.run_until_complete(
                 self.client._handle_intent(
                     intent={"action": "agent_run", "query": "2*3"},
                     message=SimpleNamespace(group_openid=GROUP, id="m-1"),
@@ -196,10 +205,25 @@ class ToolHandlerPersonaTests(unittest.TestCase):
                     ),
                 )
             )
-        self.assertEqual(self.captured["tool_name"], "math_eval")
-        self.assertEqual(self.captured["identity_context"], "触发者 CL；对象 小虾")
-        self.assertIn("回复别分点", self.captured["memory_context"])
-        self.assertEqual(self.captured["topic_context"], "CL：2*3 等于几")
+        self.assertEqual(reply, "2*3=6")
+        self.assertEqual(captured["query"], "2*3")
+        self.assertEqual(captured["mode"], "fast")
+        self.assertEqual(captured["ctx"].max_output_chars, 500)
+        # 旧实现会走 fake_tool_reply 并返回“算好了”，这里为空证明没有二次润色。
+        self.assertEqual(self.captured, {})
+
+    def test_output_contract_differs_between_fast_and_deep(self) -> None:
+        fast = agent_system_prompt("fast")
+        deep = agent_system_prompt("deep")
+
+        self.assertTrue(fast.startswith(SYSTEM_PROMPT))
+        self.assertTrue(deep.startswith(SYSTEM_PROMPT))
+        self.assertIn(FAST_TOOL_REPLY_ADDENDUM, fast)
+        self.assertNotIn(DEEP_RESEARCH_REPLY_ADDENDUM, fast)
+        self.assertIn(DEEP_RESEARCH_REPLY_ADDENDUM, deep)
+        self.assertNotIn(FAST_TOOL_REPLY_ADDENDUM, deep)
+        self.assertIn("可以分点、分段写完整", deep)
+        self.assertIn("来源站点名", deep)
 
 
 if __name__ == "__main__":

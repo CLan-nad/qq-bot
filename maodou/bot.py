@@ -37,7 +37,8 @@ from .images import (
     normalize_face_tags,
     to_data_url,
 )
-from .llm import ACTION_REPLY_ADDENDUM, MaodouLLM
+from .llm import ACTION_REPLY_ADDENDUM, STRUCTURED_DATA_REPLY_ADDENDUM, MaodouLLM
+from .replies import split_reply_text
 from .scheduling import advance_task, parse_datetime, resolve_next_run, schedule_label
 from .store import (
     ChatStore,
@@ -1323,24 +1324,35 @@ class MaodouClient(botpy.Client):
         )
 
     async def _send_reply_proactive(
-        self, message: RichGroupMessage, text: str, source: str
+        self,
+        message: RichGroupMessage,
+        text: str,
+        source: str,
+        *,
+        remember: bool = True,
     ) -> bool:
         """被动回复通道彻底不通时，退回主动消息兜底，至少让人看到一句回复。"""
         content = self._outgoing_parts(message.group_openid, text)[0]
-        if not content.strip():
+        chunks = split_reply_text(
+            content,
+            int(getattr(self.settings, "reply_chunk_chars", 900) or 900),
+        )
+        if not chunks:
             # 这条本来就只是一张表情图，没有能被文字兜住的正文，就别硬发一句空的。
             logger.warning("proactive fallback skipped, nothing but a sticker: %s", message.id)
             return False
         try:
-            await self.api.post_group_message(
-                group_openid=message.group_openid,
-                content=content,
-            )
+            for chunk in chunks:
+                await self.api.post_group_message(
+                    group_openid=message.group_openid,
+                    content=chunk,
+                )
         except Exception as exc:
             self._note_rate_limit(message.group_openid, exc)
             logger.exception("proactive fallback also failed, msg_id=%s", message.id)
             return False
-        self._remember_bot_reply(message.group_openid, content, f"{source}:FALLBACK")
+        if remember:
+            self._remember_bot_reply(message.group_openid, content, f"{source}:FALLBACK")
         logger.info("group reply delivered via proactive fallback, msg_id=%s", message.id)
         return True
 
@@ -1365,8 +1377,8 @@ class MaodouClient(botpy.Client):
         - 其它错误按原 seq 重试，最多 attempts 次；
         - 全部失败退回主动消息通道兜底（ack 不兜底，它发不出去无所谓）。
 
-        有文字和表情图时不发富媒体配文：先发文字，再用下一个 seq 单独发图。文字已经
-        送达后图片失败也不会重发文字，整轮仍算成功；文字没送达时绝不会先发图。
+        长文字先按自然边界拆成多段，每段占一个独立 seq，全部文字发完后再用下一个
+        seq 单独发图。中途失败只兜底尚未送达的剩余文字，绝不把已送达的前文再发一遍。
         """
         content, sticker = self._outgoing_parts(message.group_openid, text)
         current = seq
@@ -1375,7 +1387,11 @@ class MaodouClient(botpy.Client):
             if remember:
                 self._remember_bot_reply(message.group_openid, text, source)
         max_attempts = max(1, attempts)
-        has_text = bool(content.strip())
+        chunks = split_reply_text(
+            content,
+            int(getattr(self.settings, "reply_chunk_chars", 900) or 900),
+        )
+        has_text = bool(chunks)
 
         if not has_text and sticker is None:
             logger.error("refusing to send an empty group reply, seq=%s", current)
@@ -1393,65 +1409,85 @@ class MaodouClient(botpy.Client):
 
         try:
             if has_text:
-                text_started = time.perf_counter()
-                text_seq = current
-                text_sent = False
-                for attempt in range(1, max_attempts + 1):
-                    try:
-                        await self.api.post_group_message(
-                            group_openid=message.group_openid,
-                            msg_id=message.id,
-                            msg_seq=current,
-                            content=content,
-                        )
-                    except Exception as exc:
-                        if self._is_dedup_error(exc):
-                            if attempt > 1:
-                                logger.info(
-                                    "group reply already delivered, seq=%s", current
+                sent_chunks = 0
+                for chunk_index, chunk in enumerate(chunks):
+                    text_started = time.perf_counter()
+                    text_seq = current
+                    text_sent = False
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            await self.api.post_group_message(
+                                group_openid=message.group_openid,
+                                msg_id=message.id,
+                                msg_seq=current,
+                                content=chunk,
+                            )
+                        except Exception as exc:
+                            if self._is_dedup_error(exc):
+                                if attempt > 1:
+                                    logger.info(
+                                        "group reply chunk already delivered, seq=%s",
+                                        current,
+                                    )
+                                    current += 1
+                                    text_sent = True
+                                    break
+                                logger.warning(
+                                    "msg_seq %s already taken (ack landed?), "
+                                    "resending chunk as %s",
+                                    current,
+                                    current + 1,
                                 )
                                 current += 1
-                                text_sent = True
-                                break
+                                continue
                             logger.warning(
-                                "msg_seq %s already taken (ack landed?), resending as %s",
+                                "failed to send group reply chunk %d/%d, "
+                                "attempt %s/%s, seq=%s: %s",
+                                chunk_index + 1,
+                                len(chunks),
+                                attempt,
+                                max_attempts,
                                 current,
-                                current + 1,
+                                exc,
                             )
+                            if attempt < max_attempts:
+                                await asyncio.sleep(SEND_RETRY_DELAY_SECONDS)
+                                continue
+                            if proactive_fallback:
+                                remaining = "\n".join(chunks[chunk_index:])
+                                if sent_chunks:
+                                    fallback_ok = await self._send_reply_proactive(
+                                        message,
+                                        remaining,
+                                        source,
+                                        remember=False,
+                                    )
+                                    if fallback_ok:
+                                        remember_delivery()
+                                    return fallback_ok
+                                return await self._send_reply_proactive(
+                                    message, text, source
+                                )
+                            logger.error(
+                                "giving up on group reply chunk, seq=%s", current
+                            )
+                            return False
+                        else:
                             current += 1
-                            continue
-                        logger.warning(
-                            "failed to send group reply, attempt %s/%s, seq=%s: %s",
-                            attempt,
-                            max_attempts,
-                            current,
-                            exc,
-                        )
-                        if attempt < max_attempts:
-                            await asyncio.sleep(SEND_RETRY_DELAY_SECONDS)
-                            continue
-                        if proactive_fallback:
-                            return await self._send_reply_proactive(
-                                message, text, source
-                            )
+                            text_sent = True
+                            break
+                    if not text_sent:
                         logger.error("giving up on group reply, seq=%s", current)
                         return False
-                    else:
-                        current += 1
-                        text_sent = True
-                        break
-                if text_sent:
+                    sent_chunks += 1
                     logger.info(
-                        "perf text send seq=%s %.0fms chars=%d",
+                        "perf text send seq=%s %.0fms chars=%d chunk=%d/%d",
                         text_seq,
                         (time.perf_counter() - text_started) * 1000,
-                        len(content),
+                        len(chunk),
+                        chunk_index + 1,
+                        len(chunks),
                     )
-                if not text_sent:
-                    if proactive_fallback:
-                        return await self._send_reply_proactive(message, text, source)
-                    logger.error("giving up on group reply, seq=%s", current)
-                    return False
 
             if sticker is None:
                 remember_delivery()
@@ -1653,7 +1689,7 @@ class MaodouClient(botpy.Client):
         topic: str,
         identity: "IdentityContext",
     ) -> str:
-        """agent_run：把查询交给工具调用循环，结果用 generate_tool_reply 润色。"""
+        """agent_run：工具循环已经拿着完整证据收口，结果直接发送。"""
         query = self._optional_str(intent.get("query")) or request
         mode = str(intent.get("mode") or "fast")
         if mode not in {"fast", "deep"}:
@@ -1680,6 +1716,15 @@ class MaodouClient(botpy.Client):
             shell_timeout_seconds=self.settings.shell_timeout_seconds,
             shell_max_output_chars=self.settings.shell_max_output_chars,
             memory_search_messages=self.settings.memory_search_messages,
+            max_output_chars=(
+                getattr(
+                    self.settings,
+                    "deep_reply_max_chars",
+                    getattr(self.settings, "reply_max_chars", 3000),
+                )
+                if mode == "deep"
+                else getattr(self.settings, "reply_max_chars", 3000)
+            ),
             store=self.store,
             group_openid=message.group_openid,
             now=self._now(),
@@ -1692,23 +1737,7 @@ class MaodouClient(botpy.Client):
             query=query,
             mode=mode,
         )
-        raw_text = result.get("text", "") or "抱歉，我没查到结果。"
-        tool_calls_made = result.get("tool_calls_made", [])
-
-        if not tool_calls_made:
-            # 没调用任何工具——模型直接给答案了，直接返回
-            return raw_text
-
-        # 调用过工具 → 用 generate_tool_reply 润色，保证称呼和语气不走样
-        tools_label = "、".join(tool_calls_made)
-        return await self.llm.generate_tool_reply(
-            request=request,
-            tool_name=tools_label,
-            tool_output=raw_text,
-            identity_context=identity.prompt(),
-            memory_context=self._memory_context(message.group_openid),
-            topic_context=topic,
-        )
+        return result.get("text", "") or "抱歉，我没查到结果。"
 
 
     async def _handle_intent(
@@ -2535,6 +2564,7 @@ class MaodouClient(botpy.Client):
                 identity_context=identity.prompt(),
                 memory_context=self._memory_context(message.group_openid),
                 topic_context=topic,
+                addendum=STRUCTURED_DATA_REPLY_ADDENDUM,
             )
         except Exception as exc:
             logger.warning("message stats persona reply failed: %s", exc)

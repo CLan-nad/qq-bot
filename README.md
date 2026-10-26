@@ -104,9 +104,9 @@ flowchart TD
     PREF --> LOCAL
     CALENDAR --> CALC["calendar.py<br/>本地计算"]
 
-    AGENT --> LOOP["工具循环<br/>fast 3 步 / deep 8 步"]
+    AGENT --> LOOP["工具循环<br/>fast 3 次调用 / deep 12 次调用 · 8 回合"]
     LOOP --> TOOLS["8 个工具<br/>搜索 · 网页 · 文档 · shell<br/>数学 · 节日 · 消息统计 · 记忆检索"]
-    TOOLS --> TOOL_REPLY["调用过工具时<br/>generate_tool_reply"]
+    TOOLS --> TOOL_REPLY["循环持有完整证据<br/>直接生成最终回答"]
 
     CHAT --> REPLY["generate_reply<br/>人设化回复"]
 
@@ -116,16 +116,17 @@ flowchart TD
     REPLY --> FINAL
     POLISH --> FINAL
 
-    FINAL --> TEXT["先发文字"]
+    FINAL --> TEXT["长回复按自然边界拆条<br/>每条使用连续 msg_seq"]
     TEXT --> STICKER["如有表情包<br/>再单独发一张图"]
 ```
 
 几个实现细节：
 
 - 本地 action 先算出确定结果，再决定是否交给模型换语气；失败、列表和「匹配到多条」保持模板原文。
-- `agent_run` 没调用工具时直接返回；调用过工具才走 `generate_tool_reply`，避免工具结果被改写失真。
+- `agent_run` 在同一个工具循环里持有完整证据并直接收口，不再做第二次润色，避免搜索结果在转述时丢失。
+- 最终提示词按输出契约分层：全局 `SYSTEM_PROMPT` 负责人设与交流方式；`chat` 直接用全局提示词；本地 action、fast 查询、deep 调研、结构化统计分别追加自己的事实和长度约束。
 - 图片按字节 SHA-256 缓存描述；识图与回复并行，所以用户通常先看到「我看看图」，随后才收到正式答案。
-- 出站先发文字，再用下一个 `msg_seq` 单独发表情图；QQ 的 `msg_seq` 撞车和频控都有兜底。
+- 长回复按空行、换行、句号等自然边界拆成多条，每条使用连续且唯一的 `msg_seq`；文字全部发完后，才用下一个 `msg_seq` 单独发表情图。中途失败不会重发已经送达的前文。
 
 ### 上下文工程
 
@@ -171,7 +172,7 @@ flowchart TD
 | `message_stats` | 直接聚合数据库里的群消息数量 |
 | `memory_search` | 同时搜索历史消息和长期记忆 |
 
-循环使用 OpenAI 兼容的 `tools` 协议。`fast` 最多 3 步，`deep` 最多 8 步；模型不再调用工具、直接给出文本时就结束，步数耗尽后再补一次「根据结果作答」的调用。网页抓取会拦截私网地址，shell 有命令白名单、超时和输出上限，避免模型把服务器当成无限制执行环境。
+循环使用 OpenAI 兼容的 `tools` 协议。`fast` 最多 3 次工具调用 / 3 个模型回合，`deep` 最多 12 次工具调用 / 8 个模型回合，单回合最多并行 3 个工具；模型不再调用工具、直接给出文本时就结束。调用预算用完后，最后一次「根据已有资料作答」的请求不再携带 `tools`，强迫模型基于证据收口。网页抓取会拦截私网地址，shell 有命令白名单、超时和输出上限，避免模型把服务器当成无限制执行环境。
 
 > 旧版的 `_handle_web_search` / `_handle_web_fetch` / `_handle_document_read` / `_handle_shell_run` / `_handle_math_eval` / `_handle_memory_search` / `_handle_message_stats` 还留在 `bot.py` 里，但正常分发已经全部走 `agent_run`，不会再从这些旧入口进入。
 
@@ -208,7 +209,7 @@ flowchart TD
 | --- | --- |
 | `parse_intent()` | 自然语言 → 17 种 action 的 JSON |
 | `generate_reply()` | 普通聊天，按上下文分层组装 prompt |
-| `generate_tool_reply()` | 把工具结果整理成人设回复 |
+| `generate_tool_reply()` | 一步式工具、action 确认和结构化统计的人设化表达；不参与 `agent_run` 的最终收口 |
 | `describe_image()` | 视觉模型描述图片；失败自动重试并升到 `high` |
 | `process_memory_batch()` | 聊天记录 → 150–300 字摘要，不产出长期记忆 |
 | `judge_care()` | 主动关心的第二层判定，输出 `{"care": bool, "text": "..."}` |

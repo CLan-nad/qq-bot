@@ -229,7 +229,8 @@ class PromptRuleTests(unittest.TestCase):
     def test_tool_addendum_numbers_follow_the_main_rules(self) -> None:
         # 主规则 7 条，工具补充规则必须从 8 顺延，两处不能出现同一个编号
         self.assertIn("8. 忠于工具结果", TOOL_REPLY_ADDENDUM)
-        self.assertIn("11. 仍然是发进 QQ 群的一句话", TOOL_REPLY_ADDENDUM)
+        self.assertIn("11. 这是简单查询", TOOL_REPLY_ADDENDUM)
+        self.assertIn("不要为了显得详细硬凑成长报告", TOOL_REPLY_ADDENDUM)
         self.assertNotIn("5. 称呼", TOOL_REPLY_ADDENDUM)
         self.assertNotIn("7. 忠于", TOOL_REPLY_ADDENDUM)
 

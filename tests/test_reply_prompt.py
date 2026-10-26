@@ -31,14 +31,14 @@ def _member(username: str, openid: str | None = None) -> StoredMessage:
     )
 
 
-def _llm() -> MaodouLLM:
+def _llm(reply_max_chars: int = 900) -> MaodouLLM:
     settings = SimpleNamespace(
         llm_api_key="k",
         llm_base_url="https://example.invalid",
         model="big-model",
         care_model="",
         vision_model="cheap-model",
-        reply_max_chars=900,
+        reply_max_chars=reply_max_chars,
     )
     return MaodouLLM(settings)
 
@@ -103,6 +103,25 @@ class GenerateReplyPromptTests(unittest.TestCase):
         )
         self.assertNotIn("[图片内容：", captured["user_prompt"])
         self.assertIn("〔图〕一张俯拍照片，手里的白桃乌龙雪糕", captured["user_prompt"])
+
+    def test_long_reply_is_no_longer_clipped_at_the_old_900_chars(self) -> None:
+        captured: dict = {}
+
+        async def fake_chat(**chat_kwargs):
+            captured.update(chat_kwargs)
+            return "长" * 2000
+
+        llm = _llm(reply_max_chars=3000)
+        llm._chat = fake_chat
+        reply = self.loop.run_until_complete(
+            llm.generate_reply(
+                requester=_member("CL"),
+                request="详细分析一下",
+                topic_context="【主人】详细分析一下",
+            )
+        )
+        self.assertEqual(len(reply), 2000)
+        self.assertEqual(captured["max_tokens"], 2200)
 
 
 class IdentityLegendTests(unittest.TestCase):
