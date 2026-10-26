@@ -95,6 +95,94 @@
         "睡觉",
         "想你"
       ]
+    },
+    {
+      "name": "手机拿倒",
+      "file": "maodou_upside_phone.png",
+      "emoji": "📱",
+      "tags": [
+        "手机",
+        "拿倒",
+        "看反",
+        "晕"
+      ]
+    },
+    {
+      "name": "听到啦",
+      "file": "maodou_listening.png",
+      "emoji": "👂",
+      "tags": [
+        "听见",
+        "收到",
+        "在听",
+        "回应"
+      ]
+    },
+    {
+      "name": "肚肚逼人",
+      "file": "maodou_tummy_hmph.png",
+      "emoji": "😳",
+      "tags": [
+        "得意",
+        "傲娇",
+        "肚子",
+        "可爱"
+      ]
+    },
+    {
+      "name": "早起傻一天",
+      "file": "maodou_morning_daze.png",
+      "emoji": "🥱",
+      "tags": [
+        "早起",
+        "没睡醒",
+        "懵",
+        "困"
+      ]
+    },
+    {
+      "name": "帽兜死了",
+      "file": "maodou_hood_down.png",
+      "emoji": "💀",
+      "tags": [
+        "无语",
+        "崩溃",
+        "笑死",
+        "阵亡"
+      ]
+    },
+    {
+      "name": "你算什么",
+      "file": "maodou_who_are_you.png",
+      "emoji": "😤",
+      "tags": [
+        "生气",
+        "傲娇",
+        "不满",
+        "挑衅"
+      ]
+    },
+    {
+      "name": "萌背影",
+      "file": "maodou_cute_back.png",
+      "emoji": "👋",
+      "tags": [
+        "路过",
+        "可爱",
+        "背影",
+        "溜了"
+      ]
+    },
+    {
+      "name": "我做错了什么",
+      "file": "maodou_what_did_i_do.png",
+      "emoji": "🥺",
+      "tags": [
+        "委屈",
+        "无辜",
+        "难过",
+        "道歉"
+      ]
     }
   ]
 }
