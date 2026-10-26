@@ -85,7 +85,7 @@ def load_settings() -> Settings:
     # token、多花 1.5 秒，回一句 30 字的话完全用不上。需要推理的只有 deep 工具循环。
     reasoning_effort = _effort("MAODOU_REASONING_EFFORT", "none")
     intent_reasoning_effort = _effort("MAODOU_INTENT_REASONING_EFFORT", "none")
-    deep_reasoning_effort = _effort("MAODOU_DEEP_REASONING_EFFORT", "low")
+    deep_reasoning_effort = _effort("MAODOU_DEEP_REASONING_EFFORT", "high")
     vision_reasoning_effort = _effort("MAODOU_VISION_REASONING_EFFORT", "low")
 
     return Settings(
@@ -93,9 +93,8 @@ def load_settings() -> Settings:
         qq_app_secret=os.environ["QQ_APP_SECRET"],
         llm_api_key=os.environ["LLM_API_KEY"],
         llm_base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com"),
-        # 这个账号实际只有 deepseek-flash 和 deepseek-v4-pro；deepseek-chat 是旧别名，
-        # 会被网关悄悄改成 flash。闲聊用 v4-pro 关思考：比 flash 想半天还快，文笔更好。
-        model=os.getenv("MAODOU_MODEL", "deepseek-v4-pro"),
+        # 全站统一用 flash；deepseek-chat 是旧别名，也会被网关悄悄改成 flash。
+        model=os.getenv("MAODOU_MODEL", "deepseek-flash"),
         reasoning_effort=reasoning_effort,
         # 意图解析只输出一个小 JSON，不需要写作能力，但要快：默认用 flash 且关掉思考。
         # 最终回复仍然走 MAODOU_MODEL，人设和文笔不受影响。

@@ -182,9 +182,9 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
                 face_tags=False,
                 llm_api_key="sk-test",
                 llm_base_url="https://api.deepseek.com",
-                model="deepseek-v4-pro",
+                model="deepseek-flash",
                 reasoning_effort="none",
-                deep_reasoning_effort="low",
+                deep_reasoning_effort="high",
                 vision_reasoning_effort="low",
                 search_max_results=5,
                 search_timeout_seconds=12.0,
@@ -244,7 +244,7 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
             reply = self._run_intent(client, "agent_run", mode="fast")
         self.assertTrue(isinstance(reply, str) and len(reply) > 0)
 
-    def test_agent_run_uses_fast_effort_for_fast_and_low_for_deep(self) -> None:
+    def test_agent_run_uses_none_for_fast_and_high_for_deep(self) -> None:
         client = self._client()
         captured: dict[str, tuple[str, str]] = {}
 
@@ -257,8 +257,8 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
             self._run_intent(client, "agent_run", query="查天气", mode="fast")
             self._run_intent(client, "agent_run", query="做个本周小报", mode="deep")
 
-        self.assertEqual(captured["fast"], ("deepseek-v4-pro", "none"))
-        self.assertEqual(captured["deep"], ("deepseek-v4-pro", "low"))
+        self.assertEqual(captured["fast"], ("deepseek-flash", "none"))
+        self.assertEqual(captured["deep"], ("deepseek-flash", "high"))
 
     def test_chat_branch_does_not_pass_executed_actions(self) -> None:
         source = inspect.getsource(bot_module.MaodouClient._handle_intent)

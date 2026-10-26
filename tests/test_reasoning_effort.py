@@ -25,7 +25,7 @@ def _llm(effort: str | None) -> tuple[MaodouLLM, _Completions]:
     settings = SimpleNamespace(
         llm_api_key="test-key",
         llm_base_url="https://api.deepseek.com",
-        model="deepseek-v4-pro",
+        model="deepseek-flash",
         vision_model="deepseek-flash",
         reply_max_chars=900,
     )
@@ -90,11 +90,11 @@ class ReasoningEffortConfigTests(unittest.TestCase):
         ):
             return config_module.load_settings()
 
-    def test_defaults_use_v4_pro_without_chat_reasoning(self) -> None:
+    def test_defaults_use_flash_without_chat_reasoning(self) -> None:
         settings = self._load_settings(None)
-        self.assertEqual(settings.model, "deepseek-v4-pro")
+        self.assertEqual(settings.model, "deepseek-flash")
         self.assertEqual(settings.reasoning_effort, "none")
-        self.assertEqual(settings.deep_reasoning_effort, "low")
+        self.assertEqual(settings.deep_reasoning_effort, "high")
         self.assertEqual(settings.vision_reasoning_effort, "low")
 
     def test_valid_values_are_kept(self) -> None:
@@ -143,7 +143,7 @@ class IntentModelTests(unittest.TestCase):
                 tasks_summary="",
             )
         )
-        self.assertEqual(completions.calls[0]["model"], "deepseek-v4-pro")
+        self.assertEqual(completions.calls[0]["model"], "deepseek-flash")
 
 
 if __name__ == "__main__":

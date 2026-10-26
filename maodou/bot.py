@@ -1661,7 +1661,7 @@ class MaodouClient(botpy.Client):
 
         # fast 只是查一下，关思考最省时；deep 才值得让模型多想一会儿。
         agent_effort = (
-            getattr(self.settings, "deep_reasoning_effort", "low")
+            getattr(self.settings, "deep_reasoning_effort", "high")
             if mode == "deep"
             else getattr(self.settings, "reasoning_effort", "none")
         )

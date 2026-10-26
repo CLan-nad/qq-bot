@@ -414,7 +414,7 @@ async def agent_run_loop(
     返回 {"text": "最终回复", "tool_calls_made": ["web_search", ...]}
     """
     max_steps = 3 if mode == "fast" else 8
-    model = ctx.model or "deepseek-v4-pro"
+    model = ctx.model or "deepseek-flash"
     tool_calls_made: list[str] = []
 
     messages: list[dict[str, Any]] = [

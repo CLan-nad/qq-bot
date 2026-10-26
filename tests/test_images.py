@@ -66,7 +66,7 @@ def _fake_llm() -> tuple[MaodouLLM, _FakeCompletions]:
     settings = SimpleNamespace(
         llm_api_key="test-key",
         llm_base_url="https://api.deepseek.com",
-        model="deepseek-v4-pro",
+        model="deepseek-flash",
         vision_model="deepseek-flash",
         reply_max_chars=900,
     )
@@ -259,7 +259,7 @@ class VisionModelTests(unittest.TestCase):
             )
         )
         call = completions.calls[0]
-        self.assertEqual(call["model"], "deepseek-v4-pro")
+        self.assertEqual(call["model"], "deepseek-flash")
         self.assertEqual(call["messages"][1]["content"], "hello")
 
 
@@ -386,7 +386,7 @@ def _scripted_llm(contents: list[str]) -> tuple[MaodouLLM, _ScriptedCompletions]
     settings = SimpleNamespace(
         llm_api_key="test-key",
         llm_base_url="https://api.deepseek.com",
-        model="deepseek-v4-pro",
+        model="deepseek-flash",
         vision_model="deepseek-flash",
         reply_max_chars=900,
     )
