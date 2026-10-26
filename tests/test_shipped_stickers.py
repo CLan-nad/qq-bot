@@ -24,7 +24,7 @@ class ShippedStickerTests(unittest.TestCase):
         self.items = json.loads((LIBRARY / "manifest.json").read_text(encoding="utf-8"))["items"]
 
     def test_library_is_actually_loaded(self) -> None:
-        self.assertEqual(len(self.library), 8)
+        self.assertEqual(len(self.library), 16)
         self.assertEqual(len(self.library), len(self.items))
 
     def test_every_name_survives_the_take_pattern(self) -> None:
@@ -98,6 +98,14 @@ class ShippedStickerTests(unittest.TestCase):
             "俺不中了",
             "早安宝宝",
             "晚安宝宝",
+            "手机拿倒",
+            "听到啦",
+            "肚肚逼人",
+            "早起傻一天",
+            "帽兜死了",
+            "你算什么",
+            "萌背影",
+            "我做错了什么",
         }
         self.assertEqual(set(self.library.names()), expected)
         files = {path.name for path in LIBRARY.glob("*.png")}
