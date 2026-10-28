@@ -50,7 +50,7 @@ deep 工具循环需要多步规划，使用 `MAODOU_DEEP_REASONING_EFFORT=high`
 闲聊类消息要先做一次意图分类、再生成回复，所以意图解析单独走快模型：默认 `deepseek-flash` +
 `none`（`MAODOU_INTENT_MODEL` / `MAODOU_INTENT_REASONING_EFFORT`），最终回复仍用 `MAODOU_MODEL`，人设不受影响。
 发语音优先使用 QwenCloud 的 `qwen-audio-3.1-tts-flash` + `longling_v3.1`
-软糯女童声；没有配置时会退回无需额外 key 的 Edge 中文神经语音。
+龙灵 04 试听版的软萌活泼女童声；没有配置时会退回无需额外 key 的 Edge 中文神经语音。
 收语音优先使用 QQ 消息里的 `asr_refer_text`，缺失时才调用可选的外部 ASR。
 
 ## 代码架构
