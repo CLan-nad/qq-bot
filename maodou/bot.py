@@ -110,7 +110,6 @@ ACK_ACTIONS = frozenset(
     {"chat", "agent_run"}
 )
 TASK_SCHEDULE_TYPES = frozenset({"once", "daily", "weekly", "yearly", "lunar_yearly"})
-TEMPORARY_MEMORY_DAYS = 14
 
 # 工具回复限长：计算类只给答案不该长篇，命令输出给个中等上限；检索/网页/文档走默认回复上限。
 TOOL_REPLY_MAX_CHARS: dict[str, int] = {
@@ -125,8 +124,6 @@ TOOL_REPLY_MAX_CHARS: dict[str, int] = {
 # 模型一活泼就没人知道该报哪个编号了。
 PERSONA_TOOL_LABELS: dict[str, str] = {
     "memory_remember": "记住信息",
-    "memory_pin": "把记忆标成永久置顶",
-    "memory_unpin": "取消记忆的永久置顶",
     "memory_forget": "删除记忆",
     "address_set": "登记称呼",
     "task_create": "创建定时提醒",
@@ -845,16 +842,12 @@ class MaodouClient(botpy.Client):
         )
 
     async def _compact_memories(self) -> None:
-        """把攒够的聊天压成一段摘要，顺带清掉过期记忆。
+        """把攒够的聊天压成一段摘要。
 
-        这里**不**再自动生产长期记忆：用户要求「只有我明确说记住 xx 才记」，
+        这里**不**自动生产长期记忆：用户要求「只有我明确说记住 xx 才记」，
         长期记忆一律由 memory_remember（群里 @ 我下指令）写入，后台只出摘要。
         """
         async with self._memory_lock:
-            cutoff = (self._now() - timedelta(days=90)).isoformat(timespec="seconds")
-            purged = self.store.purge_expired_memories(cutoff)
-            if purged:
-                logger.info("purged %s expired temporary memories", purged)
             for group_openid in self.store.groups():
                 batch = self.store.pending_memory_batch(
                     group_openid,
@@ -903,10 +896,7 @@ class MaodouClient(botpy.Client):
         剧情当成人设，张口就用摘要里的评价复述人。这里用 memory_cards_for_prompt 按
         字符预算装卡片，摘要单独走 _summaries_context。
         """
-        cards = self.store.memory_cards_for_prompt(
-            group_openid,
-            now_iso=self._now().isoformat(timespec="seconds"),
-        )
+        cards = self.store.memory_cards_for_prompt(group_openid)
         return ChatStore.format_memory_cards(cards)[: self.settings.max_context_chars]
 
     def _summaries_context(
@@ -1665,13 +1655,12 @@ class MaodouClient(botpy.Client):
         """拿出要操作的那批记忆，返回 (卡片, 是否是“全部”)。
 
         支持三种说法：报编号（单个或一串）、报内容关键词（match）、说“全部/所有”。
-        早先只认单个 int，用户说“把这几条都设为永久”时 memory_id 是数组，
-        _int_field 直接返回 None，于是每次都答“没有找到这条记忆”。
+        早先只认单个 int，model 返回数组时 _int_field 直接返回 None，
+        于是每次都答“没有找到这条记忆”。
         """
         group_openid = message.group_openid
         if bool(intent.get("all")):
-            now_iso = self._now().isoformat(timespec="seconds")
-            return self.store.live_memory_cards(group_openid, now_iso), True
+            return self.store.all_memory_cards(group_openid), True
         ids = self._memory_ids_field(intent.get("memory_id"))
         if ids:
             return self.store.find_memory_cards(group_openid, memory_id=ids), False
@@ -1753,6 +1742,9 @@ class MaodouClient(botpy.Client):
         identity: IdentityContext,
     ) -> str:
         action = str(intent.get("action") or "chat")
+        # 永久/临时记忆入口已经下线；旧模型若还返回这两个动作，按普通聊天处理。
+        if action in {"memory_pin", "memory_unpin"}:
+            action = "chat"
 
         async def speak(result: str) -> str:
             """办成一件事之后，让模型用小毛豆的语气把这句确认话说一遍。
@@ -1772,10 +1764,6 @@ class MaodouClient(botpy.Client):
             return await speak(self._handle_memory_remember(intent, message, identity))
         if action == "memory_list":
             return self._handle_memory_list(intent, message)
-        if action in {"memory_pin", "memory_unpin"}:
-            return await speak(
-                self._handle_memory_pin(intent, message, pinned=action == "memory_pin")
-            )
         if action == "memory_forget":
             return await speak(self._handle_memory_forget(intent, message))
         if action == "memory_alias":
@@ -1823,7 +1811,7 @@ class MaodouClient(botpy.Client):
     ) -> str:
         """本地操作办成后，把模板文案交给模型用小毛豆的语气说一遍。
 
-        模板是事实凭据，模型只许改语气：facts 里的条数、编号、人名、称呼、置顶方向
+        模板是事实凭据，模型只许改语气：facts 里的条数、编号、人名、称呼、任务方向
         缺一个就退回模板。最怕的就是为了活泼把「记住了 3 条」说成「都记下啦」，
         数字一丢，用户根本没法核对到底存进去几条。
         """
@@ -2107,12 +2095,9 @@ class MaodouClient(botpy.Client):
         if not isinstance(raw_memories, list) or not raw_memories:
             return "要记住什么信息，可以更具体地说一次吗？"
 
-        # pin/temporary 既写在单条上，也允许整条指令一起说（“这条记住，别忘”）
-        intent_pin = bool(intent.get("pin"))
-        intent_temporary = bool(intent.get("temporary"))
+        # 旧意图里可能还带 pin / temporary；现在记忆只有长期一种，直接忽略这两个字段。
         saved = 0
         skipped = 0
-        pinned_saved = 0
         for item in raw_memories:
             if not isinstance(item, dict):
                 skipped += 1
@@ -2124,14 +2109,6 @@ class MaodouClient(botpy.Client):
             if self._is_sensitive_memory(content):
                 skipped += 1
                 continue
-            pin = intent_pin or bool(item.get("pin"))
-            temporary = intent_temporary or bool(item.get("temporary"))
-            scope = "temporary" if temporary else "permanent"
-            expires_at = (
-                (self._now() + timedelta(days=TEMPORARY_MEMORY_DAYS)).isoformat(timespec="seconds")
-                if temporary
-                else None
-            )
             self.store.add_memory_card(
                 group_openid=message.group_openid,
                 kind=self._optional_str(item.get("kind")) or "fact",
@@ -2142,46 +2119,34 @@ class MaodouClient(botpy.Client):
                 ),
                 content=content,
                 source_message_id=message.id,
-                pinned=pin,
-                scope=scope,
-                expires_at=expires_at,
             )
             saved += 1
-            pinned_saved += 1 if pin else 0
 
         if not saved:
             return "这条信息比较敏感，我不保存。"
-        tail = "（已置顶★）" if pinned_saved and pinned_saved == saved else ""
         # 只存进一条时不强制模型报数字，否则「记住啦～」这种最自然的说法会被判成丢事实、
         # 永远退回模板——那等于这个功能在最常用的场景下白做。
         facts = [] if saved == 1 and not skipped else [str(saved)]
         if skipped:
             facts.append(str(skipped))
-        if tail:
-            facts.append("置顶")
         if saved and not skipped:
-            return ActionResult(f"记住了，共 {saved} 条。{tail}", persona=True, facts=facts)
+            return ActionResult(f"记住了，共 {saved} 条。", persona=True, facts=facts)
         return ActionResult(
-            f"记住了 {saved} 条，另有 {skipped} 条涉及敏感信息，我没有保存。{tail}",
+            f"记住了 {saved} 条，另有 {skipped} 条涉及敏感信息，我没有保存。",
             persona=True,
             facts=facts,
         )
 
     def _handle_memory_list(self, intent: dict, message: RichGroupMessage) -> str:
-        pinned_filter: bool | None = None
-        if intent.get("pinned") is not None:
-            pinned_filter = bool(intent.get("pinned"))
         kind = self._optional_str(intent.get("kind"))
         person = self._optional_str(intent.get("person"))
         match = self._optional_str(intent.get("match"))
-        filtered = bool(kind or person or match or pinned_filter is not None)
+        filtered = bool(kind or person or match)
         cards, current, pages, total = self.store.memory_cards_page(
             message.group_openid,
-            now_iso=self._now().isoformat(timespec="seconds"),
             page=max(1, self._int_field(intent.get("page")) or 1),
             kind=kind,
             person=person,
-            pinned=pinned_filter,
             match=match,
         )
         if not total:
@@ -2190,43 +2155,10 @@ class MaodouClient(botpy.Client):
             return "我现在还没有长期记忆。可以直接说：记住她不吃香菜。"
         if not cards:
             return f"记忆一共 {total} 条，只有 {pages} 页，最后一页说“第 {pages} 页记忆”。"
-        header = f"当前长期记忆（第{current}/{pages}页，共{total}条，★=永久）："
+        header = f"当前长期记忆（第{current}/{pages}页，共{total}条）："
         if current < pages:
             header += f"\n想看更多就说“第 {current + 1} 页记忆”。"
         return header + "\n" + self._format_memory_cards(cards)
-
-    def _handle_memory_pin(self, intent: dict, message: RichGroupMessage, *, pinned: bool) -> str:
-        by_id = self._memory_ids_field(intent.get("memory_id"))
-        want_all = bool(intent.get("all"))
-        cards, is_all = self._resolve_memory_targets(intent, message)
-        if not cards:
-            return "没有找到这条记忆。可以说“查看记忆”先看看编号。"
-        # 只有靠内容关键词匹配、又命中多条时才要用户报编号；报了编号或说“全部”就直接批量操作。
-        if not by_id and not want_all and len(cards) > 1:
-            return "匹配到多条记忆，请说编号：\n" + self._format_memory_cards(cards)
-
-        verb = "置顶，以后不会忘" if pinned else "取消置顶"
-        changed = sum(
-            1
-            for card in cards
-            if self.store.set_memory_pinned(message.group_openid, card.id, pinned)
-        )
-        if not changed:
-            return "这些记忆刚刚变动过，麻烦再说一次。"
-        # 方向词是硬事实：pin 和 unpin 的模板只差两个字，模型一旦说反，
-        # 用户会以为标成永久了其实没有，所以「置顶 / 取消置顶」必须原样出现在回复里。
-        direction = "置顶" if pinned else "取消置顶"
-        if len(cards) == 1:
-            return ActionResult(
-                f"已{verb}记忆 {cards[0].id}：{cards[0].content}",
-                persona=True,
-                facts=(direction, str(cards[0].id)),
-            )
-        return ActionResult(
-            f"已{verb}{'全部 ' if is_all else ''}{changed} 条记忆。",
-            persona=True,
-            facts=(direction, str(changed)),
-        )
 
     def _handle_memory_alias(self, intent: dict, message: RichGroupMessage) -> str:
         """统一某个人在记忆里的叫法。
@@ -2436,7 +2368,7 @@ class MaodouClient(botpy.Client):
     @staticmethod
     def _format_memory_cards(cards: list[MemoryCard]) -> str:
         return "\n".join(
-            f"{card.id}. {'★' if card.pinned else ''}[{card.kind}] {card.person}: {card.content}"
+            f"{card.id}. [{card.kind}] {card.person}: {card.content}"
             for card in cards
         )
 

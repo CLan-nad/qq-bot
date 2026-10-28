@@ -105,10 +105,15 @@ class AnniversaryPromptTests(unittest.TestCase):
         self.assertIn("节日表", INTENT_SYSTEM_PROMPT)
 
     def test_memory_actions_are_described(self) -> None:
-        for action in ("memory_pin", "memory_unpin", "memory_alias", "calendar_query"):
+        for action in (
+            "memory_remember", "memory_list", "memory_forget", "memory_alias", "calendar_query"
+        ):
             self.assertIn(action, INTENT_SYSTEM_PROMPT)
-        for field in ('"pin": true', '"temporary": true', "memory_list 输出 page"):
+        for field in ("记忆只有长期一种", "memory_list 输出 page"):
             self.assertIn(field, INTENT_SYSTEM_PROMPT)
+        # 永久/置顶/临时记忆已经下线，提示词里不能再诱导模型输出这些旧概念。
+        for legacy in ("memory_pin", "memory_unpin", '"pin": true', '"temporary": true'):
+            self.assertNotIn(legacy, INTENT_SYSTEM_PROMPT)
         # memory_alias 要说清 op/alias/canonical，且 alias 可为数组一次统一多个
         for field in ("canonical", 'alias=["A","B"]'):
             self.assertIn(field, INTENT_SYSTEM_PROMPT)

@@ -132,7 +132,7 @@ class ExecutedActionsTests(unittest.TestCase):
         prompt = self._capture()
         self.assertIn("本轮实际执行的操作：", prompt)
         self.assertIn(NO_ACTION_NOTE, prompt)
-        for phrase in ("没有调用任何功能", "不要声称已经记住", "已经设成永久"):
+        for phrase in ("没有调用任何功能", "不要声称已经记住", "已经建好提醒"):
             self.assertIn(phrase, prompt)
 
     def test_executed_actions_replace_the_note(self) -> None:

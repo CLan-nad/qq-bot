@@ -96,8 +96,18 @@ class StoreMigrationTests(unittest.TestCase):
             cards = store.memory_cards(GROUP)
             self.assertEqual(len(cards), 1)
             self.assertEqual(cards[0].content, "她的真名叫小虾")
-            self.assertFalse(cards[0].pinned)
-            self.assertEqual(cards[0].scope, "permanent")
+            # 业务对象只暴露长期记忆，不再带置顶/临时标记。
+            for legacy in ("pinned", "scope", "expires_at"):
+                self.assertFalse(hasattr(cards[0], legacy))
+            conn = sqlite3.connect(self.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT pinned, scope, expires_at FROM memory_cards WHERE group_openid = ?",
+                    (GROUP,),
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertEqual(row, (0, "permanent", None))
 
             tasks = store.tasks(GROUP)
             self.assertEqual(len(tasks), 1)
@@ -161,22 +171,58 @@ class StoreMigrationTests(unittest.TestCase):
         finally:
             store.close()
 
-    def test_pinned_and_expiry_survive_migration(self) -> None:
+    def test_legacy_pin_and_expiry_are_normalized_to_long_term(self) -> None:
+        first = ChatStore(self.db_path)
+        first.close()
+
+        # 模拟线上旧库：一张卡曾被置顶、另一张曾被标成 14 天后过期的临时卡。
+        # 业务上它们现在都只是普通长期记忆，启动迁移只清标记，不删任何内容。
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE memory_cards SET pinned = 1, scope = 'permanent' WHERE group_openid = ?",
+                (GROUP,),
+            )
+            conn.execute(
+                """
+                INSERT INTO memory_cards (
+                    group_openid, kind, person, content, scope, expires_at
+                ) VALUES (?, 'fact', '两人', '临时事项', 'temporary', '2026-10-20T00:00:00+08:00')
+                """,
+                (GROUP,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
         store = ChatStore(self.db_path)
         try:
-            card = store.memory_cards(GROUP)[0]
-            self.assertTrue(store.set_memory_pinned(GROUP, card.id, True))
-            self.assertEqual(store.pinned_memory_contents(GROUP), ["她的真名叫小虾"])
-            store.add_memory_card(
-                group_openid=GROUP, kind="fact", person="两人", content="临时事项",
-                scope="temporary", expires_at="2026-10-20T00:00:00+08:00",
+            cards = store.all_memory_cards(GROUP)
+            self.assertEqual(
+                [card.content for card in cards], ["她的真名叫小虾", "临时事项"]
             )
-            live = store.live_memory_cards(GROUP, now_iso="2026-10-14T00:00:00+08:00")
-            self.assertEqual(len(live), 2)
-            expired = store.live_memory_cards(GROUP, now_iso="2026-10-21T00:00:00+08:00")
-            self.assertEqual([c.content for c in expired], ["她的真名叫小虾"])
-            self.assertEqual(store.purge_expired_memories("2027-01-20T00:00:00+08:00"), 1)
-            self.assertEqual(store.count_live_memory_cards(GROUP), 1)
+            self.assertEqual(store.count_memory_cards(GROUP), 2)
+            self.assertFalse(hasattr(store, "set_memory_pinned"))
+            self.assertFalse(hasattr(store, "purge_expired_memories"))
+
+            conn = sqlite3.connect(self.db_path)
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT content, pinned, scope, expires_at
+                    FROM memory_cards WHERE group_openid = ? ORDER BY id
+                    """,
+                    (GROUP,),
+                ).fetchall()
+            finally:
+                conn.close()
+            self.assertEqual(
+                rows,
+                [
+                    ("她的真名叫小虾", 0, "permanent", None),
+                    ("临时事项", 0, "permanent", None),
+                ],
+            )
         finally:
             store.close()
 

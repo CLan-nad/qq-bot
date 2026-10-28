@@ -1,6 +1,6 @@
 """本地操作的确认话也要有小毛豆的人设，但事实必须锁死。
 
-以前 memory_remember / memory_pin / address_set 这些直接回模板字符串，
+以前 memory_remember / memory_forget / address_set 这些直接回模板字符串，
 SYSTEM_PROMPT 里那套人设一个 token 都没参与——这就是「说话死板」的确切来源。
 现在模板当事实凭据交给模型润色，同时守住两条底线：
 失败/歧义路径绝不润色（那些话必须精确可预测），事实丢了就退回模板。
@@ -148,7 +148,7 @@ class PersonaOrRawTests(unittest.TestCase):
         # 失败/歧义路径必须精确可预测：模型一活泼，用户就不知道该报哪个编号了
         llm = FakeLLM(reply="随便说点什么")
         template = "匹配到多条记忆，请说编号：\n1. [fact] CL: 喜欢吃辣"
-        self.assertEqual(self._run("memory_pin", template, llm), template)
+        self.assertEqual(self._run("memory_forget", template, llm), template)
         self.assertEqual(llm.calls, [])
 
     def test_chinese_numeral_counts_as_the_same_fact(self) -> None:
@@ -178,18 +178,6 @@ class PersonaOrRawTests(unittest.TestCase):
             template,
         )
 
-    def test_flipped_pin_direction_falls_back(self) -> None:
-        # 方向说反比死板严重得多：用户会以为标成永久了，其实没有
-        llm = FakeLLM(reply="已经置顶啦，以后不会忘～")
-        template = "已取消置顶记忆 7：生日是农历冬月十一"
-        self.assertEqual(
-            self._run(
-                "memory_unpin",
-                ActionResult(template, persona=True, facts=("取消置顶", "7")),
-                llm,
-            ),
-            template,
-        )
 
     def test_reply_that_contradicts_the_result_falls_back(self) -> None:
         # 真实模型跑出来的翻车样本：模板是「已忘记记忆 2：不吃香菜」，
@@ -295,17 +283,6 @@ class HandlerPersonaFlagTests(unittest.TestCase):
         self.assertTrue(result.persona)
         self.assertEqual(result.facts, ())
 
-    def test_pinned_save_carries_the_pin_fact(self) -> None:
-        result = self.client._handle_memory_remember(
-            {
-                "pin": True,
-                "memories": [{"kind": "fact", "person": "CL", "content": "生日是农历冬月十一"}],
-            },
-            _message(),
-            self.identity,
-        )
-        self.assertTrue(result.persona)
-        self.assertIn("置顶", result.facts)
 
     def test_sensitive_refusal_stays_plain(self) -> None:
         result = self._remember("我的身份证号是 110101199001011234")
@@ -315,24 +292,6 @@ class HandlerPersonaFlagTests(unittest.TestCase):
         result = self.client._handle_memory_remember({"memories": []}, _message(), self.identity)
         self.assertFalse(getattr(result, "persona", False))
 
-    def test_pin_and_unpin_carry_the_direction(self) -> None:
-        self._remember("生日是农历冬月十一")
-        card_id = self.store.memory_cards(GROUP)[0].id
-        pinned = self.client._handle_memory_pin({"memory_id": [card_id]}, _message(), pinned=True)
-        self.assertTrue(pinned.persona)
-        self.assertIn("置顶", pinned.facts)
-        self.assertIn(str(card_id), pinned.facts)
-
-        unpinned = self.client._handle_memory_pin(
-            {"memory_id": [card_id]}, _message(), pinned=False
-        )
-        self.assertTrue(unpinned.persona)
-        self.assertIn("取消置顶", unpinned.facts)
-
-    def test_pin_failure_paths_stay_plain(self) -> None:
-        result = self.client._handle_memory_pin({"memory_id": [999999]}, _message(), pinned=True)
-        self.assertFalse(getattr(result, "persona", False))
-        self.assertIn("没有找到这条记忆", result)
 
     def test_address_set_success_locks_the_address_not_the_display_name(self) -> None:
         result = self.client._handle_address_set(
@@ -407,7 +366,7 @@ class IntentEndToEndTests(unittest.TestCase):
         )
         self.assertEqual(reply, "收到，这两条我都记牢啦～")
         self.assertEqual(len(llm.calls), 1)
-        self.assertEqual(self.store.count_live_memory_cards(GROUP), 2)
+        self.assertEqual(self.store.count_memory_cards(GROUP), 2)
 
     def test_address_set_reaches_the_persona_layer(self) -> None:
         llm = FakeLLM(reply="好嘞主人～")
@@ -599,7 +558,6 @@ class TaskPersonaTests(unittest.TestCase):
 class AddendumTests(unittest.TestCase):
     def test_it_locks_facts_and_forbids_extra_promises(self) -> None:
         self.assertIn("事实一个字都不许改", ACTION_REPLY_ADDENDUM)
-        self.assertIn("置顶 / 取消置顶", ACTION_REPLY_ADDENDUM)
         self.assertIn("取消 / 暂停 / 恢复 / 跳过", ACTION_REPLY_ADDENDUM)
         self.assertIn("任务的时间和标题", ACTION_REPLY_ADDENDUM)
         self.assertIn("不许添加", ACTION_REPLY_ADDENDUM)

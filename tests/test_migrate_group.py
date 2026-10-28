@@ -42,10 +42,10 @@ class MigrateGroupTests(unittest.TestCase):
     # ---------- 造数据 ----------
 
     def seed(self) -> None:
-        # 旧群：两张卡（一张置顶）、叫法统一、称呼、群偏好、任务、摘要
+        # 旧群：两张长期记忆、叫法统一、称呼、群偏好、任务、摘要
         self.store.add_memory_card(group_openid=SRC, kind="fact", person="蔡乐", content="用户叫蔡乐")
         self.store.add_memory_card(
-            group_openid=SRC, kind="preference", person="小虾", content="讲话要俏皮", pinned=True
+            group_openid=SRC, kind="preference", person="小虾", content="讲话要俏皮"
         )
         self.store.set_person_alias(SRC, "罗晓霞", "小虾")
         self.store.set_person_address(SRC, "蔡乐", "主人")
@@ -147,7 +147,6 @@ class MigrateGroupTests(unittest.TestCase):
 
         cards = {card.content: card for card in self.store.memory_cards(DST)}
         self.assertEqual(set(cards), {"用户叫蔡乐", "讲话要俏皮"})
-        self.assertTrue(cards["讲话要俏皮"].pinned)
 
         # 叫法统一和称呼都要跟着走，否则新群里模型又开始乱叫人
         self.assertEqual(self.store.person_aliases(DST), {"罗晓霞": "小虾"})

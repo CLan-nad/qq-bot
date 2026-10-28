@@ -150,59 +150,47 @@ class BotAnniversaryTests(unittest.TestCase):
             cal._ZhDate, cal._LunarDate = zhdate, lunardate
         self.assertIn("任务时间有点问题", reply)
 
-    def test_memory_remember_can_pin_and_expire(self) -> None:
+    def test_memory_remember_ignores_legacy_pin_and_temporary_fields(self) -> None:
         identity = SimpleNamespace(
             requester=SimpleNamespace(username="CL"),
             partner=SimpleNamespace(username="对象"),
         )
         self.client._handle_memory_remember(
             {
+                "pin": True,
+                "temporary": True,
                 "memories": [
                     {"kind": "fact", "person": "她", "content": "她的真名叫小虾", "pin": True},
                     {"kind": "fact", "person": "两人", "content": "周五要修电脑", "temporary": True},
-                ]
+                ],
             },
             _message(),
             identity,
         )
-        cards = {card.content: card for card in self.store.memory_cards(GROUP)}
-        self.assertTrue(cards["她的真名叫小虾"].pinned)
-        self.assertEqual(cards["她的真名叫小虾"].scope, "permanent")
-        self.assertIsNone(cards["她的真名叫小虾"].expires_at)
-        self.assertEqual(cards["周五要修电脑"].scope, "temporary")
-        self.assertEqual(cards["周五要修电脑"].expires_at, "2026-10-28T15:00:00+08:00")
-        self.assertFalse(cards["周五要修电脑"].pinned)
+        rows = self.store._conn.execute(
+            "SELECT content, pinned, scope, expires_at FROM memory_cards WHERE group_openid = ?",
+            (GROUP,),
+        ).fetchall()
+        by_content = {row["content"]: row for row in rows}
+        self.assertEqual(set(by_content), {"她的真名叫小虾", "周五要修电脑"})
+        for row in by_content.values():
+            self.assertEqual(row["pinned"], 0)
+            self.assertEqual(row["scope"], "permanent")
+            self.assertIsNone(row["expires_at"])
 
     def test_memory_list_paginates(self) -> None:
         for index in range(1, 31):
             self.store.add_memory_card(
                 group_openid=GROUP, kind="fact", person="两人", content=f"记忆{index:02d}"
             )
-        self.store.set_memory_pinned(GROUP, 7, True)
         reply = self.client._handle_memory_list({"action": "memory_list"}, _message())
-        self.assertIn("第1/3页，共30条，★=永久", reply)
-        self.assertIn("★[fact]", reply)
+        self.assertIn("第1/3页，共30条）：", reply)
+        self.assertIn("1. [fact] 两人: 记忆01", reply)
+        self.assertNotIn("★", reply)
         self.assertIn("第 2 页记忆", reply)
         page3 = self.client._handle_memory_list({"page": 3}, _message())
         self.assertIn("第3/3页", page3)
         self.assertNotIn("下一页", page3)
-
-    def test_memory_pin_and_unpin_by_match(self) -> None:
-        card = self.store.add_memory_card(
-            group_openid=GROUP, kind="fact", person="她", content="她的真名叫小虾"
-        )
-        reply = self.client._handle_memory_pin(
-            {"match": "真名"}, _message(), pinned=True
-        )
-        self.assertIn(f"已置顶，以后不会忘记忆 {card.id}", reply)
-        self.assertTrue(self.store.find_memory_card_by_id(GROUP, card.id).pinned)
-        reply = self.client._handle_memory_pin(
-            {"memory_id": card.id}, _message(), pinned=False
-        )
-        self.assertIn("已取消置顶", reply)
-        self.assertFalse(self.store.find_memory_card_by_id(GROUP, card.id).pinned)
-        self.assertIn("没有找到这条记忆", self.client._handle_memory_pin(
-            {"match": "不存在的东西"}, _message(), pinned=True))
 
     def _seed_memories(self, count: int = 5) -> list[int]:
         ids = []
@@ -212,24 +200,6 @@ class BotAnniversaryTests(unittest.TestCase):
             )
             ids.append(card.id if card else 0)
         return ids
-
-    def _pinned_ids(self) -> set[int]:
-        return {card.id for card in self.store.memory_cards(GROUP) if card.pinned}
-
-    def test_memory_pin_batch_by_ids(self) -> None:
-        # 线上原话是“把 2、4 设为永久”，memory_id 是数组，老代码整条走空。
-        self._seed_memories()
-        reply = self.client._handle_memory_pin(
-            {"action": "memory_pin", "memory_id": [2, 4]}, _message(), pinned=True
-        )
-        self.assertIn("已置顶，以后不会忘2 条记忆", reply)
-        self.assertEqual(self._pinned_ids(), {2, 4})
-
-    def test_memory_pin_all(self) -> None:
-        self._seed_memories(3)
-        reply = self.client._handle_memory_pin({"all": True}, _message(), pinned=True)
-        self.assertIn("已置顶，以后不会忘全部 3 条记忆", reply)
-        self.assertEqual(self._pinned_ids(), {1, 2, 3})
 
     def test_memory_forget_batch(self) -> None:
         self._seed_memories(5)
@@ -243,33 +213,13 @@ class BotAnniversaryTests(unittest.TestCase):
         self.assertIn("已忘记全部 3 条记忆", reply)
         self.assertEqual(self.store.memory_cards(GROUP), [])
 
-    def test_memory_pin_match_multiple_asks_for_id(self) -> None:
-        # 只给内容关键词又命中多条时必须先让用户报编号，不能自作主张全改。
-        self.store.add_memory_card(group_openid=GROUP, kind="fact", person="她", content="她喜欢吃辣")
-        self.store.add_memory_card(group_openid=GROUP, kind="fact", person="她", content="她喜欢吃冰")
-        reply = self.client._handle_memory_pin({"match": "喜欢吃"}, _message(), pinned=True)
-        self.assertIn("匹配到多条记忆，请说编号", reply)
-        self.assertEqual(self._pinned_ids(), set())
-        # 报了编号就直接批量执行，不再追问。
-        reply = self.client._handle_memory_pin(
-            {"match": "喜欢吃", "memory_id": [1, 2]}, _message(), pinned=True
-        )
-        self.assertIn("已置顶，以后不会忘2 条记忆", reply)
-        self.assertEqual(self._pinned_ids(), {1, 2})
-
     def test_memory_list_filters(self) -> None:
-        card = self.store.add_memory_card(
+        self.store.add_memory_card(
             group_openid=GROUP, kind="preference", person="她", content="她不吃香菜"
         )
         self.store.add_memory_card(
             group_openid=GROUP, kind="fact", person="两人", content="周三要值班"
         )
-        self.store.set_memory_pinned(GROUP, card.id, True)
-
-        reply = self.client._handle_memory_list({"pinned": True}, _message())
-        self.assertIn("共1条", reply)
-        self.assertIn("不吃香菜", reply)
-        self.assertNotIn("周三要值班", reply)
 
         reply = self.client._handle_memory_list({"kind": "fact"}, _message())
         self.assertIn("周三要值班", reply)

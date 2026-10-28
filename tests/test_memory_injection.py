@@ -42,7 +42,7 @@ class MemoryInjectionTests(unittest.TestCase):
             group_openid=GROUP, kind="fact", person="她", content="她的真名叫小虾"
         )
         self._fill(62)
-        self.assertEqual(self.store.count_live_memory_cards(GROUP), 63)
+        self.assertEqual(self.store.count_memory_cards(GROUP), 63)
 
         legacy = [card.content for card in self.store.memory_cards(GROUP, limit=30)]
         self.assertNotIn("fact第1条记忆", legacy)
@@ -55,18 +55,6 @@ class MemoryInjectionTests(unittest.TestCase):
         self.assertIn("fact第62条记忆", contents)
         self.assertEqual(len(prompt_cards), 63)
         self.assertEqual([card.id for card in prompt_cards], sorted(card.id for card in prompt_cards))
-
-    def test_pinned_beats_every_quota_and_cap(self) -> None:
-        self._fill(60)
-        target = self.store.add_memory_card(
-            group_openid=GROUP, kind="fact", person="她", content="她的真名叫小虾"
-        )
-        self.store.set_memory_pinned(GROUP, target.id, True)
-        contents = [
-            card.content
-            for card in self.store.memory_cards_for_prompt(GROUP, total=4)
-        ]
-        self.assertIn("她的真名叫小虾", contents)
 
     def test_rules_beat_episodic_when_budget_is_tight(self) -> None:
         # 旧版按 kind 配额（preference 只给 6 条），可群里实际攒了 25 条，被挤掉的恰好是
@@ -91,32 +79,20 @@ class MemoryInjectionTests(unittest.TestCase):
         self.assertIn("流水第20条", fact_contents)
         self.assertNotIn("流水第1条", fact_contents)
 
-    def test_pinned_cards_always_win(self) -> None:
-        self._fill(50)
-        for memory_id in (1, 2, 3):
-            self.assertTrue(self.store.set_memory_pinned(GROUP, memory_id, True))
-        picked = self.store.memory_cards_for_prompt(GROUP, total=10)
-        self.assertTrue(all(card.pinned for card in picked[:3]))
-        self.assertEqual([card.id for card in picked[:3]], [1, 2, 3])
-        self.assertEqual(
-            self.store.pinned_memory_contents(GROUP),
-            ["fact第1条记忆", "fact第2条记忆", "fact第3条记忆"],
-        )
-
     def test_duplicate_cards_are_collapsed(self) -> None:
-        # 抽取器把同一件事存了好几遍（标点/空格不同也算重复），注入前只留一张，置顶的那张优先。
-        self.store.add_memory_card(
+        # 同一件事存了好几遍（标点/空格不同也算重复）时，注入前只留最早的一张。
+        first = self.store.add_memory_card(
             group_openid=GROUP, kind="preference", person="两人", content="回复不要分点，直接说"
         )
         dup = self.store.add_memory_card(
             group_openid=GROUP, kind="preference", person="两人", content="回复不要分点直接说。"
         )
+        self.assertIsNotNone(first)
         self.assertIsNotNone(dup)
-        self.store.set_memory_pinned(GROUP, dup.id, True)
         picked = self.store.memory_cards_for_prompt(GROUP)
         matches = [card for card in picked if "分点" in card.content]
         self.assertEqual(len(matches), 1)
-        self.assertTrue(matches[0].pinned)
+        self.assertEqual(matches[0].id, first.id)
 
     def test_existing_memory_lines_lists_everything(self) -> None:
         # 去重清单要给全量（不只置顶），否则抽取器看不到已存的条目会重复抽。
@@ -132,35 +108,22 @@ class MemoryInjectionTests(unittest.TestCase):
         self.assertIn("CL 爱吃辣", joined)
         self.assertTrue(all(line.startswith("- [") for line in lines))
 
-    def test_temporary_memories_expire(self) -> None:
+    def test_format_has_no_legacy_marker(self) -> None:
         self.store.add_memory_card(
-            group_openid=GROUP, kind="fact", person="两人", content="永久的",
-        )
-        self.store.add_memory_card(
-            group_openid=GROUP, kind="fact", person="两人", content="临时的",
-            scope="temporary", expires_at="2026-10-20T00:00:00+08:00",
-        )
-        before = self.store.memory_cards_for_prompt(GROUP, now_iso="2026-10-14T00:00:00+08:00")
-        self.assertEqual({card.content for card in before}, {"永久的", "临时的"})
-        after = self.store.memory_cards_for_prompt(GROUP, now_iso="2026-10-21T00:00:00+08:00")
-        self.assertEqual([card.content for card in after], ["永久的"])
-
-    def test_pinned_flag_shows_up_in_text(self) -> None:
-        card = self.store.add_memory_card(
             group_openid=GROUP, kind="fact", person="她", content="她的真名叫小虾"
         )
-        self.store.set_memory_pinned(GROUP, card.id, True)
         text = ChatStore.format_memory_cards(self.store.memory_cards_for_prompt(GROUP))
-        self.assertIn("★", text)
+        self.assertIn("[fact] 她: 她的真名叫小虾", text)
+        self.assertNotIn("★", text)
+        self.assertNotIn("置顶", text)
 
-    def test_pagination_orders_pinned_first_then_oldest(self) -> None:
+    def test_pagination_is_oldest_first(self) -> None:
         self._fill(30)
-        self.store.set_memory_pinned(GROUP, 27, True)
         first, current, pages, total = self.store.memory_cards_page(GROUP, page=1, page_size=12)
         self.assertEqual((current, pages, total), (1, 3, 30))
         self.assertEqual(len(first), 12)
-        self.assertEqual(first[0].id, 27)
-        self.assertEqual(first[1].id, 1)
+        self.assertEqual(first[0].id, 1)
+        self.assertEqual(first[1].id, 2)
         last, current, _, _ = self.store.memory_cards_page(GROUP, page=99, page_size=12)
         self.assertEqual(current, 3)
         self.assertEqual(len(last), 6)
@@ -181,7 +144,7 @@ class MemoryInjectionTests(unittest.TestCase):
 
     def test_memory_cards_page_filters(self) -> None:
         self.store.add_memory_card(
-            group_openid=GROUP, kind="fact", person="小虾", content="她不吃香菜", pinned=True
+            group_openid=GROUP, kind="fact", person="小虾", content="她不吃香菜"
         )
         self.store.add_memory_card(
             group_openid=GROUP, kind="preference", person="小虾", content="她喜欢喝冰美式"
@@ -190,11 +153,8 @@ class MemoryInjectionTests(unittest.TestCase):
             group_openid=GROUP, kind="fact", person="蔡乐", content="蔡乐周三要值班"
         )
 
-        rows, _, _, total = self.store.memory_cards_page(GROUP, pinned=True)
-        self.assertEqual((total, [card.id for card in rows]), (1, [1]))
-
-        rows, _, _, total = self.store.memory_cards_page(GROUP, pinned=False)
-        self.assertEqual((total, sorted(card.id for card in rows)), (2, [2, 3]))
+        all_rows, _, _, total = self.store.memory_cards_page(GROUP)
+        self.assertEqual((total, [card.id for card in all_rows]), (3, [1, 2, 3]))
 
         rows, _, _, total = self.store.memory_cards_page(GROUP, kind="fact")
         self.assertEqual((total, sorted(card.id for card in rows)), (2, [1, 3]))

@@ -10,7 +10,7 @@
 - **聊天记录检索**：能按你的要求翻当前群的历史消息，找相关原话并结合记忆回答；例如「查一下我们之前聊火锅的那几条」。记录按群隔离，新群不会自动继承旧群数据
 - **消息统计**：可以统计今天、最近几天、本周等范围内每个人发了多少条，由本地数据库直接聚合，不靠猜
 - **提醒**：单次、每天、每周、每年、每年农历；重要日子可提前 N 天预热提醒
-- **记忆**：明确说「记住 xx」才入库，可置顶（★）；「先记一下」只保留 14 天；日常闲聊只压成摘要，不会自己往记忆里塞
+- **记忆**：明确说「记住 xx」才入库，只有长期记忆一种；日常闲聊只压成摘要，不会自己往记忆里塞
 - **节日日历**：公历农历互查，「中秋是几号」「最近有什么节日」
 - **主动关心**：没被 @ 时也能察觉「累了 / 心情不好 / 肚子疼」，接一句 25 字以内的关心
 - **表情包**：16 张大耳帽兜主题表情图，先发文字再单独发图，一条回复最多一张
@@ -73,7 +73,7 @@ flowchart LR
 
 ### 消息与 action 分支
 
-群里每条消息只有两个出口：没 @ 小毛豆时走主动关心；@ 了才进入主流程，由 `parse_intent` 分类到 17 个 action，再汇合到统一出站。
+群里每条消息只有两个出口：没 @ 小毛豆时走主动关心；@ 了才进入主流程，由 `parse_intent` 分类到 15 个 action，再汇合到统一出站。
 
 ```mermaid
 flowchart TD
@@ -93,7 +93,7 @@ flowchart TD
     CTX --> INTENT["parse_intent<br/>输出 JSON action"]
 
     INTENT --> TASK["任务 6 个<br/>create · list · cancel<br/>pause · resume · skip"]
-    INTENT --> MEMORY["记忆 6 个<br/>remember · list · pin<br/>unpin · forget · alias"]
+    INTENT --> MEMORY["记忆 4 个<br/>remember · list<br/>forget · alias"]
     INTENT --> PREF["身份与设置 2 个<br/>address_set · bot_pref"]
     INTENT --> CALENDAR["节日 1 个<br/>calendar_query"]
     INTENT --> AGENT["工具 1 个<br/>agent_run"]
@@ -139,19 +139,19 @@ flowchart TD
 | 本次要回应 | 当前这条 @ 消息 | 去掉 @ 和表情标记；看图结果单独标成〔图〕，不混进用户原话 |
 | 【更早的背景】 | 上一话题末尾 | 最多 4000 字，只用来理解语气，不主动翻旧账 |
 | 【最近聊天概要】 | `conversation_summaries` | 最近 2 段，总计最多 900 字；只由后台把日常闲聊压成摘要 |
-| 【长期记忆】 | `memory_cards` | 只装稳定事实，按置顶、类型配额和字符预算选取，不混入对话摘要 |
+| 【长期记忆】 | `memory_cards` | 只装稳定事实，按类型优先级和字符预算选取，不混入对话摘要 |
 | 表情 / 检索结果 / 本轮操作 | 运行时生成 | 明确告诉模型这轮到底做了什么，避免它声称「记住了」「查过了」但实际没执行 |
 
-长期记忆不会从日常聊天自动抽取：只有群里明确说「记住 xx」才写 `memory_cards`；「先记一下」会带 14 天过期时间。后台摘要只是聊天梗概，和长期记忆是两套数据。
+长期记忆不会从日常聊天自动抽取：只有群里明确说「记住 xx」才写 `memory_cards`。后台摘要只是聊天梗概，和长期记忆是两套数据。
 
 ### 意图与工具
 
-意图解析器共 17 个 action：
+意图解析器共 15 个 action：
 
 | 类别 | action | 执行方式 |
 | --- | --- | --- |
 | 定时任务 | `task_create`、`task_list`、`task_cancel`、`task_pause`、`task_resume`、`task_skip` | `bot.py` 本地 handler + SQLite |
-| 长期记忆 | `memory_remember`、`memory_list`、`memory_pin`、`memory_unpin`、`memory_forget`、`memory_alias` | `bot.py` 本地 handler + SQLite |
+| 长期记忆 | `memory_remember`、`memory_list`、`memory_forget`、`memory_alias` | `bot.py` 本地 handler + SQLite |
 | 身份与群设置 | `address_set`、`bot_pref` | 写称呼表 / 群偏好表，群偏好优先于 `.env` |
 | 节日查询 | `calendar_query` | `calendar.py` 直接计算 |
 | 工具任务 | `agent_run` | `agent.py` 的 function-calling 循环 |
@@ -184,7 +184,7 @@ flowchart TD
 | --- | --- |
 | `messages` | 群消息原文、发送者、时间、来源；另有 FTS5 全文索引用于历史检索 |
 | `processed_at_messages` | @ 事件去重 |
-| `memory_cards` | 长期记忆：内容、类型、人物、置顶、临时过期时间和来源消息 |
+| `memory_cards` | 长期记忆：内容、类型、人物和来源消息 |
 | `conversation_summaries` | 后台生成的聊天摘要，按消息 `row_id` 区间归档 |
 | `scheduled_tasks` | 提醒与定时消息，包含周期、农历字段、提前天数和预热任务关联 |
 | `person_aliases` / `person_addresses` | 同一个人的多种叫法，以及机器人该怎么称呼 |
@@ -198,7 +198,7 @@ flowchart TD
 `on_ready` 后会启动一个后台循环：
 
 - 每 `MAODOU_SCHEDULER_INTERVAL_SECONDS`（默认 30 秒）检查到期任务，发送后计算下一次运行时间。
-- 每 `MAODOU_MEMORY_INTERVAL_SECONDS`（默认 300 秒）把攒够的消息压成摘要，并清理过期临时记忆。
+- 每 `MAODOU_MEMORY_INTERVAL_SECONDS`（默认 300 秒）把攒够的消息压成摘要。
 - 未 @ 的消息先过 `care.py` 关键词预筛，再交给便宜模型判断要不要关心；同人冷却、每人每日上限、每群主动消息上限和 `care_log` 去重共同限流。
 
 ### 模型接口与扩展点
@@ -207,7 +207,7 @@ flowchart TD
 
 | 调用 | 用途 |
 | --- | --- |
-| `parse_intent()` | 自然语言 → 17 种 action 的 JSON |
+| `parse_intent()` | 自然语言 → 15 种 action 的 JSON |
 | `generate_reply()` | 普通聊天，按上下文分层组装 prompt |
 | `generate_tool_reply()` | 一步式工具、action 确认和结构化统计的人设化表达；不参与 `agent_run` 的最终收口 |
 | `describe_image()` | 视觉模型描述图片；失败自动重试并升到 `high` |
