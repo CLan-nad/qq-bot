@@ -153,6 +153,23 @@ class AckTests(unittest.TestCase):
     def test_ack_actions_cover_slow_tools(self) -> None:
         self.assertIn("agent_run", bot_module.ACK_ACTIONS)
 
+    def test_voice_chat_uses_the_chat_ack_and_never_the_tool_ack(self) -> None:
+        client, message, sent = _client()
+
+        async def slow():
+            await asyncio.sleep(0.2)
+            return "晚安"
+
+        acked = asyncio.run(
+            client._answer_with_ack(
+                **_args(client, message, "voice_chat", slow)
+            )
+        )
+        self.assertTrue(acked)
+        self.assertEqual(sent, [(1, ACK_TEXT_CHAT), (2, "晚安")])
+        self.assertIn("voice_chat", bot_module.ACK_ACTIONS)
+        self.assertNotEqual(ACK_TEXT_CHAT, ACK_TEXT)
+
     def test_slow_chat_acks_with_thinking_text(self) -> None:
         client, message, sent = _client()
 

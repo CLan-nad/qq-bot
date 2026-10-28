@@ -6,6 +6,8 @@
 
 - **聊天**：接话、开新话题、总结刚才聊了什么
 - **看图**：聊天截图、照片、表情包都能认；连发多张后 @ 它，会先看最近一批（默认最多 9 张），同一张图只识别一次
+- **听语音**：优先读取 QQ 自带转写；先发语音、下一条再 @ 也能补听，转写会进入当前话题和历史记录
+- **发语音**：明确说「发语音 / 用语音说」时，先发完整文字，再用下一条单独发 QQ 语音；语音失败不影响文字
 - **搜索与阅读**：联网搜索、总结网页，读 PDF / Word / Excel / 文本，算数或在受限沙箱里跑命令
 - **聊天记录检索**：能按你的要求翻当前群的历史消息，找相关原话并结合记忆回答；例如「查一下我们之前聊火锅的那几条」。记录按群隔离，新群不会自动继承旧群数据
 - **消息统计**：可以统计今天、最近几天、本周等范围内每个人发了多少条，由本地数据库直接聚合，不靠猜
@@ -28,6 +30,7 @@
 @小毛豆 搜一下周末上海有哪些展览
 @小毛豆 查一下我们之前说火锅的那几条
 @小毛豆 最近一周我们谁发得多
+@小毛豆 发语音说晚安
 ```
 
 ## 运行
@@ -46,6 +49,8 @@ QQ 开放平台选 WebSocket 连接，并开启接收群消息。
 deep 工具循环需要多步规划，使用 `MAODOU_DEEP_REASONING_EFFORT=high`。
 闲聊类消息要先做一次意图分类、再生成回复，所以意图解析单独走快模型：默认 `deepseek-flash` +
 `none`（`MAODOU_INTENT_MODEL` / `MAODOU_INTENT_REASONING_EFFORT`），最终回复仍用 `MAODOU_MODEL`，人设不受影响。
+发语音默认走无需额外 key 的 Edge 中文神经语音；也可以在 `.env` 配置 OpenAI-compatible TTS。
+收语音优先使用 QQ 消息里的 `asr_refer_text`，缺失时才调用可选的外部 ASR。
 
 ## 代码架构
 
@@ -56,9 +61,9 @@ flowchart LR
     MAIN["main.py + config.py<br/>装配配置、数据库、模型与 QQ 客户端"]
     QQ["QQ 群消息"]
     BOT["bot.py<br/>消息流水线 · 意图分发 · 后台任务 · 出站"]
-    UNDERSTAND["理解层<br/>llm · topics · images · care"]
+    UNDERSTAND["理解层<br/>llm · topics · images · voice · care"]
     EXECUTE["执行层<br/>agent · tools · scheduling · calendar"]
-    EXPRESS["表达层<br/>stickers"]
+    EXPRESS["表达层<br/>replies · stickers · voice"]
     DB[("SQLite<br/>data/maodou.sqlite3")]
 
     MAIN --> BOT
@@ -73,7 +78,7 @@ flowchart LR
 
 ### 消息与 action 分支
 
-群里每条消息只有两个出口：没 @ 小毛豆时走主动关心；@ 了才进入主流程，由 `parse_intent` 分类到 15 个 action，再汇合到统一出站。
+群里每条消息只有两个出口：没 @ 小毛豆时走主动关心；@ 了才进入主流程，由 `parse_intent` 分类到 16 个 action，再汇合到统一出站。
 
 ```mermaid
 flowchart TD
@@ -86,10 +91,10 @@ flowchart TD
     CARE -->|否| QUIET
 
     AT -->|是| SAVE["按 message_id + msg_seq 去重<br/>消息入库"]
-    SAVE --> IMG{"本条带图<br/>或前面还有待识别图？"}
-    IMG -->|是| VISION["并行识图<br/>先垫一句「我看看图」"]
-    IMG -->|否| CTX["组装上下文"]
-    VISION --> CTX
+    SAVE --> MEDIA{"本条带图/语音<br/>或前面还有待处理媒体？"}
+    MEDIA -->|是| READ["并行识图 / 语音转写<br/>先垫一句「我看看 / 听听」"]
+    MEDIA -->|否| CTX["组装上下文"]
+    READ --> CTX
     CTX --> INTENT["parse_intent<br/>输出 JSON action"]
 
     INTENT --> TASK["任务 6 个<br/>create · list · cancel<br/>pause · resume · skip"]
@@ -97,6 +102,7 @@ flowchart TD
     INTENT --> PREF["身份与设置 2 个<br/>address_set · bot_pref"]
     INTENT --> CALENDAR["节日 1 个<br/>calendar_query"]
     INTENT --> AGENT["工具 1 个<br/>agent_run"]
+    INTENT --> VOICE["语音 1 个<br/>voice_chat"]
     INTENT --> CHAT["聊天 1 个<br/>chat"]
 
     TASK --> LOCAL["确定性 handler<br/>读写 SQLite"]
@@ -109,6 +115,7 @@ flowchart TD
     TOOLS --> TOOL_REPLY["循环持有完整证据<br/>直接生成最终回答"]
 
     CHAT --> REPLY["generate_reply<br/>人设化回复"]
+    VOICE --> REPLY
 
     LOCAL --> POLISH["按需人设润色<br/>列表、报错和多条匹配保原文"]
     CALC --> FINAL["出站加工"]
@@ -117,7 +124,10 @@ flowchart TD
     POLISH --> FINAL
 
     FINAL --> TEXT["长回复按自然边界拆条<br/>每条使用连续 msg_seq"]
-    TEXT --> STICKER["如有表情包<br/>再单独发一张图"]
+    TEXT --> EXTRA{"还需要富媒体？"}
+    EXTRA -->|表情包| STICKER["用下一个 msg_seq<br/>单独发一张图"]
+    EXTRA -->|语音| SPEECH["用下一个 msg_seq<br/>单独发一条语音"]
+    EXTRA -->|否| DONE["本轮结束"]
 ```
 
 几个实现细节：
@@ -126,7 +136,9 @@ flowchart TD
 - `agent_run` 在同一个工具循环里持有完整证据并直接收口，不再做第二次润色，避免搜索结果在转述时丢失。最终落笔使用低思考预算和更大的正文 token 预算；若模型仍以 `finish_reason=length` 或悬空符号停下，会从断点续写，最多补两次。
 - 最终提示词按输出契约分层：全局 `SYSTEM_PROMPT` 负责人设与交流方式；`chat` 直接用全局提示词；本地 action、fast 查询、deep 调研、结构化统计分别追加自己的事实和长度约束。
 - 图片按字节 SHA-256 缓存描述；识图与回复并行，所以用户通常先看到「我看看图」，随后才收到正式答案。
-- 长回复不会在发送前按字符数硬裁；发送层按空行、换行、句号等自然边界拆成多条，每条使用连续且唯一的 `msg_seq`。文字全部发完后，才用下一个 `msg_seq` 单独发表情图。中途失败不会重发已经送达的前文。
+- 语音转写会写回 SQLite，后续当前话题、历史检索和后台摘要都能看到；QQ 自带 ASR 缺失时才调用可选的外部 ASR。
+- 长回复不会在发送前按字符数硬裁；发送层按空行、换行、句号等自然边界拆成多条，每条使用连续且唯一的 `msg_seq`。文字全部发完后，才用下一个 `msg_seq` 单独发表情图或语音。中途失败不会重发已经送达的前文。
+- `voice_chat` 只在用户明确要求发语音时触发，普通聊天不会自动转成语音；TTS、上传或语音发送失败时保留已送达文字，绝不重发正文。语音回复不附表情包。
 
 ### 上下文工程
 
@@ -136,7 +148,7 @@ flowchart TD
 | --- | --- | --- |
 | 身份信息 | `IdentityContext` | 当前触发者、另一位成员、登记过的称呼、显示名与说话人标签的对应关系 |
 | 【当前话题】 | `topics.split_topic()` | 从最新消息往回扫；相邻间隔超过 45 分钟、达到 40 条或跨度超过 12 小时就切断 |
-| 本次要回应 | 当前这条 @ 消息 | 去掉 @ 和表情标记；看图结果单独标成〔图〕，不混进用户原话 |
+| 本次要回应 | 当前这条 @ 消息 | 去掉 @ 和表情标记；看图/听语音结果单独标成〔图〕/〔语音〕，不混进用户原话 |
 | 【更早的背景】 | 上一话题末尾 | 最多 4000 字，只用来理解语气，不主动翻旧账 |
 | 【最近聊天概要】 | `conversation_summaries` | 最近 2 段，总计最多 900 字；只由后台把日常闲聊压成摘要 |
 | 【长期记忆】 | `memory_cards` | 只装稳定事实，按类型优先级和字符预算选取，不混入对话摘要 |
@@ -146,7 +158,7 @@ flowchart TD
 
 ### 意图与工具
 
-意图解析器共 15 个 action：
+意图解析器共 16 个 action：
 
 | 类别 | action | 执行方式 |
 | --- | --- | --- |
@@ -155,6 +167,7 @@ flowchart TD
 | 身份与群设置 | `address_set`、`bot_pref` | 写称呼表 / 群偏好表，群偏好优先于 `.env` |
 | 节日查询 | `calendar_query` | `calendar.py` 直接计算 |
 | 工具任务 | `agent_run` | `agent.py` 的 function-calling 循环 |
+| 语音回复 | `voice_chat` | 先用普通聊天生成正文，文字发完后单独合成并发送一条语音 |
 | 普通聊天 | `chat` | `llm.generate_reply()` |
 
 本地 action 先由代码算出可靠结果，再决定要不要让模型润色：成功确认可以换语气，但编号、报错和「匹配到多条」这类信息保持原样；模型若改写后丢了事实或把成功说成失败，会退回模板。
@@ -207,7 +220,7 @@ flowchart TD
 
 | 调用 | 用途 |
 | --- | --- |
-| `parse_intent()` | 自然语言 → 15 种 action 的 JSON |
+| `parse_intent()` | 自然语言 → 16 种 action 的 JSON |
 | `generate_reply()` | 普通聊天，按上下文分层组装 prompt |
 | `generate_tool_reply()` | 一步式工具、action 确认和结构化统计的人设化表达；不参与 `agent_run` 的最终收口 |
 | `describe_image()` | 视觉模型描述图片；失败自动重试并升到 `high` |
@@ -237,6 +250,6 @@ flowchart TD
 
 ## 隐私
 
-聊天记录、图片描述和长期记忆都存在部署机器本地；生成回复时只把所需上下文发给配置的大模型服务。图片只在内存里识别，落盘的是内容指纹和一段文字描述，原图不保存。`.env` 已加入 `.gitignore`，密钥不会提交。
+聊天记录、媒体转写、图片描述和长期记忆都存在部署机器本地；生成回复时只把所需上下文发给配置的大模型服务。图片和语音原文件只在内存中识别/转写，原文件不落盘；数据库保存消息元数据、临时媒体 URL、图片文字指纹和语音转写。发送语音时，待朗读文本会交给 Edge TTS 或你配置的 TTS 服务。`.env` 已加入 `.gitignore`，密钥不会提交。
 
 表情图由群主提供，版权归原权利人，仅供私人群内使用。

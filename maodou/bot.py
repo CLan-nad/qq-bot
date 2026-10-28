@@ -61,6 +61,16 @@ from .tools import (
     run_shell,
     search_web,
 )
+from .voice import (
+    VoiceAttachment,
+    VoiceReply,
+    VoiceSynthesizer,
+    VoiceTranscriber,
+    message_with_unrecognized_voice,
+    message_with_voice_transcripts,
+    needs_voice_transcript,
+    voice_attachments,
+)
 
 
 logger = logging.getLogger("maodou")
@@ -107,7 +117,7 @@ ROLE_LABELS = {
 # chat 也在里面：它是占比最高的一类，带图或模型排队时同样会卡十几秒，
 # 而 ack 只在超过 ack_after_seconds 才发，快的时候一条消息都不会多。
 ACK_ACTIONS = frozenset(
-    {"chat", "agent_run"}
+    {"chat", "voice_chat", "agent_run"}
 )
 TASK_SCHEDULE_TYPES = frozenset({"once", "daily", "weekly", "yearly", "lunar_yearly"})
 
@@ -241,6 +251,8 @@ ACK_TEXT = "稍等，我查一下～"
 ACK_TEXT_CHAT = "我想想～"
 ACK_TEXT_IMAGE = "我看看图～"
 ACK_TEXT_IMAGES = "我一张张看～"
+ACK_TEXT_VOICE = "我听听～"
+ACK_TEXT_VOICE_IMAGES = "我看看图、听听语音～"
 FALLBACK_TEXT = "小毛豆刚刚走神了，稍后再 @ 我一次试试。"
 
 # 只 @ 一下不说话，该怎么接？以前的答案是代码替它决定的：把空消息硬填成
@@ -321,6 +333,10 @@ class MaodouClient(botpy.Client):
         self.settings = settings
         self.store = store
         self.llm = llm
+        # 语音是可插拔能力：QQ 自带 ASR 优先，TTS/ASR 没配好时分别退回
+        # “只看文字”和“不调用外部服务”，不能让缺失配置拦住启动。
+        self.voice_synthesizer = VoiceSynthesizer(settings)
+        self.voice_transcriber = VoiceTranscriber(settings)
         # 表情包：清单在 assets/stickers/manifest.json。读不到就当没有这个能力，
         # 静默降级成纯文字，不能让一个坏掉的素材目录把机器人拦在启动之外。
         sticker_dir = str(getattr(settings, "sticker_dir", "") or "")
@@ -605,6 +621,102 @@ class MaodouClient(botpy.Client):
             if enriched != stored.content:
                 self.store.update_message_content(group_openid, stored.message_key, enriched)
             logger.info("pending image described: %s", stored.message_key)
+        return used
+
+    async def _transcribe_voice_attachments(
+        self,
+        attachments: list[VoiceAttachment],
+    ) -> list[str]:
+        transcripts: list[str] = []
+        for attachment in attachments:
+            try:
+                transcript = await self.voice_transcriber.transcribe(attachment)
+            except Exception:
+                logger.exception("failed to transcribe voice attachment")
+                transcript = ""
+            transcripts.append((transcript or "").strip())
+        return transcripts
+
+    def _pending_voice_batch(
+        self,
+        group_openid: str,
+        *,
+        exclude_key: str,
+        budget: int,
+    ) -> list[tuple[StoredMessage, list[VoiceAttachment]]]:
+        """收集「先连续发语音、下一条文字再 @」时的那批语音。
+
+        和图片批次一样，只从最新往回扫连续的一批；遇到普通文字或已经处理过的
+        语音就停止，避免把很久以前、链接早已失效的语音重新拖进来。
+        """
+        if budget <= 0:
+            return []
+        selected: list[tuple[StoredMessage, list[VoiceAttachment]]] = []
+        remaining = budget
+        for stored in reversed(
+            self.store.recent_messages_with_raw(
+                group_openid,
+                max(int(getattr(self.settings, "recent_messages", 60) or 60), budget),
+            )
+        ):
+            if stored.message_key == exclude_key or stored.role == "bot":
+                continue
+            attachments = voice_attachments(stored.raw)
+            if attachments and needs_voice_transcript(stored.content, stored.raw):
+                taken = attachments[:remaining]
+                if taken:
+                    selected.append((stored, taken))
+                    remaining -= len(taken)
+                if remaining <= 0:
+                    break
+                continue
+            break
+        selected.reverse()
+        return selected
+
+    async def _transcribe_pending_voice_batch(
+        self,
+        group_openid: str,
+        *,
+        exclude_key: str,
+        budget: int,
+        batch: list[tuple[StoredMessage, list[VoiceAttachment]]] | None = None,
+    ) -> int:
+        """同步转写最近一批语音并立刻回写数据库，返回处理条数。"""
+        if budget <= 0:
+            return 0
+        items = (
+            batch
+            if batch is not None
+            else self._pending_voice_batch(
+                group_openid,
+                exclude_key=exclude_key,
+                budget=budget,
+            )
+        )
+        used = 0
+        for stored, attachments in items:
+            logger.info(
+                "transcribing pending voice batch synchronously: %s (%s voice(s))",
+                stored.message_key,
+                len(attachments),
+            )
+            transcripts = await self._transcribe_voice_attachments(attachments)
+            used += len(attachments)
+            if any(transcripts):
+                enriched = message_with_voice_transcripts(stored.content, transcripts)
+            else:
+                logger.warning(
+                    "voice transcript empty for pending message %s, marking unrecognized",
+                    stored.message_key,
+                )
+                enriched = message_with_unrecognized_voice(stored.content)
+            if enriched != stored.content:
+                self.store.update_message_content(
+                    group_openid,
+                    stored.message_key,
+                    enriched,
+                )
         return used
 
     def _queue_image_backfill(self, group_openid: str, *, exclude_key: str, budget: int) -> None:
@@ -1072,64 +1184,130 @@ class MaodouClient(botpy.Client):
 
         self._save_message(message, source)
 
-        # 图片描述写回本地库，最近上下文、长期记忆、历史检索都能看到图片内容。
+        # 图片描述和语音转写都写回本地库，最近上下文、长期记忆、历史检索都能读到。
         content = normalize_face_tags(message.content).strip()
         descriptions: list[str] = []
-        budget = self.settings.vision_max_images_per_request
-        has_attachments = False
+        voice_transcripts: list[str] = []
+        image_budget = max(
+            0, int(getattr(self.settings, "vision_max_images_per_request", 0) or 0)
+        )
+        voice_budget = max(
+            0, int(getattr(self.settings, "asr_max_per_request", 5) or 0)
+        )
         pre_acked = False
         ack_task: asyncio.Task[bool] | None = None
-        if budget > 0:
-            attachments = image_attachments(message.raw)[:budget]
-            pending_batch: list[tuple[StoredMessage, list[ImageAttachment]]] = []
-            planned_images = len(attachments)
-            if not attachments:
-                pending_batch = self._pending_image_batch(
-                    message.group_openid,
-                    exclude_key=key,
-                    budget=budget,
+
+        current_images = (
+            image_attachments(message.raw)[:image_budget] if image_budget > 0 else []
+        )
+        pending_image_batch: list[tuple[StoredMessage, list[ImageAttachment]]] = []
+        if image_budget > 0 and not current_images:
+            pending_image_batch = self._pending_image_batch(
+                message.group_openid,
+                exclude_key=key,
+                budget=image_budget,
+            )
+        planned_images = len(current_images) + sum(
+            len(items) for _, items in pending_image_batch
+        )
+
+        current_voices = (
+            voice_attachments(message.raw)[:voice_budget] if voice_budget > 0 else []
+        )
+        pending_voice_batch: list[tuple[StoredMessage, list[VoiceAttachment]]] = []
+        if voice_budget > 0 and not current_voices:
+            pending_voice_batch = self._pending_voice_batch(
+                message.group_openid,
+                exclude_key=key,
+                budget=voice_budget,
+            )
+        planned_voices = len(current_voices) + sum(
+            len(items) for _, items in pending_voice_batch
+        )
+
+        if planned_images > 0 or planned_voices > 0:
+            # 下载识图或调 ASR 都可能卡几秒。图片和语音共用一次 ack，避免用户
+            # 同时收到「我看看图」和「我听听」两条垫场；正式回复从 seq=2 开始。
+            if planned_images > 0 and planned_voices > 0:
+                ack_text = ACK_TEXT_VOICE_IMAGES
+            elif planned_voices > 0:
+                ack_text = ACK_TEXT_VOICE
+            else:
+                ack_text = ACK_TEXT_IMAGES if planned_images > 1 else ACK_TEXT_IMAGE
+            ack_task = asyncio.create_task(
+                self._send_reply(
+                    message,
+                    ack_text,
+                    1,
+                    f"{source}:ACK_MEDIA",
+                    attempts=1,
+                    proactive_fallback=False,
+                    remember=False,
                 )
-                planned_images = sum(len(items) for _, items in pending_batch)
-            if planned_images > 0:
-                # 看图要下载 + 调视觉模型，单张也得等好几秒。先垫一句让用户知道在看，
-                # 正式回答改用 msg_seq=2；ack 后台发，和识图并行，不额外拖慢整体速度。
-                ack_task = asyncio.create_task(
-                    self._send_reply(
-                        message,
-                        ACK_TEXT_IMAGES if planned_images > 1 else ACK_TEXT_IMAGE,
-                        1,
-                        f"{source}:ACK_IMAGE",
-                        attempts=1,
-                        proactive_fallback=False,
-                        remember=False,
+            )
+
+        if current_images:
+            descriptions = await self._describe_attachments(
+                current_images, hint=content
+            )
+            image_budget -= len(current_images)
+            if any(description.strip() for description in descriptions):
+                enriched = message_with_image_descriptions(content, descriptions)
+                if enriched != content:
+                    self.store.update_message_content(
+                        message.group_openid, key, enriched
                     )
+                content = enriched
+        if not current_images and image_budget > 0:
+            # 图片先单独发、下一条再 @ 问图：这一轮必须先把最近一批看完，
+            # 否则 prompt 已经组装完，后台识别再快也赶不上当前回复。
+            used = await self._describe_pending_image_batch(
+                message.group_openid,
+                exclude_key=key,
+                budget=image_budget,
+                batch=pending_image_batch,
+            )
+            image_budget -= used
+
+        if current_voices:
+            voice_transcripts = await self._transcribe_voice_attachments(
+                current_voices
+            )
+            voice_budget -= len(current_voices)
+            if any(voice_transcripts):
+                enriched = message_with_voice_transcripts(
+                    content, voice_transcripts
                 )
-            if attachments:
-                has_attachments = True
-                descriptions = await self._describe_attachments(attachments, hint=content)
-                budget -= len(attachments)
-                if any(description.strip() for description in descriptions):
-                    enriched = message_with_image_descriptions(content, descriptions)
-                    if enriched != content:
-                        self.store.update_message_content(message.group_openid, key, enriched)
-                    content = enriched
-            if not has_attachments and budget > 0:
-                # 图片先单独发、下一条再 @ 问图：这一轮必须先把最近一批看完，
-                # 否则 prompt 已经组装完，后台识别再快也赶不上当前回复。
-                used = await self._describe_pending_image_batch(
-                    message.group_openid,
-                    exclude_key=key,
-                    budget=budget,
-                    batch=pending_batch,
+            else:
+                logger.warning(
+                    "voice transcript empty for current message %s, marking unrecognized",
+                    key,
                 )
-                budget -= used
-            if ack_task is not None:
-                try:
-                    pre_acked = await ack_task
-                except Exception:
-                    logger.exception("failed to send image ack")
-                    pre_acked = False
-            self._queue_image_backfill(message.group_openid, exclude_key=key, budget=budget)
+                enriched = message_with_unrecognized_voice(content)
+            if enriched != content:
+                self.store.update_message_content(
+                    message.group_openid, key, enriched
+                )
+            content = enriched
+        if not current_voices and voice_budget > 0:
+            # 语音先单独发、下一条文字再 @：先同步转写最近一批，再组装话题。
+            used = await self._transcribe_pending_voice_batch(
+                message.group_openid,
+                exclude_key=key,
+                budget=voice_budget,
+                batch=pending_voice_batch,
+            )
+            voice_budget -= used
+
+        if ack_task is not None:
+            try:
+                pre_acked = await ack_task
+            except Exception:
+                logger.exception("failed to send media ack")
+                pre_acked = False
+        self._queue_image_backfill(
+            message.group_openid, exclude_key=key, budget=image_budget
+        )
 
         requester = StoredMessage(
             username=message.username,
@@ -1146,14 +1324,12 @@ class MaodouClient(botpy.Client):
             acked = pre_acked
             try:
                 bot_mention = self._bot_mention(message)
-                raw_request = normalize_face_tags(message.content).strip()
+                raw_request = content
                 request = (
                     self._strip_bot_mention(raw_request, bot_mention)
                     if bot_mention
                     else raw_request
                 )
-                if descriptions:
-                    request = message_with_image_descriptions(request, descriptions)
                 request = request or EMPTY_AT_REQUEST
 
                 intent_started = time.perf_counter()
@@ -1190,6 +1366,11 @@ class MaodouClient(botpy.Client):
                     intent_ms,
                     (time.perf_counter() - started) * 1000,
                     len(descriptions),
+                )
+                logger.info(
+                    "perf voice action=%s transcripts=%d",
+                    action,
+                    len(voice_transcripts),
                 )
             except Exception:
                 logger.exception("failed to generate or send reply")
@@ -1238,36 +1419,61 @@ class MaodouClient(botpy.Client):
         )
         return rendered, sticker
 
-    async def _upload_group_image(self, group_openid: str, sticker: Sticker) -> str:
-        """把图传上去换 file_info。
-
-        qq-botpy 1.2.1 的 post_group_file 只收 url，本地文件塞不进去，所以直接打
-        /v2/groups/{group_openid}/files 这个接口：file_data 走 base64、srv_send_msg
-        关掉（图只上传，发不发由下一条消息决定）。2026-10-16 用同一份参数实测 200。
-        """
+    async def _upload_group_media(
+        self,
+        group_openid: str,
+        data: bytes,
+        *,
+        file_type: int,
+        label: str,
+    ) -> str:
+        """上传图片/语音等富媒体，返回下一条消息要用的 file_info。"""
         http = getattr(self.api, "_http", None)
         if http is None:
             return ""
         started = time.perf_counter()
-        data = await asyncio.to_thread(sticker.read)
         route = Route("POST", "/v2/groups/{group_openid}/files", group_openid=group_openid)
         result = await http.request(
             route,
             json={
-                "file_type": 1,
+                "file_type": file_type,
                 "file_data": base64.b64encode(data).decode("ascii"),
                 "srv_send_msg": False,
             },
         )
         file_info = str((result or {}).get("file_info") or "")
         logger.info(
-            "perf sticker upload=%s %.0fms bytes=%d ok=%s",
-            sticker.name,
+            "perf media upload=%s type=%s %.0fms bytes=%d ok=%s",
+            label,
+            file_type,
             (time.perf_counter() - started) * 1000,
             len(data),
             bool(file_info),
         )
         return file_info
+
+    async def _upload_group_image(self, group_openid: str, sticker: Sticker) -> str:
+        """把本地表情图传上去换 file_info。
+
+        qq-botpy 1.2.1 的 post_group_file 只收 url，本地文件塞不进去，所以直接打
+        /v2/groups/{group_openid}/files 这个接口。
+        """
+        data = await asyncio.to_thread(sticker.read)
+        return await self._upload_group_media(
+            group_openid,
+            data,
+            file_type=1,
+            label=sticker.name,
+        )
+
+    async def _upload_group_voice(self, group_openid: str, data: bytes) -> str:
+        """上传一段语音，file_type=3 对应 QQ 群语音富媒体。"""
+        return await self._upload_group_media(
+            group_openid,
+            data,
+            file_type=3,
+            label="voice",
+        )
 
     async def _post_sticker_message(
         self,
@@ -1293,6 +1499,34 @@ class MaodouClient(botpy.Client):
         await self.api.post_group_message(**payload)
         logger.info(
             "perf sticker send seq=%s %.0fms",
+            msg_seq,
+            (time.perf_counter() - started) * 1000,
+        )
+
+    async def _post_voice_message(
+        self,
+        group_openid: str,
+        file_info: str,
+        *,
+        msg_id: str | None = None,
+        msg_seq: int | None = None,
+    ) -> None:
+        """用 QQ 语音消息发送已上传的 file_info。"""
+        payload: dict[str, Any] = {
+            "group_openid": group_openid,
+            "msg_type": 7,
+            # 富媒体消息的 content 必须为空，否则语音条下面可能带出一条空白正文。
+            "content": None,
+            "media": {"file_info": file_info},
+        }
+        if msg_id is not None:
+            payload["msg_id"] = msg_id
+        if msg_seq is not None:
+            payload["msg_seq"] = msg_seq
+        started = time.perf_counter()
+        await self.api.post_group_message(**payload)
+        logger.info(
+            "perf voice send seq=%s %.0fms",
             msg_seq,
             (time.perf_counter() - started) * 1000,
         )
@@ -1370,7 +1604,12 @@ class MaodouClient(botpy.Client):
         长文字先按自然边界拆成多段，每段占一个独立 seq，全部文字发完后再用下一个
         seq 单独发图。中途失败只兜底尚未送达的剩余文字，绝不把已送达的前文再发一遍。
         """
+        wants_voice = bool(getattr(text, "voice_reply", False))
         content, sticker = self._outgoing_parts(message.group_openid, text)
+        if wants_voice:
+            # 语音回复第一版只允许「文字正文 + 一条语音」，不再追加表情包，
+            # 否则用户会看到「文字 → 语音 → 表情」，节奏很怪。
+            sticker = None
         current = seq
 
         def remember_delivery() -> None:
@@ -1395,6 +1634,13 @@ class MaodouClient(botpy.Client):
         if pre_upload:
             upload_task = asyncio.create_task(
                 self._upload_group_image(message.group_openid, sticker)
+            )
+        # TTS 可以和文字发送并行：服务端在生成音频时，正文已经一条条发出去。
+        # 但语音消息本身必须等所有文字都成功送达后才能上传并发送。
+        voice_task: asyncio.Task[bytes] | None = None
+        if wants_voice and has_text and self.voice_synthesizer.enabled:
+            voice_task = asyncio.create_task(
+                self.voice_synthesizer.synthesize(str(text))
             )
 
         try:
@@ -1479,6 +1725,76 @@ class MaodouClient(botpy.Client):
                         len(chunks),
                     )
 
+            if wants_voice:
+                if voice_task is None:
+                    # 没有配置 TTS，或配置在运行中被关掉：文字已经完整发出，
+                    # 自然降级即可，不能把这条正常聊天判成失败。
+                    remember_delivery()
+                    return True
+                try:
+                    voice_data = await voice_task
+                except Exception as exc:
+                    logger.warning("TTS failed, keeping text only: %s", exc)
+                    voice_data = b""
+                voice_task = None
+                if not voice_data:
+                    remember_delivery()
+                    return True
+
+                file_info = ""
+                try:
+                    file_info = await self._upload_group_voice(
+                        message.group_openid,
+                        voice_data,
+                    )
+                except Exception as exc:
+                    logger.warning("voice upload failed, keeping text only: %s", exc)
+                if not file_info:
+                    logger.warning(
+                        "voice upload returned no file_info, keep the text only"
+                    )
+                    remember_delivery()
+                    return True
+
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        await self._post_voice_message(
+                            message.group_openid,
+                            file_info,
+                            msg_id=message.id,
+                            msg_seq=current,
+                        )
+                    except Exception as exc:
+                        if self._is_dedup_error(exc):
+                            if attempt > 1:
+                                logger.info(
+                                    "voice already delivered, seq=%s", current
+                                )
+                                remember_delivery()
+                                return True
+                            logger.warning(
+                                "voice msg_seq %s already taken, resending as %s",
+                                current,
+                                current + 1,
+                            )
+                            current += 1
+                            continue
+                        self._note_rate_limit(message.group_openid, exc)
+                        logger.warning(
+                            "voice send failed (%s), seq=%s; keeping text",
+                            exc,
+                            current,
+                        )
+                        remember_delivery()
+                        return True
+                    else:
+                        remember_delivery()
+                        return True
+
+                # 语音失败时正文早已送达，这一轮仍算成功，不能重发正文。
+                remember_delivery()
+                return True
+
             if sticker is None:
                 remember_delivery()
                 return True
@@ -1551,6 +1867,12 @@ class MaodouClient(botpy.Client):
             logger.error("giving up on sticker, seq=%s", current)
             return False
         finally:
+            if voice_task is not None:
+                voice_task.cancel()
+                try:
+                    await voice_task
+                except BaseException:
+                    pass
             if upload_task is not None:
                 upload_task.cancel()
                 try:
@@ -1596,7 +1918,11 @@ class MaodouClient(botpy.Client):
                 # ack 只是垫场：发不出去就别重试也别兜底，把 seq=1 让给正文。
                 acked = await self._send_reply(
                     message,
-                    ACK_TEXT_CHAT if action == "chat" else ACK_TEXT,
+                    (
+                        ACK_TEXT_CHAT
+                        if action in {"chat", "voice_chat"}
+                        else ACK_TEXT
+                    ),
                     1,
                     f"{source}:ACK",
                     attempts=1,
@@ -1794,7 +2120,7 @@ class MaodouClient(botpy.Client):
             stickers=self.stickers,
         )
 
-        return await self.llm.generate_reply(
+        reply = await self.llm.generate_reply(
             requester=requester,
             request=request,
             topic_context=topic,
@@ -1804,6 +2130,9 @@ class MaodouClient(botpy.Client):
             identity_context=identity.prompt(),
             face_context=face_context,
         )
+        if action == "voice_chat" and self.voice_synthesizer.enabled:
+            return VoiceReply(reply)
+        return reply
 
     async def _persona_or_raw(
         self,

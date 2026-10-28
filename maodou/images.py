@@ -135,12 +135,30 @@ def format_message_content(
     indent: str = "",
     note_label: str = IMAGE_NOTE_LABEL,
 ) -> str:
-    """渲染一条消息的正文：用户原话在前，自己看图的记录缩进成独立的〔图〕行。"""
-    text, notes = split_image_notes(content)
+    """渲染一条消息的正文：用户原话在前，看图/听语音的记录缩进成独立行。"""
+    # 局部导入避免 images <-> voice 在未来扩展时形成顶层循环依赖。
+    from .voice import (
+        UNRECOGNIZED_VOICE_MARK,
+        VOICE_NOTE_LABEL,
+        VOICE_PENDING_NOTE,
+        VOICE_PLACEHOLDER_PATTERN,
+        VOICE_UNREADABLE_NOTE,
+        split_voice_notes,
+    )
+
+    text, image_notes = split_image_notes(content)
+    text, voice_notes = split_voice_notes(text)
     text = IMAGE_PLACEHOLDER_PATTERN.sub(f"{note_label}{IMAGE_PENDING_NOTE}", text)
     text = text.replace(UNRECOGNIZED_IMAGE_MARK, f"{note_label}{IMAGE_UNREADABLE_NOTE}")
+    text = VOICE_PLACEHOLDER_PATTERN.sub(
+        f"{VOICE_NOTE_LABEL}{VOICE_PENDING_NOTE}", text
+    )
+    text = text.replace(
+        UNRECOGNIZED_VOICE_MARK, f"{VOICE_NOTE_LABEL}{VOICE_UNREADABLE_NOTE}"
+    )
     lines = [text] if text else []
-    lines.extend(f"{indent}{note_label}{note}" for note in notes)
+    lines.extend(f"{indent}{note_label}{note}" for note in image_notes)
+    lines.extend(f"{indent}{VOICE_NOTE_LABEL}{note}" for note in voice_notes)
     return "\n".join(lines)
 
 

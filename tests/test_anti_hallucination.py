@@ -264,7 +264,7 @@ class ChatPathSaysNoActionTests(unittest.TestCase):
         source = inspect.getsource(bot_module.MaodouClient._handle_intent)
         # agent_run handler now exists as _handle_agent_run
         self.assertIn("_handle_agent_run", inspect.getsource(bot_module.MaodouClient))
-        tail = source[source.index("return await self.llm.generate_reply"):]
+        tail = source[source.index("reply = await self.llm.generate_reply"):]
         self.assertNotIn("executed_actions", tail)
 
 

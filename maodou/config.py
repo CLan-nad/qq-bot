@@ -57,6 +57,26 @@ class Settings:
     stickers_enabled: bool
     sticker_dir: str
     ack_after_seconds: float
+    voice_reply: bool
+    tts_provider: str
+    tts_base_url: str
+    tts_api_key: str
+    tts_model: str
+    tts_voice: str
+    tts_format: str
+    tts_timeout_seconds: float
+    tts_max_chars: int
+    tts_max_bytes: int
+    tts_edge_voice: str
+    tts_edge_rate: str
+    tts_edge_pitch: str
+    tts_edge_volume: str
+    asr_base_url: str
+    asr_api_key: str
+    asr_model: str
+    asr_timeout_seconds: float
+    asr_max_bytes: int
+    asr_max_per_request: int
     search_max_results: int
     search_timeout_seconds: int
     web_fetch_max_chars: int
@@ -150,6 +170,40 @@ def load_settings() -> Settings:
         sticker_dir=os.getenv("MAODOU_STICKER_DIR", "assets/stickers").strip()
         or "assets/stickers",
         ack_after_seconds=float(os.getenv("MAODOU_ACK_AFTER_SECONDS", "4")),
+        # 语音回复是独立能力：auto 会优先使用完整 OpenAI-compatible 配置，
+        # 没配付费服务时退回无需 key 的 Edge 中文神经语音。
+        voice_reply=os.getenv("MAODOU_VOICE_REPLY", "1").strip().lower()
+        not in {"0", "false", "no", "off"},
+        tts_provider=os.getenv("MAODOU_TTS_PROVIDER", "auto").strip().lower()
+        or "auto",
+        tts_base_url=os.getenv("MAODOU_TTS_BASE_URL", "").strip(),
+        tts_api_key=os.getenv("MAODOU_TTS_API_KEY", "").strip(),
+        tts_model=os.getenv("MAODOU_TTS_MODEL", "").strip(),
+        tts_voice=os.getenv("MAODOU_TTS_VOICE", "").strip(),
+        tts_format=os.getenv("MAODOU_TTS_FORMAT", "mp3").strip() or "mp3",
+        tts_timeout_seconds=float(os.getenv("MAODOU_TTS_TIMEOUT_SECONDS", "30")),
+        tts_max_chars=int(os.getenv("MAODOU_TTS_MAX_CHARS", "160")),
+        tts_max_bytes=int(
+            os.getenv("MAODOU_TTS_MAX_BYTES", str(20 * 1024 * 1024))
+        ),
+        tts_edge_voice=os.getenv(
+            "MAODOU_TTS_EDGE_VOICE", "zh-CN-XiaoyiNeural"
+        ).strip()
+        or "zh-CN-XiaoyiNeural",
+        tts_edge_rate=os.getenv("MAODOU_TTS_EDGE_RATE", "+5%").strip() or "+5%",
+        tts_edge_pitch=os.getenv("MAODOU_TTS_EDGE_PITCH", "+5Hz").strip()
+        or "+5Hz",
+        tts_edge_volume=os.getenv("MAODOU_TTS_EDGE_VOLUME", "+0%").strip()
+        or "+0%",
+        # QQ 通常已经给出 asr_refer_text；这些配置只在该字段缺失时兜底。
+        asr_base_url=os.getenv("MAODOU_ASR_BASE_URL", "").strip(),
+        asr_api_key=os.getenv("MAODOU_ASR_API_KEY", "").strip(),
+        asr_model=os.getenv("MAODOU_ASR_MODEL", "").strip(),
+        asr_timeout_seconds=float(os.getenv("MAODOU_ASR_TIMEOUT_SECONDS", "30")),
+        asr_max_bytes=int(
+            os.getenv("MAODOU_ASR_MAX_BYTES", str(20 * 1024 * 1024))
+        ),
+        asr_max_per_request=int(os.getenv("MAODOU_ASR_MAX_PER_REQUEST", "5")),
         search_max_results=int(os.getenv("MAODOU_SEARCH_MAX_RESULTS", "5")),
         search_timeout_seconds=int(os.getenv("MAODOU_SEARCH_TIMEOUT_SECONDS", "12")),
         web_fetch_max_chars=int(os.getenv("MAODOU_WEB_FETCH_MAX_CHARS", "8000")),

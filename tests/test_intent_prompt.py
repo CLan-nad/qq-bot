@@ -82,6 +82,17 @@ class IntentPromptTests(unittest.TestCase):
         params = inspect.signature(MaodouLLM.generate_reply).parameters
         self.assertIn("summaries_context", params)
 
+    def test_voice_chat_is_explicit_and_opt_in(self) -> None:
+        self.assertIn("voice_chat", INTENT_SYSTEM_PROMPT)
+        self.assertIn("明确要求", INTENT_SYSTEM_PROMPT)
+        self.assertIn("普通聊天", INTENT_SYSTEM_PROMPT)
+        self.assertIn("不要自动改成语音", INTENT_SYSTEM_PROMPT)
+
+    def test_transcribed_voice_is_described_as_really_heard(self) -> None:
+        self.assertIn("〔语音〕", SYSTEM_PROMPT)
+        self.assertIn("确实听懂了", SYSTEM_PROMPT)
+        self.assertIn("不要否认已经转写过的语音", SYSTEM_PROMPT)
+
     def test_memory_context_is_facts_only(self) -> None:
         # 摘要不能再混进「长期记忆」，否则模型把剧情当人设（“主人多次骂我”）。摘要单独走
         # _summaries_context，长期记忆只剩记忆卡。
