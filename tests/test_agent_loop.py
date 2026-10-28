@@ -25,8 +25,12 @@ class _QueuedCompletions:
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
-        message = self.responses.pop(0)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        response = self.responses.pop(0)
+        if getattr(response, "choices", None):
+            return response
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=response, finish_reason="stop")]
+        )
 
 
 def _tool_message(count: int, start: int = 0) -> SimpleNamespace:
@@ -38,6 +42,28 @@ def _tool_message(count: int, start: int = 0) -> SimpleNamespace:
 
 def _final_message(text: str) -> SimpleNamespace:
     return SimpleNamespace(content=text, tool_calls=[])
+
+
+def _response(
+    text: str,
+    finish_reason: str = "stop",
+    *,
+    completion_tokens: int | None = None,
+) -> SimpleNamespace:
+    usage = (
+        SimpleNamespace(completion_tokens=completion_tokens)
+        if completion_tokens is not None
+        else None
+    )
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=_final_message(text),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=usage,
+    )
 
 
 class AgentLoopBudgetTests(unittest.TestCase):
@@ -115,6 +141,103 @@ class AgentLoopBudgetTests(unittest.TestCase):
         self.assertEqual(len(assistant["tool_calls"]), 4)
         self.assertEqual(len(tool_messages), 4)
         self.assertIn("预算已用完", tool_messages[-1]["content"])
+
+    def test_length_finish_reason_continues_without_regenerating_original(self) -> None:
+        responses = [
+            _tool_message(1),
+            _response("已查到的时间线是 10:24 你", "length"),
+            _response("说要去图书馆，12:57 又改口。", "stop"),
+        ]
+        result, _executed, calls = self._run("fast", responses)
+
+        self.assertEqual(
+            result["text"],
+            "已查到的时间线是 10:24 你说要去图书馆，12:57 又改口。",
+        )
+        self.assertEqual(len(calls), 3)
+        self.assertIn("tools", calls[1])
+        self.assertNotIn("tools", calls[2])
+        self.assertEqual(calls[2]["reasoning_effort"], agent_module.FINAL_REASONING_EFFORT)
+        self.assertEqual(
+            calls[2]["max_tokens"],
+            agent_module.FAST_CONTINUATION_MAX_TOKENS,
+        )
+        continuation = calls[2]["messages"][-1]["content"]
+        self.assertIn("不要重头回答", continuation)
+        self.assertIn("只输出续写正文", continuation)
+
+    def test_dangling_arrow_triggers_continuation_even_without_length_reason(self) -> None:
+        responses = [
+            _response("时间线：10:24 你 →"),
+            _response("12:57 去图书馆。"),
+        ]
+        result, _executed, calls = self._run("fast", responses)
+
+        self.assertEqual(result["text"], "时间线：10:24 你 →12:57 去图书馆。")
+        self.assertEqual(len(calls), 2)
+
+    def test_complete_response_does_not_trigger_an_extra_model_call(self) -> None:
+        responses = [_response("查完了，结论很明确。")]
+        result, _executed, calls = self._run("fast", responses)
+
+        self.assertEqual(result["text"], "查完了，结论很明确。")
+        self.assertEqual(len(calls), 1)
+
+    def test_continuation_stops_after_two_attempts(self) -> None:
+        responses = [
+            _response("第一段", "length"),
+            _response("第二段", "length"),
+            _response("第三段", "length"),
+            _response("这段不应再被调用。", "stop"),
+        ]
+        result, _executed, calls = self._run("fast", responses)
+
+        self.assertEqual(result["text"], "第一段第二段第三段")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(
+            len([call for call in calls if "tools" not in call]),
+            2,
+        )
+
+    def test_continuation_overlap_is_not_duplicated(self) -> None:
+        responses = [
+            _response("他去图书馆", "length"),
+            _response("图书馆待了两小时。", "stop"),
+        ]
+        result, _executed, _calls = self._run("fast", responses)
+
+        self.assertEqual(result["text"], "他去图书馆待了两小时。")
+
+    def test_forced_final_answer_is_also_repaired(self) -> None:
+        responses = [
+            _tool_message(3),
+            _response("基于三项计算结果，结论", "length"),
+            _response("是 6。", "stop"),
+        ]
+        result, executed, calls = self._run("fast", responses)
+
+        self.assertEqual(result["text"], "基于三项计算结果，结论是 6。")
+        self.assertEqual(len(executed), 3)
+        self.assertEqual(len(calls), 3)
+        self.assertNotIn("tools", calls[1])
+        self.assertEqual(calls[1]["max_tokens"], agent_module.FAST_FINAL_MAX_TOKENS)
+        self.assertEqual(calls[1]["reasoning_effort"], agent_module.FINAL_REASONING_EFFORT)
+
+    def test_long_complete_answer_is_not_hard_clipped_before_send(self) -> None:
+        report = "调研正文" * 120 + "。"
+        completions = _QueuedCompletions([_response(report)])
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=completions)
+        )
+        ctx = AgentContext(model="deepseek-flash", max_output_chars=100)
+
+        result = asyncio.run(
+            agent_run_loop(client=client, ctx=ctx, query="写报告", mode="deep")
+        )
+
+        self.assertEqual(result["text"], report)
+        self.assertGreater(len(result["text"]), ctx.max_output_chars)
+        self.assertEqual(len(completions.calls), 1)
 
 
 if __name__ == "__main__":

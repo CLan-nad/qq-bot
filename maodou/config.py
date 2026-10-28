@@ -113,7 +113,7 @@ def load_settings() -> Settings:
         reply_max_chars=int(os.getenv("MAODOU_REPLY_MAX_CHARS", "3000")),
         reply_chunk_chars=int(os.getenv("MAODOU_REPLY_CHUNK_CHARS", "900")),
         deep_reply_max_chars=int(
-            os.getenv("MAODOU_DEEP_REPLY_MAX_CHARS", "3000")
+            os.getenv("MAODOU_DEEP_REPLY_MAX_CHARS", "6000")
         ),
         timezone=os.getenv("MAODOU_TIMEZONE", "Asia/Shanghai"),
         scheduler_interval_seconds=int(os.getenv("MAODOU_SCHEDULER_INTERVAL_SECONDS", "30")),

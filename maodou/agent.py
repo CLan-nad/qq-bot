@@ -9,6 +9,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .calendar import format_festivals, lunar_label, next_festival, upcoming_festivals
+from .completion import (
+    completion_is_incomplete,
+    continuation_prompt,
+    merge_continuation,
+)
 from .llm import (
     DEEP_RESEARCH_REPLY_ADDENDUM,
     FAST_TOOL_REPLY_ADDENDUM,
@@ -195,8 +200,16 @@ DEEP_MAX_STEPS = 8
 FAST_MAX_TOOL_CALLS = 3
 DEEP_MAX_TOOL_CALLS = 12
 MAX_PARALLEL_TOOLS = 3
-FAST_FINAL_MAX_TOKENS = 1000
-DEEP_FINAL_MAX_TOKENS = 3200
+FAST_STEP_MAX_TOKENS = 1200
+DEEP_STEP_MAX_TOKENS = 1600
+FAST_FINAL_MAX_TOKENS = 1800
+DEEP_FINAL_MAX_TOKENS = 6000
+FAST_CONTINUATION_MAX_TOKENS = 1200
+DEEP_CONTINUATION_MAX_TOKENS = 3000
+MAX_COMPLETION_CONTINUATIONS = 2
+# 工具回合负责规划和查证，最终落笔不需要继续跑高档思考；否则推理 token
+# 会和正文抢同一份 max_tokens，长回答很容易只写一半。
+FINAL_REASONING_EFFORT = "low"
 TOOL_RESULT_MAX_CHARS = 4000
 
 
@@ -227,7 +240,8 @@ class AgentContext:
     shell_timeout_seconds: float = 10.0
     shell_max_output_chars: int = 50000
     memory_search_messages: int = 10
-    max_output_chars: int = 3000
+    # 仅作为长回答的诊断阈值保留；agent_run 不会在发送前硬裁正文。
+    max_output_chars: int = 6000
     store: Any = None  # ChatStore
     group_openid: str = ""
     now: datetime = field(default_factory=datetime.now)
@@ -450,8 +464,16 @@ async def agent_run_loop(
     max_tool_calls = (
         DEEP_MAX_TOOL_CALLS if mode == "deep" else FAST_MAX_TOOL_CALLS
     )
+    step_max_tokens = (
+        DEEP_STEP_MAX_TOKENS if mode == "deep" else FAST_STEP_MAX_TOKENS
+    )
     final_max_tokens = (
         DEEP_FINAL_MAX_TOKENS if mode == "deep" else FAST_FINAL_MAX_TOKENS
+    )
+    continuation_max_tokens = (
+        DEEP_CONTINUATION_MAX_TOKENS
+        if mode == "deep"
+        else FAST_CONTINUATION_MAX_TOKENS
     )
     model = ctx.model or "deepseek-flash"
     tool_calls_made: list[str] = []
@@ -461,20 +483,90 @@ async def agent_run_loop(
         {"role": "user", "content": query},
     ]
 
-    def clip(text: str) -> str:
-        value = (text or "").strip()
-        limit = max(0, int(ctx.max_output_chars or 0))
-        return value[:limit] if limit else value
+    def _finish_reason(response: Any) -> str | None:
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            return None
+        return getattr(choices[0], "finish_reason", None)
+
+    def _usage_field(response: Any, name: str) -> Any:
+        return getattr(getattr(response, "usage", None), name, None)
+
+    async def complete_text(
+        *,
+        base_messages: list[dict[str, Any]],
+        initial_content: str,
+        initial_finish_reason: str | None,
+        label: str,
+    ) -> str:
+        """把一次最终正文生成补完整；只续写，不重新润色已有内容。"""
+        text = (initial_content or "").strip()
+        finish_reason = initial_finish_reason
+        working = list(base_messages)
+
+        for attempt in range(MAX_COMPLETION_CONTINUATIONS + 1):
+            if not completion_is_incomplete(text, finish_reason):
+                break
+            if attempt >= MAX_COMPLETION_CONTINUATIONS:
+                logger.warning(
+                    "agent_run %s still incomplete after %d continuations "
+                    "(finish_reason=%s chars=%d)",
+                    label,
+                    MAX_COMPLETION_CONTINUATIONS,
+                    finish_reason,
+                    len(text),
+                )
+                break
+
+            if text:
+                working.append({"role": "assistant", "content": text})
+            working.append(
+                {"role": "user", "content": continuation_prompt(text)}
+            )
+            try:
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=working,
+                    temperature=0.4,
+                    max_tokens=continuation_max_tokens,
+                    reasoning_effort=FINAL_REASONING_EFFORT,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "agent_run %s continuation %d failed: %r",
+                    label,
+                    attempt + 1,
+                    exc,
+                )
+                break
+
+            choice = response.choices[0]
+            addition = (choice.message.content or "").strip()
+            finish_reason = getattr(choice, "finish_reason", None)
+            text = merge_continuation(text, addition)
+            logger.info(
+                "agent_run %s continuation=%d finish_reason=%s "
+                "completion_tokens=%s chars=%d",
+                label,
+                attempt + 1,
+                finish_reason,
+                _usage_field(response, "completion_tokens"),
+                len(text),
+            )
+        return text
 
     async def finish(reason: str) -> dict[str, Any]:
-        messages.append({"role": "user", "content": reason})
+        final_messages = [
+            *messages,
+            {"role": "user", "content": reason},
+        ]
         try:
             response = await client.chat.completions.create(
                 model=model,
-                messages=messages,
+                messages=final_messages,
                 temperature=0.5,
                 max_tokens=final_max_tokens,
-                reasoning_effort=ctx.reasoning_effort,
+                reasoning_effort=FINAL_REASONING_EFFORT,
             )
             final = response.choices[0].message.content or ""
         except Exception as exc:
@@ -483,9 +575,30 @@ async def agent_run_loop(
                 "text": "我查完了，但最后整理答案时卡住了，要不换个问法再试一次？",
                 "tool_calls_made": tool_calls_made,
             }
-        text = clip(final)
+        finish_reason = _finish_reason(response)
+        logger.info(
+            "agent_run mode=%s final finish_reason=%s completion_tokens=%s chars=%d",
+            mode,
+            finish_reason,
+            _usage_field(response, "completion_tokens"),
+            len(final),
+        )
+        text = await complete_text(
+            base_messages=final_messages,
+            initial_content=final,
+            initial_finish_reason=finish_reason,
+            label="final",
+        )
         if not text:
             text = "我查到了些资料，但这次没能整理成回答，要不我再试一次？"
+        limit = max(0, int(ctx.max_output_chars or 0))
+        if limit and len(text) > limit:
+            logger.info(
+                "agent_run long output chars=%d soft_budget=%d; "
+                "leave full text for QQ chunked delivery",
+                len(text),
+                limit,
+            )
         return {"text": text, "tool_calls_made": tool_calls_made}
 
     for _step in range(max_steps):
@@ -499,7 +612,7 @@ async def agent_run_loop(
                 messages=messages,
                 tools=AGENT_TOOLS,
                 temperature=0.3,
-                max_tokens=1200,
+                max_tokens=step_max_tokens,
                 reasoning_effort=ctx.reasoning_effort,
             )
         except Exception as exc:
@@ -511,11 +624,26 @@ async def agent_run_loop(
 
         msg = response.choices[0].message
 
-        # 模型直接给了文本回复：它已经是在完整工具轨迹上收口，不能再拿一段
-        # 丢失证据的短文去做第二次润色。
+        # 模型直接给了文本回复：它已经是在完整工具轨迹上收口。若这条正文被
+        # token 上限截断，只续写缺失部分，不再交给第二个模型重新生成全文。
         if msg.content and not msg.tool_calls:
+            finish_reason = _finish_reason(response)
+            logger.info(
+                "agent_run mode=%s direct-final finish_reason=%s "
+                "completion_tokens=%s chars=%d",
+                mode,
+                finish_reason,
+                _usage_field(response, "completion_tokens"),
+                len(msg.content),
+            )
+            text = await complete_text(
+                base_messages=messages,
+                initial_content=msg.content,
+                initial_finish_reason=finish_reason,
+                label="direct-final",
+            )
             return {
-                "text": clip(msg.content),
+                "text": text,
                 "tool_calls_made": tool_calls_made,
             }
 
