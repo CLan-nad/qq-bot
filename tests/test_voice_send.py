@@ -215,8 +215,10 @@ class VoiceIntentTests(unittest.TestCase):
             llm=SimpleNamespace(),
         )
         client.voice_synthesizer = SimpleNamespace(enabled=enabled)
+        client.reply_calls = []
 
         async def generate_reply(**kwargs):
+            client.reply_calls.append(kwargs)
             return "晚安，做个好梦"
 
         client.llm = SimpleNamespace(generate_reply=generate_reply)
@@ -239,18 +241,24 @@ class VoiceIntentTests(unittest.TestCase):
         )
 
     def test_voice_chat_marks_reply_for_separate_voice_delivery(self) -> None:
-        answer = self._run(self._client(), "voice_chat")
+        client = self._client()
+        answer = self._run(client, "voice_chat")
         self.assertIsInstance(answer, VoiceReply)
         self.assertEqual(str(answer), "晚安，做个好梦")
+        self.assertTrue(client.reply_calls[-1]["voice_reply"])
 
     def test_voice_chat_without_tts_returns_plain_text(self) -> None:
-        answer = self._run(self._client(enabled=False), "voice_chat")
+        client = self._client(enabled=False)
+        answer = self._run(client, "voice_chat")
         self.assertNotIsInstance(answer, VoiceReply)
         self.assertEqual(answer, "晚安，做个好梦")
+        self.assertFalse(client.reply_calls[-1]["voice_reply"])
 
     def test_regular_chat_never_becomes_voice(self) -> None:
-        answer = self._run(self._client(), "chat")
+        client = self._client()
+        answer = self._run(client, "chat")
         self.assertNotIsInstance(answer, VoiceReply)
+        self.assertFalse(client.reply_calls[-1]["voice_reply"])
 
 
 if __name__ == "__main__":

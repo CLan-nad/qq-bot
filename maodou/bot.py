@@ -2119,6 +2119,7 @@ class MaodouClient(botpy.Client):
             as_tags=self.settings.face_tags,
             stickers=self.stickers,
         )
+        voice_reply = action == "voice_chat" and self.voice_synthesizer.enabled
 
         reply = await self.llm.generate_reply(
             requester=requester,
@@ -2129,8 +2130,9 @@ class MaodouClient(botpy.Client):
             summaries_context=self._summaries_context(message.group_openid),
             identity_context=identity.prompt(),
             face_context=face_context,
+            voice_reply=voice_reply,
         )
-        if action == "voice_chat" and self.voice_synthesizer.enabled:
+        if voice_reply:
             return VoiceReply(reply)
         return reply
 

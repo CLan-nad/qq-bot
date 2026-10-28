@@ -450,6 +450,7 @@ class MaodouLLM:
         identity_context: str = "",
         executed_actions: str = "",
         face_context: str = "",
+        voice_reply: bool = False,
     ) -> str:
         user_prompt = f"""说话人说明：下面每条记录开头的【】里就是发那条消息的人，【小毛豆】是你自己说过的话。
 
@@ -461,6 +462,12 @@ class MaodouLLM:
 
 本次要回应的是上面【当前话题】的最后一条（已去掉 @ 和表情标记，缩进的〔图〕/〔语音〕行是你自己看图、听语音的记录）：
 {format_message_content(request, indent=_NOTE_INDENT)}
+"""
+        if voice_reply:
+            user_prompt += """
+【本轮输出方式：语音】
+用户明确要求发语音。系统会在文字全部发送后，把下面这段正文自动合成为一条 QQ 语音并单独发送；你确实可以发语音。
+直接说想让主人听到的内容，口语、简短（1～3 句）、适合朗读；不要说自己不会发语音、只能打字，也不要解释 TTS、接口或发送流程。这段正文就是语音内容，不要再说“马上单独发一条”。
 """
         if background_context:
             user_prompt += f"""

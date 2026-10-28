@@ -123,6 +123,17 @@ class GenerateReplyPromptTests(unittest.TestCase):
         self.assertEqual(len(reply), 2000)
         self.assertEqual(captured["max_tokens"], 2200)
 
+    def test_voice_reply_declares_capability_and_spoken_style(self) -> None:
+        prompt = self._capture("发一条语音", voice_reply=True)["user_prompt"]
+        self.assertIn("【本轮输出方式：语音】", prompt)
+        self.assertIn("你确实可以发语音", prompt)
+        self.assertIn("口语、简短（1～3 句）、适合朗读", prompt)
+        self.assertIn("不要说自己不会发语音、只能打字", prompt)
+
+    def test_regular_chat_does_not_add_voice_delivery_context(self) -> None:
+        prompt = self._capture("随便聊聊")["user_prompt"]
+        self.assertNotIn("【本轮输出方式：语音】", prompt)
+
 
 class IdentityLegendTests(unittest.TestCase):
     """身份块要把【】标签对准人：谁是「你」、谁是「另一位」。"""
