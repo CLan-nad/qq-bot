@@ -264,9 +264,9 @@ class VoiceTranscriber:
 class VoiceSynthesizer:
     """生成 QQ 可发送的语音。
 
-    `auto` 优先使用配置完整的 OpenAI-compatible `/audio/speech`；没有付费
-    TTS 时退回 Microsoft Edge 的在线中文神经语音。两条路都失败只会保留文字，
-    不会影响整轮回复。
+    `auto` 依次选择 QwenCloud、OpenAI-compatible `/audio/speech`，最后才退回
+    Microsoft Edge 的在线中文神经语音。任何一条路失败都只会保留文字，不会影响
+    整轮回复。
     """
 
     def __init__(self, settings: Any) -> None:
@@ -282,6 +282,12 @@ class VoiceSynthesizer:
         self.voice = str(getattr(settings, "tts_voice", "") or "").strip()
         self.response_format = (
             str(getattr(settings, "tts_format", "mp3") or "mp3").strip().lower()
+        )
+        self.instruction = str(
+            getattr(settings, "tts_instruction", "") or ""
+        ).strip()
+        self.sample_rate = int(
+            getattr(settings, "tts_sample_rate", 24000) or 24000
         )
         self.timeout_seconds = float(
             getattr(settings, "tts_timeout_seconds", 30) or 30
@@ -312,8 +318,19 @@ class VoiceSynthesizer:
         )
 
     @property
+    def _qwen_ready(self) -> bool:
+        return bool(self.base_url and self.api_key and self.model and self.voice)
+
+    @property
     def _openai_ready(self) -> bool:
         return bool(self.base_url and self.api_key and self.model and self.voice)
+
+    @property
+    def _auto_qwen_ready(self) -> bool:
+        return bool(
+            self._qwen_ready
+            and "qwencloudapi.com" in self.base_url.lower()
+        )
 
     @property
     def _edge_ready(self) -> bool:
@@ -324,11 +341,15 @@ class VoiceSynthesizer:
 
     @property
     def effective_provider(self) -> str:
+        if self.provider == "qwen":
+            return "qwen" if self._qwen_ready else ""
         if self.provider == "openai":
             return "openai" if self._openai_ready else ""
         if self.provider == "edge":
             return "edge" if self._edge_ready else ""
         if self.provider == "auto":
+            if self._auto_qwen_ready:
+                return "qwen"
             if self._openai_ready:
                 return "openai"
             return "edge" if self._edge_ready else ""
@@ -346,6 +367,8 @@ class VoiceSynthesizer:
             return b""
         if self.effective_provider == "edge":
             return await self._synthesize_edge(spoken)
+        if self.effective_provider == "qwen":
+            return await self._synthesize_qwen(spoken)
         return await self._synthesize_openai(spoken)
 
     async def _synthesize_edge(self, spoken: str) -> bytes:
@@ -378,6 +401,71 @@ class VoiceSynthesizer:
             "edge tts generated %d bytes voice=%s chars=%d",
             len(data),
             self.edge_voice,
+            len(spoken),
+        )
+        return data
+
+    async def _synthesize_qwen(self, spoken: str) -> bytes:
+        input_payload: dict[str, Any] = {
+            "text": spoken,
+            "voice": self.voice,
+            "format": self.response_format,
+            "sample_rate": self.sample_rate,
+        }
+        if self.instruction:
+            input_payload["instruction"] = self.instruction
+        payload = {
+            "model": self.model,
+            "input": input_payload,
+        }
+        try:
+            async with httpx2.AsyncClient(
+                timeout=self.timeout_seconds,
+                follow_redirects=True,
+            ) as client:
+                response = await client.post(
+                    _endpoint(
+                        self.base_url,
+                        "services/audio/tts/SpeechSynthesizer",
+                    ),
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
+                try:
+                    body = response.json()
+                except (ValueError, TypeError):
+                    logger.warning("Qwen TTS returned a non-JSON response")
+                    return b""
+                audio_url = ""
+                if isinstance(body, dict):
+                    output = body.get("output")
+                    if isinstance(output, dict):
+                        audio = output.get("audio")
+                        if isinstance(audio, dict):
+                            audio_url = _http_url(audio.get("url"))
+                if not audio_url:
+                    logger.warning("Qwen TTS response did not contain an audio URL")
+                    return b""
+                audio_response = await client.get(audio_url)
+                audio_response.raise_for_status()
+                data = audio_response.content
+        except httpx2.HTTPError:
+            logger.exception("Qwen TTS request failed")
+            return b""
+        if not data or len(data) > self.max_bytes:
+            logger.warning(
+                "Qwen TTS returned empty or oversized audio (%d bytes)", len(data)
+            )
+            return b""
+        logger.info(
+            "qwen tts generated %d bytes voice=%s format=%s chars=%d",
+            len(data),
+            self.voice,
+            self.response_format,
             len(spoken),
         )
         return data

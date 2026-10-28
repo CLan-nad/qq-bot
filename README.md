@@ -49,7 +49,8 @@ QQ 开放平台选 WebSocket 连接，并开启接收群消息。
 deep 工具循环需要多步规划，使用 `MAODOU_DEEP_REASONING_EFFORT=high`。
 闲聊类消息要先做一次意图分类、再生成回复，所以意图解析单独走快模型：默认 `deepseek-flash` +
 `none`（`MAODOU_INTENT_MODEL` / `MAODOU_INTENT_REASONING_EFFORT`），最终回复仍用 `MAODOU_MODEL`，人设不受影响。
-发语音默认走无需额外 key 的 Edge 中文神经语音；也可以在 `.env` 配置 OpenAI-compatible TTS。
+发语音优先使用 QwenCloud 的 `qwen-audio-3.1-tts-flash` + `longling_v3.1`
+软糯女童声；没有配置时会退回无需额外 key 的 Edge 中文神经语音。
 收语音优先使用 QQ 消息里的 `asr_refer_text`，缺失时才调用可选的外部 ASR。
 
 ## 代码架构
@@ -250,6 +251,6 @@ flowchart TD
 
 ## 隐私
 
-聊天记录、媒体转写、图片描述和长期记忆都存在部署机器本地；生成回复时只把所需上下文发给配置的大模型服务。图片和语音原文件只在内存中识别/转写，原文件不落盘；数据库保存消息元数据、临时媒体 URL、图片文字指纹和语音转写。发送语音时，待朗读文本会交给 Edge TTS 或你配置的 TTS 服务。`.env` 已加入 `.gitignore`，密钥不会提交。
+聊天记录、媒体转写、图片描述和长期记忆都存在部署机器本地；生成回复时只把所需上下文发给配置的大模型服务。图片和语音原文件只在内存中识别/转写，原文件不落盘；数据库保存消息元数据、临时媒体 URL、图片文字指纹和语音转写。发送语音时，待朗读文本会交给 QwenCloud、Edge TTS 或你配置的其他 TTS 服务。`.env` 已加入 `.gitignore`，密钥不会提交。
 
 表情图由群主提供，版权归原权利人，仅供私人群内使用。

@@ -64,6 +64,8 @@ class Settings:
     tts_model: str
     tts_voice: str
     tts_format: str
+    tts_instruction: str
+    tts_sample_rate: int
     tts_timeout_seconds: float
     tts_max_chars: int
     tts_max_bytes: int
@@ -170,8 +172,8 @@ def load_settings() -> Settings:
         sticker_dir=os.getenv("MAODOU_STICKER_DIR", "assets/stickers").strip()
         or "assets/stickers",
         ack_after_seconds=float(os.getenv("MAODOU_ACK_AFTER_SECONDS", "4")),
-        # 语音回复是独立能力：auto 会优先使用完整 OpenAI-compatible 配置，
-        # 没配付费服务时退回无需 key 的 Edge 中文神经语音。
+        # 语音回复是独立能力：auto 会优先使用 QwenCloud，其次完整
+        # OpenAI-compatible 配置，最后退回无需 key 的 Edge 中文神经语音。
         voice_reply=os.getenv("MAODOU_VOICE_REPLY", "1").strip().lower()
         not in {"0", "false", "no", "off"},
         tts_provider=os.getenv("MAODOU_TTS_PROVIDER", "auto").strip().lower()
@@ -181,6 +183,8 @@ def load_settings() -> Settings:
         tts_model=os.getenv("MAODOU_TTS_MODEL", "").strip(),
         tts_voice=os.getenv("MAODOU_TTS_VOICE", "").strip(),
         tts_format=os.getenv("MAODOU_TTS_FORMAT", "mp3").strip() or "mp3",
+        tts_instruction=os.getenv("MAODOU_TTS_INSTRUCTION", "").strip(),
+        tts_sample_rate=int(os.getenv("MAODOU_TTS_SAMPLE_RATE", "24000")),
         tts_timeout_seconds=float(os.getenv("MAODOU_TTS_TIMEOUT_SECONDS", "30")),
         tts_max_chars=int(os.getenv("MAODOU_TTS_MAX_CHARS", "160")),
         tts_max_bytes=int(
