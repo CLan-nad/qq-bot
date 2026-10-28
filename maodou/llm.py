@@ -127,6 +127,7 @@ memory_remember 输出 memories 数组，每项包含 kind、person、content。
 memory_list 输出 page（页码，从 1 开始）；用户说“第二页”就填 2，没说就留空。
 memory_list 还可以带筛选：只看某一类填 kind（preference/fact/agreement/event/relationship），只看某个人的记忆填 person，按关键词筛填 match；没提到就都留空。
 memory_forget 输出 memory_id 或 match。
+memory_id 是「查看记忆」回复里每条前面的编号（群内从 1 开始的连续序号），不要把数据库 id 或条数当编号。
 memory_id 可以是数组，一次说好几个编号时全部填进去；说“全部/所有”时留空并加 "all": true。
 memory_alias 输出 op（set/clear/show）、alias、canonical：
 - set：把 alias 统一成 canonical。alias 可以是字符串，也可以是数组，一次统一好几个叫法。

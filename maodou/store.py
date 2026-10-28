@@ -1110,6 +1110,29 @@ class ChatStore:
         ).fetchall()
         return [self._card_from_row(row) for row in rows]
 
+    def memory_card_numbers(self, group_openid: str) -> dict[int, int]:
+        """群内展示编号：按写入顺序从 1 开始，与全局自增主键 id 无关。
+
+        记忆卡的 row id 是所有群共用的自增主键，直接拿它当编号会出现
+        1、2、…、29、30 这种断号。对外只展示群内连续序号，内部操作仍然用真实 id。
+        """
+        cards = self.all_memory_cards(group_openid)
+        return {card.id: index for index, card in enumerate(cards, 1)}
+
+    def find_memory_cards_by_numbers(
+        self, group_openid: str, numbers: list[int]
+    ) -> list[MemoryCard]:
+        """按群内展示编号取卡片（1 起连续），绝不跨群。"""
+        wanted = {number for number in numbers if number > 0}
+        if not wanted:
+            return []
+        cards = self.all_memory_cards(group_openid)
+        return [
+            card
+            for index, card in enumerate(cards, 1)
+            if index in wanted
+        ]
+
     def count_memory_cards(self, group_openid: str) -> int:
         row = self._conn.execute(
             "SELECT COUNT(*) AS n FROM memory_cards WHERE group_openid = ?",

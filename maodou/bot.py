@@ -1638,7 +1638,11 @@ class MaodouClient(botpy.Client):
             return None
 
     def _memory_ids_field(self, value: Any) -> list[int] | None:
-        """intent 里的 memory_id 可能是单个编号，也可能是一串。统一成 int 列表。"""
+        """intent 里的 memory_id 可能是单个编号，也可能是一串。统一成 int 列表。
+
+        这里拿到的是「查看记忆」显示的群内连续序号，不是数据库主键；
+        后续必须走 find_memory_cards_by_numbers 解析。
+        """
         if value is None:
             return None
         items = value if isinstance(value, (list, tuple)) else [value]
@@ -1663,7 +1667,8 @@ class MaodouClient(botpy.Client):
             return self.store.all_memory_cards(group_openid), True
         ids = self._memory_ids_field(intent.get("memory_id"))
         if ids:
-            return self.store.find_memory_cards(group_openid, memory_id=ids), False
+            # 用户说的编号是「查看记忆」里看到的群内连续序号，不是数据库主键。
+            return self.store.find_memory_cards_by_numbers(group_openid, ids), False
         match = self._optional_str(intent.get("match"))
         if match:
             return self.store.find_memory_cards(group_openid, query=match), False
@@ -2158,7 +2163,8 @@ class MaodouClient(botpy.Client):
         header = f"当前长期记忆（第{current}/{pages}页，共{total}条）："
         if current < pages:
             header += f"\n想看更多就说“第 {current + 1} 页记忆”。"
-        return header + "\n" + self._format_memory_cards(cards)
+        numbers = self.store.memory_card_numbers(message.group_openid)
+        return header + "\n" + self._format_memory_cards(cards, numbers)
 
     def _handle_memory_alias(self, intent: dict, message: RichGroupMessage) -> str:
         """统一某个人在记忆里的叫法。
@@ -2366,9 +2372,12 @@ class MaodouClient(botpy.Client):
         )
 
     @staticmethod
-    def _format_memory_cards(cards: list[MemoryCard]) -> str:
+    def _format_memory_cards(
+        cards: list[MemoryCard], numbers: dict[int, int]
+    ) -> str:
+        """按群内连续编号展示；numbers 是 card.id -> 展示编号。"""
         return "\n".join(
-            f"{card.id}. [{card.kind}] {card.person}: {card.content}"
+            f"{numbers.get(card.id, card.id)}. [{card.kind}] {card.person}: {card.content}"
             for card in cards
         )
 
@@ -2378,8 +2387,12 @@ class MaodouClient(botpy.Client):
         cards, is_all = self._resolve_memory_targets(intent, message)
         if not cards:
             return "没有找到这条记忆。可以说“查看记忆”。"
+        numbers = self.store.memory_card_numbers(message.group_openid)
         if not by_id and not want_all and len(cards) > 1:
-            return "匹配到多条记忆，请说编号：\n" + self._format_memory_cards(cards)
+            return (
+                "匹配到多条记忆，请说编号：\n"
+                + self._format_memory_cards(cards, numbers)
+            )
 
         deleted = sum(
             1
@@ -2389,10 +2402,11 @@ class MaodouClient(botpy.Client):
         if not deleted:
             return "这些记忆刚刚变动过，麻烦再说一次。"
         if len(cards) == 1:
+            number = numbers.get(cards[0].id, cards[0].id)
             return ActionResult(
-                f"已忘记记忆 {cards[0].id}：{cards[0].content}",
+                f"已忘记记忆 {number}：{cards[0].content}",
                 persona=True,
-                facts=("忘记", str(cards[0].id)),
+                facts=("忘记", str(number)),
             )
         return ActionResult(
             f"已忘记{'全部 ' if is_all else ''}{deleted} 条记忆。",
@@ -2542,7 +2556,10 @@ class MaodouClient(botpy.Client):
                 "相关历史消息：\n" + ChatStore.format_search_results(results)
             )
         if cards:
-            search_parts.append("相关长期记忆：\n" + self._format_memory_cards(cards))
+            numbers = self.store.memory_card_numbers(message.group_openid)
+            search_parts.append(
+                "相关长期记忆：\n" + self._format_memory_cards(cards, numbers)
+            )
 
         return await self.llm.generate_reply(
             requester=requester,
