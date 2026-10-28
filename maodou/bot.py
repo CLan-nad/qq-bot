@@ -117,7 +117,7 @@ ROLE_LABELS = {
 # chat 也在里面：它是占比最高的一类，带图或模型排队时同样会卡十几秒，
 # 而 ack 只在超过 ack_after_seconds 才发，快的时候一条消息都不会多。
 ACK_ACTIONS = frozenset(
-    {"chat", "voice_chat", "agent_run"}
+    {"chat", "agent_run"}
 )
 TASK_SCHEDULE_TYPES = frozenset({"once", "daily", "weekly", "yearly", "lunar_yearly"})
 
@@ -1601,14 +1601,14 @@ class MaodouClient(botpy.Client):
         - 其它错误按原 seq 重试，最多 attempts 次；
         - 全部失败退回主动消息通道兜底（ack 不兜底，它发不出去无所谓）。
 
-        长文字先按自然边界拆成多段，每段占一个独立 seq，全部文字发完后再用下一个
-        seq 单独发图。中途失败只兜底尚未送达的剩余文字，绝不把已送达的前文再发一遍。
+        普通回复的长文字先按自然边界拆成多段，每段占一个独立 seq，全部文字发完后再用
+        下一个 seq 单独发图。语音回复则只发语音，不先发文字；只有 TTS、上传或语音发送
+        失败时才退回文字。中途失败只兜底尚未送达的剩余文字，绝不重发已送达的前文。
         """
         wants_voice = bool(getattr(text, "voice_reply", False))
         content, sticker = self._outgoing_parts(message.group_openid, text)
         if wants_voice:
-            # 语音回复第一版只允许「文字正文 + 一条语音」，不再追加表情包，
-            # 否则用户会看到「文字 → 语音 → 表情」，节奏很怪。
+            # 语音回复只发一条语音，不附文字或表情包。
             sticker = None
         current = seq
 
@@ -1635,8 +1635,7 @@ class MaodouClient(botpy.Client):
             upload_task = asyncio.create_task(
                 self._upload_group_image(message.group_openid, sticker)
             )
-        # TTS 可以和文字发送并行：服务端在生成音频时，正文已经一条条发出去。
-        # 但语音消息本身必须等所有文字都成功送达后才能上传并发送。
+        # 语音成功时这就是本轮唯一可见的回复；失败时才把正文当兜底文字发送。
         voice_task: asyncio.Task[bytes] | None = None
         if wants_voice and has_text and self.voice_synthesizer.enabled:
             voice_task = asyncio.create_task(
@@ -1644,6 +1643,65 @@ class MaodouClient(botpy.Client):
             )
 
         try:
+            if voice_task is not None:
+                try:
+                    voice_data = await voice_task
+                except Exception as exc:
+                    logger.warning("TTS failed, falling back to text: %s", exc)
+                    voice_data = b""
+                voice_task = None
+
+                file_info = ""
+                if voice_data:
+                    try:
+                        file_info = await self._upload_group_voice(
+                            message.group_openid,
+                            voice_data,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "voice upload failed, falling back to text: %s", exc
+                        )
+
+                if file_info:
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            await self._post_voice_message(
+                                message.group_openid,
+                                file_info,
+                                msg_id=message.id,
+                                msg_seq=current,
+                            )
+                        except Exception as exc:
+                            if self._is_dedup_error(exc):
+                                if attempt > 1:
+                                    logger.info(
+                                        "voice already delivered, seq=%s", current
+                                    )
+                                    remember_delivery()
+                                    return True
+                                logger.warning(
+                                    "voice msg_seq %s already taken, resending as %s",
+                                    current,
+                                    current + 1,
+                                )
+                                current += 1
+                                continue
+                            self._note_rate_limit(message.group_openid, exc)
+                            logger.warning(
+                                "voice send failed (%s), seq=%s; falling back to text",
+                                exc,
+                                current,
+                            )
+                            break
+                        else:
+                            remember_delivery()
+                            return True
+                elif voice_data:
+                    logger.warning(
+                        "voice upload returned no file_info, falling back to text"
+                    )
+
             if has_text:
                 sent_chunks = 0
                 for chunk_index, chunk in enumerate(chunks):
@@ -1726,72 +1784,7 @@ class MaodouClient(botpy.Client):
                     )
 
             if wants_voice:
-                if voice_task is None:
-                    # 没有配置 TTS，或配置在运行中被关掉：文字已经完整发出，
-                    # 自然降级即可，不能把这条正常聊天判成失败。
-                    remember_delivery()
-                    return True
-                try:
-                    voice_data = await voice_task
-                except Exception as exc:
-                    logger.warning("TTS failed, keeping text only: %s", exc)
-                    voice_data = b""
-                voice_task = None
-                if not voice_data:
-                    remember_delivery()
-                    return True
-
-                file_info = ""
-                try:
-                    file_info = await self._upload_group_voice(
-                        message.group_openid,
-                        voice_data,
-                    )
-                except Exception as exc:
-                    logger.warning("voice upload failed, keeping text only: %s", exc)
-                if not file_info:
-                    logger.warning(
-                        "voice upload returned no file_info, keep the text only"
-                    )
-                    remember_delivery()
-                    return True
-
-                for attempt in range(1, max_attempts + 1):
-                    try:
-                        await self._post_voice_message(
-                            message.group_openid,
-                            file_info,
-                            msg_id=message.id,
-                            msg_seq=current,
-                        )
-                    except Exception as exc:
-                        if self._is_dedup_error(exc):
-                            if attempt > 1:
-                                logger.info(
-                                    "voice already delivered, seq=%s", current
-                                )
-                                remember_delivery()
-                                return True
-                            logger.warning(
-                                "voice msg_seq %s already taken, resending as %s",
-                                current,
-                                current + 1,
-                            )
-                            current += 1
-                            continue
-                        self._note_rate_limit(message.group_openid, exc)
-                        logger.warning(
-                            "voice send failed (%s), seq=%s; keeping text",
-                            exc,
-                            current,
-                        )
-                        remember_delivery()
-                        return True
-                    else:
-                        remember_delivery()
-                        return True
-
-                # 语音失败时正文早已送达，这一轮仍算成功，不能重发正文。
+                # 没配 TTS，或 TTS/上传/发送失败后，正文已作为兜底文字发出。
                 remember_delivery()
                 return True
 

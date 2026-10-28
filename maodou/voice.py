@@ -439,7 +439,7 @@ class VoiceSynthesizer:
 
 
 class VoiceReply(str):
-    """标记一条文本回复在正文发送完成后还要单独发语音。
+    """标记一条回复只发送语音；语音失败时才由发送层退回文字。
 
     继承 str 是为了不影响现有大量把回复当字符串处理的 handler 和测试；
     发送层只读取 voice_reply 属性，不需要把调用链全部改成对象。

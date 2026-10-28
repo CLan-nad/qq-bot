@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import maodou.bot as bot_module
 from maodou.bot import MaodouClient
-from maodou.replies import split_reply_text
 from maodou.voice import VoiceReply
 
 
@@ -78,23 +77,21 @@ class VoiceSendTests(unittest.TestCase):
         )
         return ok, sent, uploads, synth
 
-    def test_all_text_goes_first_then_one_voice_uses_next_seq(self) -> None:
+    def test_voice_reply_sends_only_one_voice(self) -> None:
         synth = _FakeSynth()
         ok, sent, uploads, _ = self._send(VoiceReply("晚安呀"), synth)
 
         self.assertTrue(ok)
-        self.assertEqual(len(sent), 2)
-        self.assertEqual(sent[0]["content"], "晚安呀")
-        self.assertNotIn("msg_type", sent[0])
-        self.assertEqual(sent[1]["msg_type"], 7)
-        self.assertIsNone(sent[1]["content"])
-        self.assertEqual(sent[1]["media"], {"file_info": "voice-file-info"})
-        self.assertEqual([item["msg_seq"] for item in sent], [1, 2])
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["msg_type"], 7)
+        self.assertEqual(sent[0]["msg_seq"], 1)
+        self.assertIsNone(sent[0]["content"])
+        self.assertEqual(sent[0]["media"], {"file_info": "voice-file-info"})
         self.assertEqual(uploads, [b"audio"])
+        self.assertEqual(synth.calls, ["晚安呀"])
 
-    def test_long_text_uses_all_contiguous_seqs_before_the_voice(self) -> None:
+    def test_long_voice_text_is_not_split_into_preceding_text_messages(self) -> None:
         text = "一二三四。五六七八。"
-        expected = split_reply_text(text, 6)
         synth = _FakeSynth()
         client, message, sent, _ = _client()
         client.settings.reply_chunk_chars = 6
@@ -105,37 +102,31 @@ class VoiceSendTests(unittest.TestCase):
         )
 
         self.assertTrue(ok)
-        self.assertEqual(
-            [(item["msg_seq"], item["content"]) for item in sent[: len(expected)]],
-            list(enumerate(expected, start=1)),
-        )
-        self.assertEqual(sent[-1]["msg_type"], 7)
-        self.assertEqual(sent[-1]["msg_seq"], len(expected) + 1)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["msg_type"], 7)
+        self.assertEqual(sent[0]["msg_seq"], 1)
+        self.assertEqual(synth.calls, [text])
 
-    def test_text_failure_never_uploads_or_sends_voice(self) -> None:
-        async def fail(**kwargs):
-            raise RuntimeError("connection reset")
-
-        client, message, _sent, uploads = _client()
-        client.api.post_group_message = fail
+    def test_voice_upload_failure_falls_back_to_text(self) -> None:
+        client, message, sent, uploads = _client()
         synth = _FakeSynth()
         client.voice_synthesizer = synth
 
+        async def upload_failed(group_openid: str, data: bytes) -> str:
+            uploads.append(data)
+            return ""
+
+        client._upload_group_voice = upload_failed
         ok = self.loop.run_until_complete(
-            client._send_reply(
-                message,
-                VoiceReply("晚安"),
-                1,
-                "TEST:REPLY",
-                attempts=1,
-                proactive_fallback=False,
-            )
+            client._send_reply(message, VoiceReply("晚安"), 1, "TEST:REPLY")
         )
 
-        self.assertFalse(ok)
-        self.assertEqual(uploads, [])
+        self.assertTrue(ok)
+        self.assertEqual(uploads, [b"audio"])
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["content"], "晚安")
 
-    def test_tts_failure_keeps_the_text_and_never_uploads(self) -> None:
+    def test_tts_failure_falls_back_to_text_and_never_uploads(self) -> None:
         synth = _FakeSynth(error=RuntimeError("TTS down"))
         ok, sent, uploads, _ = self._send(VoiceReply("晚安"), synth)
         self.assertTrue(ok)
@@ -143,22 +134,7 @@ class VoiceSendTests(unittest.TestCase):
         self.assertEqual(sent[0]["content"], "晚安")
         self.assertEqual(uploads, [])
 
-    def test_upload_failure_keeps_the_text_and_sends_no_voice_message(self) -> None:
-        client, message, sent, _uploads = _client()
-        client.voice_synthesizer = _FakeSynth()
-
-        async def upload_failed(group_openid: str, data: bytes) -> str:
-            return ""
-
-        client._upload_group_voice = upload_failed
-        ok = self.loop.run_until_complete(
-            client._send_reply(message, VoiceReply("晚安"), 1, "TEST:REPLY")
-        )
-        self.assertTrue(ok)
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0]["content"], "晚安")
-
-    def test_voice_send_failure_keeps_text_and_counts_as_success(self) -> None:
+    def test_voice_send_failure_falls_back_to_text(self) -> None:
         client, message, sent, uploads = _client()
         client.voice_synthesizer = _FakeSynth()
 
@@ -173,8 +149,9 @@ class VoiceSendTests(unittest.TestCase):
         )
         self.assertTrue(ok)
         self.assertEqual(len(uploads), 1)
-        self.assertEqual([item["msg_seq"] for item in sent], [1, 2])
-        self.assertEqual(sent[0]["content"], "晚安")
+        self.assertEqual([item["msg_seq"] for item in sent], [1, 1])
+        self.assertEqual(sent[0]["msg_type"], 7)
+        self.assertEqual(sent[1]["content"], "晚安")
 
     def test_no_tts_configuration_degrades_to_text_only(self) -> None:
         synth = SimpleNamespace(enabled=False)
@@ -196,7 +173,7 @@ class VoiceSendTests(unittest.TestCase):
             client._send_reply(message, VoiceReply("晚安 [抱抱]"), 1, "TEST:REPLY")
         )
         self.assertTrue(ok)
-        self.assertEqual([item.get("msg_type") for item in sent], [None, 7])
+        self.assertEqual([item.get("msg_type") for item in sent], [7])
 
 
 class VoiceIntentTests(unittest.TestCase):
