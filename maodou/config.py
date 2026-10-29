@@ -53,6 +53,8 @@ class Settings:
     care_daily_max: int
     care_cooldown_minutes: int
     active_msg_daily_max: int
+    active_window_seconds: int
+    active_followup_seconds: int
     face_tags: bool
     stickers_enabled: bool
     sticker_dir: str
@@ -161,6 +163,14 @@ def load_settings() -> Settings:
         care_daily_max=int(os.getenv("MAODOU_CARE_DAILY_MAX", "2")),
         care_cooldown_minutes=int(os.getenv("MAODOU_CARE_COOLDOWN_MINUTES", "180")),
         active_msg_daily_max=int(os.getenv("MAODOU_ACTIVE_MSG_DAILY_MAX", "6")),
+        # 被 @ 后的一小段“在场”时间。活跃期只允许自然接话，不执行任务类动作。
+        active_window_seconds=max(
+            0, int(os.getenv("MAODOU_ACTIVE_WINDOW_SECONDS", "600"))
+        ),
+        # 活跃会话里安静这么久后，允许小毛豆自己判断要不要补一句话。
+        active_followup_seconds=max(
+            0, int(os.getenv("MAODOU_ACTIVE_FOLLOWUP_SECONDS", "180"))
+        ),
         # 模型写的 [头秃] 出站时要不要还原成 QQ 表情标签。实测 QQ 群消息不认这些标签
         # （2026-10-16 探针：三种写法都原样显示成尖括号），所以默认关：让它改用 emoji。
         face_tags=os.getenv("MAODOU_FACE_TAGS", "0").strip().lower()

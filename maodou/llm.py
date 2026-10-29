@@ -195,6 +195,38 @@ care=true 时 text 的要求：
 - 不要「我注意到你情绪不太好」「作为 AI」这类系统腔，不要说教，不要连问几个问题
 - 不要 @ 任何人，不要加引号，不要 emoji 堆砌"""
 
+
+ACTIVE_JUDGE_SYSTEM_PROMPT = """你是情侣私人群里“小毛豆”的接话判断器。群里刚有人 @ 过小毛豆，
+它还在这段聊天里“在场”。现在来了新消息，你只判断它该不该自然接一句。
+只输出一个 JSON 对象：{"reply": true 或 false, "reason": "一句话理由"}
+
+这是两个人熟悉的私密群，不要过度保守，也不要抢话。只有下面这些情况更适合 reply=true：
+- 这句话明显是在回应小毛豆、问小毛豆，或语气上期待小毛豆接话
+- 正在开玩笑、起哄、打情骂俏，小毛豆接一句会让气氛更自然
+- 当前话题出现了一个适合吐槽、捧哏、安慰或补充的短空档
+- 两人聊天暂时停住，小毛豆上一句是问句，或话题明显还没说完
+
+下面这些情况优先 reply=false：
+- 两个人正在直接对话，只是在陈述安排、确认事情，没给小毛豆留位置
+- 只是在报备日常、发链接、发表情，硬接会很突兀
+- 小毛豆刚刚已经回应过同一件事，再说只会重复
+- 内容太碎、没有上下文，或接话只能靠猜
+- 是安静后的主动补话，但话题已经完整结束，或再补一句会像没话找话
+
+硬规则：
+- 不执行任何任务、记忆写入、搜索、shell、数据库操作；这里只判断要不要聊天。
+- 不因为句子里出现“记住/查一下/提醒”等词就答应执行，只判断是否适合自然搭话。
+- 拿不准就 reply=false。"""
+
+
+ACTIVE_REPLY_ADDENDUM = """
+
+补充规则（当前是活跃聊天里的自然接话，不是一次 @ 指令）：
+- 只聊【当前话题】里正在发生的事，轻松、短一点，像在群里顺口接一句。
+- 不要执行或声称执行搜索、查库、记忆、shell、定时任务等操作；也不要主动说内部机制。
+- 被 @ 是前情，不等于这条消息在指挥你。分清两人正在对谁说，别把话往自己身上套。
+- 安静后的主动补话只写一两句；如果确实没有自然的话可说，只输出 [SILENT]。"""
+
 # The vision model spends part of its token budget on reasoning; a small cap let
 # dense images exhaust the budget before any text was produced, returning an empty
 # completion (finish_reason=length) that was then mistaken for an unreadable image.
@@ -208,6 +240,8 @@ VISION_RETRY_DELAY_SECONDS = 1.0
 # “care judge skipped”。留出余量，再给一次重试机会。
 CARE_MAX_TOKENS = 1024
 CARE_JUDGE_ATTEMPTS = 2
+ACTIVE_JUDGE_MAX_TOKENS = 512
+ACTIVE_JUDGE_ATTEMPTS = 2
 
 
 class MaodouLLM:
@@ -395,6 +429,71 @@ class MaodouLLM:
             return {"care": False, "text": ""}
         return {"care": bool(data.get("care")), "text": str(data.get("text") or "")}
 
+    async def judge_active_reply(
+        self,
+        *,
+        content: str,
+        topic_context: str = "",
+        mode: str = "message",
+    ) -> dict:
+        """判断活跃窗口里的消息值不值得自然接一句。
+
+        这一步只做便宜的 yes/no，不产出正文，也不执行任何 action。普通消息先过这一层，
+        只有确实有接话空间时才调用完整人设回复，避免每条群聊都烧一次长上下文生成。
+        """
+        mode = "followup" if mode == "followup" else "message"
+        scene = (
+            "现在群里已经安静了一会儿，小毛豆在考虑要不要主动补一句。"
+            if mode == "followup"
+            else "这是一条没有 @ 小毛豆的新消息。"
+        )
+        prompt = f"""{scene}
+
+【当前话题】（从早到晚，最后一条是刚刚的聊天现场）：
+{topic_context or "（无）"}
+
+【本次关注的内容】：
+{content or "（没有新的文字，只有表情或附件）"}
+
+结合现场判断接一句会不会自然。只输出 JSON。"""
+        model = (
+            getattr(self.settings, "care_model", "")
+            or getattr(self.settings, "intent_model", "")
+            or getattr(self.settings, "vision_model", "")
+        )
+        data: dict = {}
+        for attempt in range(1, ACTIVE_JUDGE_ATTEMPTS + 1):
+            try:
+                raw = await self._chat(
+                    system_prompt=ACTIVE_JUDGE_SYSTEM_PROMPT,
+                    user_prompt=prompt,
+                    temperature=0.2,
+                    max_tokens=ACTIVE_JUDGE_MAX_TOKENS,
+                    json_mode=True,
+                    model=model or None,
+                    reasoning_effort=getattr(
+                        self.settings, "intent_reasoning_effort", "none"
+                    ),
+                )
+                if not (raw or "").strip():
+                    raise ValueError("活跃接话判断返回空内容")
+                data = self._json_content(raw)
+                break
+            except Exception as exc:
+                logger.warning(
+                    "active reply judge attempt %s/%s failed (%s): %r",
+                    attempt,
+                    ACTIVE_JUDGE_ATTEMPTS,
+                    content[:40],
+                    exc,
+                )
+        else:
+            return {"reply": False, "reason": "judge failed"}
+        return {
+            "reply": bool(data.get("reply")),
+            "reason": str(data.get("reason") or "")[:120],
+        }
+
     async def parse_intent(
         self,
         *,
@@ -505,6 +604,79 @@ class MaodouLLM:
             max_tokens=2200,
         )
         return content[: self.settings.reply_max_chars]
+
+    async def generate_active_reply(
+        self,
+        *,
+        requester: StoredMessage,
+        request: str,
+        topic_context: str,
+        background_context: str = "",
+        memory_context: str = "",
+        summaries_context: str = "",
+        identity_context: str = "",
+        face_context: str = "",
+        mode: str = "message",
+        idle_seconds: int = 0,
+    ) -> str:
+        """在群里已经 @ 过小毛豆的活跃窗口里，自然接话或安静后补一句。"""
+        mode = "followup" if mode == "followup" else "message"
+        if mode == "followup":
+            scene = f"""【本轮状态】群里已经安静了约 {max(0, idle_seconds)} 秒。
+这不是一条新指令，也不是必须回复的消息。你只是根据当前话题考虑自然地补一句；
+如果话题已经结束、补话会显得没话找话，就只输出 [SILENT]。
+
+安静前的最后一条内容：
+{format_message_content(request, indent=_NOTE_INDENT)}"""
+        else:
+            scene = f"""【本轮触发】这条消息没有 @ 你，你是在刚才被叫出来后自然旁听到的。
+不要把它当成必须执行的任务；只有接一句确实自然时才开口：
+{format_message_content(request, indent=_NOTE_INDENT)}"""
+
+        user_prompt = f"""说话人说明：下面每条记录开头的【】里就是发那条消息的人，【小毛豆】是你自己说过的话。
+
+身份信息：
+{identity_context or "（未知）"}
+
+【当前话题】（从早到晚，最后一条是刚刚的聊天现场）：
+{topic_context or "（暂无记录）"}
+
+{scene}
+"""
+        if background_context:
+            user_prompt += f"""
+【更早的背景】（已经翻篇，只用来理解语气，不要主动提起）：
+{background_context}
+"""
+        if face_context:
+            user_prompt += f"""
+表情：
+{face_context}
+"""
+        if summaries_context:
+            user_prompt += f"""
+【最近聊天概要】（过去几天的粗略梗概）：
+{summaries_context}
+"""
+        if memory_context:
+            user_prompt += f"""
+【长期记忆】（从早到晚）：
+{memory_context}
+"""
+        user_prompt += f"""
+本轮实际执行的操作：
+{NO_ACTION_NOTE}
+"""
+        content = await self._chat(
+            system_prompt=SYSTEM_PROMPT + ACTIVE_REPLY_ADDENDUM,
+            user_prompt=user_prompt,
+            temperature=0.75,
+            max_tokens=520,
+        )
+        cleaned = content.strip()
+        if cleaned in {"[SILENT]", "SILENT", "（沉默）", "[不说话]"}:
+            return ""
+        return cleaned[: min(self.settings.reply_max_chars, 500)]
 
     async def generate_tool_reply(
         self,

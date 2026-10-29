@@ -318,6 +318,15 @@ class IdentityContext:
         return "\n".join(lines)
 
 
+@dataclass
+class _ActiveWindow:
+    """一次 @ 触发的群级“在场”状态，只保存在进程内。"""
+
+    until: float
+    last_message_at: float
+    followup_done: bool = False
+
+
 class MaodouClient(botpy.Client):
     def __init__(
         self,
@@ -354,6 +363,9 @@ class MaodouClient(botpy.Client):
         self._image_backfill_tasks: set[asyncio.Task] = set()
         # 群 openid -> 被 QQ 频控关静音到哪天（只当天有效，重启即复位）
         self._proactive_blocked_until: dict[str, str] = {}
+        # 群 openid -> @ 后 10 分钟的活跃窗口。消息本身仍在 SQLite，这里只存临时在场状态。
+        self._active_windows: dict[str, _ActiveWindow] = {}
+        self._active_locks: dict[str, asyncio.Lock] = {}
         self._background_task: asyncio.Task[None] | None = None
 
     async def _bot_login(self, token: Token) -> None:
@@ -747,6 +759,51 @@ class MaodouClient(botpy.Client):
     def _now(self) -> datetime:
         return datetime.now(ZoneInfo(self.settings.timezone))
 
+    def _monotonic(self) -> float:
+        """活跃窗口用单调时钟，系统校时不会让 10 分钟忽然变短或变长。"""
+        return time.monotonic()
+
+    def _active_window_seconds(self) -> int:
+        return max(0, int(getattr(self.settings, "active_window_seconds", 600) or 0))
+
+    def _active_followup_seconds(self) -> int:
+        return max(
+            0, int(getattr(self.settings, "active_followup_seconds", 180) or 0)
+        )
+
+    def _activate_active_group(self, group_openid: str) -> None:
+        seconds = self._active_window_seconds()
+        if seconds <= 0:
+            self._active_windows.pop(group_openid, None)
+            return
+        now = self._monotonic()
+        self._active_windows[group_openid] = _ActiveWindow(
+            until=now + seconds,
+            last_message_at=now,
+        )
+        logger.info("active chat started for %s for %ss", group_openid, seconds)
+
+    def _active_window(self, group_openid: str) -> _ActiveWindow | None:
+        window = self._active_windows.get(group_openid)
+        if window is None:
+            return None
+        if self._monotonic() >= window.until:
+            self._active_windows.pop(group_openid, None)
+            return None
+        return window
+
+    def _touch_active_group(self, group_openid: str) -> None:
+        window = self._active_window(group_openid)
+        if window is not None:
+            window.last_message_at = self._monotonic()
+
+    def _active_lock(self, group_openid: str) -> asyncio.Lock:
+        lock = self._active_locks.get(group_openid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._active_locks[group_openid] = lock
+        return lock
+
     @staticmethod
     def _message_stats_range(
         intent: dict,
@@ -874,6 +931,11 @@ class MaodouClient(botpy.Client):
                 await self._send_due_tasks()
             except Exception:
                 logger.exception("failed to send due scheduled tasks")
+
+            try:
+                await self._maybe_active_followup()
+            except Exception:
+                logger.exception("failed to consider an active-chat follow-up")
 
             if time.monotonic() - last_memory_run >= self.settings.memory_interval_seconds:
                 last_memory_run = time.monotonic()
@@ -1023,6 +1085,220 @@ class MaodouClient(botpy.Client):
         text = "\n".join(f"[摘要] {summary}" for summary in summaries)
         return text[:max_chars]
 
+    # ---------- @ 后的群级活跃窗口 ----------
+
+    async def _send_active_message(
+        self,
+        group_openid: str,
+        text: str,
+        *,
+        source: str,
+    ) -> bool:
+        """主动发送一条自然接话；有图时严格先文字、后单独发图。"""
+        content, sticker = self._outgoing_parts(group_openid, text)
+        chunks = split_reply_text(
+            content,
+            int(getattr(self.settings, "reply_chunk_chars", 900) or 900),
+        )
+        if not chunks and sticker is None:
+            return False
+
+        sent_chunks: list[str] = []
+        try:
+            for chunk in chunks:
+                await self.api.post_group_message(
+                    group_openid=group_openid,
+                    content=chunk,
+                )
+                sent_chunks.append(chunk)
+
+            if sticker is not None:
+                file_info = await self._upload_group_image(group_openid, sticker)
+                if not file_info:
+                    raise RuntimeError(
+                        f"sticker upload returned no file_info: {sticker.name}"
+                    )
+                await self._post_sticker_message(group_openid, file_info)
+        except Exception as exc:
+            self._note_rate_limit(group_openid, exc)
+            if sent_chunks:
+                # 文字已经送达时记下已经发生的内容；没送达的表情不写进上下文。
+                self._remember_bot_reply(
+                    group_openid, "\n".join(sent_chunks), source
+                )
+            logger.warning("active message send failed: %s", exc)
+            # 已经送达部分正文时算“这轮已经接上”，不要让关键词关心再补一句；
+            # 一个字都没送达才返回 False，交给原有关心流程兜底。
+            return bool(sent_chunks)
+
+        self._remember_bot_reply(group_openid, text, source)
+        return True
+
+    async def _maybe_active_reply(self, message: RichGroupMessage) -> bool:
+        """活跃窗口里的非 @ 消息：只判断和生成自然聊天，不进入 action 分发。"""
+        group_openid = message.group_openid
+        if self._active_window(group_openid) is None:
+            return False
+
+        async with self._active_lock(group_openid):
+            if self._active_window(group_openid) is None:
+                return False
+
+            content = normalize_face_tags(message.content).strip()
+            requester = StoredMessage(
+                username=message.username,
+                member_openid=message.author.member_openid or "",
+                role=message.member_role,
+                content=content,
+                timestamp=message.timestamp or "",
+                source="GROUP_MESSAGE_CREATE",
+            )
+            topic, background, _full_recent = self._topic_context(group_openid)
+            identity = self._identity_context(group_openid, requester)
+            verdict = await self.llm.judge_active_reply(
+                content=content,
+                topic_context=topic,
+                mode="message",
+            )
+            reason = str(verdict.get("reason") or "").strip()
+            if not verdict.get("reply"):
+                logger.info(
+                    "active chat stayed quiet for %s: %s",
+                    message.username,
+                    reason or "model chose silence",
+                )
+                return False
+
+            reply = await self.llm.generate_active_reply(
+                requester=requester,
+                request=content or "（只发了表情或附件，没有文字）",
+                topic_context=topic,
+                background_context=background,
+                memory_context=self._memory_context(group_openid),
+                summaries_context=self._summaries_context(group_openid),
+                identity_context=identity.prompt(),
+                face_context=face_prompt(
+                    self.store.face_book(group_openid),
+                    as_tags=self.settings.face_tags,
+                    stickers=self.stickers,
+                ),
+                mode="message",
+            )
+            reply = (reply or "").strip()
+            if not reply:
+                return False
+
+            if await self._send_active_message(
+                group_openid,
+                reply,
+                source="BOT_ACTIVE",
+            ):
+                logger.info(
+                    "active chat replied to %s (%s): %s",
+                    message.username,
+                    reason or "natural opening",
+                    reply[:80],
+                )
+                # 已经真正接上话，就不再让关键词关心兜底，避免一轮两说。
+                return True
+            return False
+
+    async def _maybe_active_followup(self) -> None:
+        """活跃会话安静一段时间后，最多主动补一句话。"""
+        followup_seconds = self._active_followup_seconds()
+        if followup_seconds <= 0:
+            return
+
+        for group_openid in list(self._active_windows):
+            window = self._active_window(group_openid)
+            if window is None or window.followup_done:
+                continue
+            if self._monotonic() - window.last_message_at < followup_seconds:
+                continue
+
+            async with self._active_lock(group_openid):
+                window = self._active_window(group_openid)
+                if (
+                    window is None
+                    or window.followup_done
+                    or self._monotonic() - window.last_message_at < followup_seconds
+                ):
+                    continue
+                window.followup_done = True
+
+                recent = self.store.recent_messages(
+                    group_openid,
+                    min(20, self.settings.recent_messages),
+                )
+                last_human = next(
+                    (
+                        item
+                        for item in reversed(recent)
+                        if not (item.source or "").startswith("BOT_")
+                    ),
+                    None,
+                )
+                if last_human is None:
+                    continue
+
+                topic, background, _full_recent = self._topic_context(group_openid)
+                identity = self._identity_context(group_openid, last_human)
+                verdict = await self.llm.judge_active_reply(
+                    content=last_human.content,
+                    topic_context=topic,
+                    mode="followup",
+                )
+                reason = str(verdict.get("reason") or "").strip()
+                if not verdict.get("reply"):
+                    logger.info(
+                        "active follow-up stayed quiet for %s: %s",
+                        group_openid,
+                        reason or "model chose silence",
+                    )
+                    continue
+
+                idle_seconds = int(
+                    max(0, self._monotonic() - window.last_message_at)
+                )
+                reply = await self.llm.generate_active_reply(
+                    requester=last_human,
+                    request=last_human.content,
+                    topic_context=topic,
+                    background_context=background,
+                    memory_context=self._memory_context(group_openid),
+                    summaries_context=self._summaries_context(group_openid),
+                    identity_context=identity.prompt(),
+                    face_context=face_prompt(
+                        self.store.face_book(group_openid),
+                        as_tags=self.settings.face_tags,
+                        stickers=self.stickers,
+                    ),
+                    mode="followup",
+                    idle_seconds=idle_seconds,
+                )
+                reply = (reply or "").strip()
+                if not reply:
+                    continue
+
+                # 模型生成期间可能有新消息进来；这时把舞台还给真人，不再补话。
+                current = self._active_window(group_openid)
+                if (
+                    current is None
+                    or self._monotonic() - current.last_message_at < followup_seconds
+                ):
+                    continue
+                await self._send_active_message(
+                    group_openid,
+                    reply,
+                    source="BOT_ACTIVE",
+                )
+                logger.info(
+                    "active follow-up sent for %s (%s): %s",
+                    group_openid,
+                    reason or "conversation still open",
+                    reply[:80],
+                )
+
     # ---------- 没被 @ 时的主动关心 ----------
 
     def _pref_int(self, group_openid: str, key: str, default: int) -> int:
@@ -1158,8 +1434,17 @@ class MaodouClient(botpy.Client):
         logger.debug("saved full message from %s", message.username)
 
         if self._bot_mention(message):
+            self._activate_active_group(message.group_openid)
             await self._process_at_message(message, "GROUP_MESSAGE_CREATE")
             return
+
+        self._touch_active_group(message.group_openid)
+        if self._active_window(message.group_openid) is not None:
+            try:
+                if await self._maybe_active_reply(message):
+                    return
+            except Exception:
+                logger.exception("active-chat reply failed")
         try:
             await self._maybe_care(message)
         except Exception:
@@ -1168,6 +1453,7 @@ class MaodouClient(botpy.Client):
     async def on_group_at_message_create(self, message: RichGroupMessage) -> None:
         if not self._group_allowed(message.group_openid):
             return
+        self._activate_active_group(message.group_openid)
         await self._process_at_message(message, "GROUP_AT_MESSAGE_CREATE")
 
     async def _process_at_message(self, message: RichGroupMessage, source: str) -> None:
