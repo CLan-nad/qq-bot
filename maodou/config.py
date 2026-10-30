@@ -43,6 +43,8 @@ class Settings:
     memory_search_messages: int
     task_max_count: int
     vision_model: str
+    vision_prewarm: bool
+    vision_prewarm_wait_seconds: float
     vision_max_images_per_request: int
     vision_recent_messages: int
     vision_max_image_bytes: int
@@ -146,6 +148,11 @@ def load_settings() -> Settings:
         memory_search_messages=int(os.getenv("MAODOU_MEMORY_SEARCH_MESSAGES", "20")),
         task_max_count=int(os.getenv("MAODOU_TASK_MAX_COUNT", "20")),
         vision_model=os.getenv("MAODOU_VISION_MODEL", "deepseek-flash"),
+        vision_prewarm=os.getenv("MAODOU_VISION_PREWARM", "1").strip().lower()
+        not in {"0", "false", "no", "off"},
+        vision_prewarm_wait_seconds=float(
+            os.getenv("MAODOU_VISION_PREWARM_WAIT_SECONDS", "45")
+        ),
         vision_max_images_per_request=int(
             os.getenv("MAODOU_VISION_MAX_IMAGES_PER_REQUEST", "9")
         ),

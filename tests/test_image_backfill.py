@@ -393,7 +393,11 @@ class ReplyIsNotBlockedByBackfillTests(_LoopTestCase):
 
     def test_backfill_is_skipped_when_the_request_ate_the_whole_budget(self) -> None:
         async def scenario() -> None:
-            client = _client(store=self.store, vision_max_images_per_request=1)
+            client = _client(
+                store=self.store,
+                vision_max_images_per_request=1,
+                vision_prewarm=False,
+            )
             sent: list[tuple[int, str]] = []
             self._wire(client, sent, "看到啦")
 

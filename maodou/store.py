@@ -578,6 +578,39 @@ class ChatStore:
             )
         return cursor.rowcount == 1
 
+    def get_message(self, group_openid: str, message_key: str) -> StoredMessage | None:
+        """按群 + message_key 取一条消息的最新正文，供识图回填后重新读取。"""
+        if not group_openid or not message_key:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT row_id, message_key, username, member_openid, role, content,
+                   timestamp, source, raw_json
+            FROM messages
+            WHERE group_openid = ? AND message_key = ?
+            """,
+            (group_openid, message_key),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            raw = json.loads(row["raw_json"] or "{}")
+        except (TypeError, ValueError):
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        return StoredMessage(
+            username=row["username"] or "unknown",
+            member_openid=row["member_openid"] or "",
+            role=row["role"] or "member",
+            content=row["content"] or "",
+            timestamp=row["timestamp"] or "",
+            source=row["source"] or "",
+            message_key=row["message_key"] or "",
+            raw=raw,
+            row_id=int(row["row_id"] or 0),
+        )
+
     def get_image_description(self, digest: str) -> str:
         """命中缓存就返回上次的图片描述，并把命中计数加一。"""
         if not digest:

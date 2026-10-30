@@ -327,6 +327,17 @@ class _ActiveWindow:
     followup_done: bool = False
 
 
+@dataclass
+class _ImagePrewarmItem:
+    """一张待后台识别的图片消息；done 在识别成功、失败或取消时都会置位。"""
+
+    group_openid: str
+    message_key: str
+    content: str
+    attachments: list[ImageAttachment]
+    done: asyncio.Event
+
+
 class MaodouClient(botpy.Client):
     def __init__(
         self,
@@ -358,6 +369,12 @@ class MaodouClient(botpy.Client):
             logger.info("loaded %s stickers from %s", len(self.stickers), self.stickers.root)
         self._reply_lock = asyncio.Lock()
         self._memory_lock = asyncio.Lock()
+        # 收到图片就后台预识别：每群一条串行队列、不同群并行。
+        # 队列项按 (群, message_key) 去重；事件让 @ / 活跃接话等待识别完成。
+        self._image_prewarm_queues: dict[str, asyncio.Queue[_ImagePrewarmItem]] = {}
+        self._image_prewarm_workers: dict[str, asyncio.Task[None]] = {}
+        self._image_prewarm_items: dict[tuple[str, str], _ImagePrewarmItem] = {}
+        self._image_prewarm_tasks: set[asyncio.Task[None]] = set()
         # 后台补识别旧图片：正在跑的群 + 任务引用（防止被 GC 掉）
         self._image_backfill_running: set[str] = set()
         self._image_backfill_tasks: set[asyncio.Task] = set()
@@ -505,6 +522,162 @@ class MaodouClient(botpy.Client):
         digest = hashlib.sha256(data).hexdigest()
         return to_data_url(data, content_type), digest, len(data), content_type
 
+    def _prewarm_image_message(
+        self,
+        message: RichGroupMessage,
+        *,
+        message_key: str | None = None,
+    ) -> bool:
+        """收到带图消息就入队预识别：不等 @、不发言、不进入 action 分发。
+
+        只做视觉识别和数据库回填。同群串行、不同群并行；同一 message_key
+        只会排队一次，队列里和正在跑的都算。
+        """
+        if not bool(getattr(self.settings, "vision_prewarm", True)):
+            return False
+        group_openid = getattr(message, "group_openid", "") or ""
+        key = message_key or ChatStore.message_key(
+            getattr(message, "id", None), getattr(message, "msg_seq", None)
+        )
+        if not group_openid or not key:
+            return False
+        if (group_openid, key) in self._image_prewarm_items:
+            return False
+        attachments = image_attachments(getattr(message, "raw", {}) or {})
+        if not attachments:
+            return False
+        stored = self.store.get_message(group_openid, key)
+        if stored is not None and not needs_image_description(
+            stored.content, stored.raw
+        ):
+            return False
+        item = _ImagePrewarmItem(
+            group_openid=group_openid,
+            message_key=key,
+            content=(stored.content if stored is not None else message.content or ""),
+            attachments=attachments,
+            done=asyncio.Event(),
+        )
+        self._image_prewarm_items[(group_openid, key)] = item
+        queue = self._image_prewarm_queues.get(group_openid)
+        if queue is None:
+            queue = asyncio.Queue()
+            self._image_prewarm_queues[group_openid] = queue
+        queue.put_nowait(item)
+        self._ensure_image_prewarm_worker(group_openid)
+        logger.info(
+            "image prewarm queued: %s (%d image(s))", key, len(attachments)
+        )
+        return True
+
+    def _ensure_image_prewarm_worker(self, group_openid: str) -> None:
+        worker = self._image_prewarm_workers.get(group_openid)
+        if worker is not None and not worker.done():
+            return
+        worker = asyncio.create_task(self._image_prewarm_worker(group_openid))
+        self._image_prewarm_workers[group_openid] = worker
+        self._image_prewarm_tasks.add(worker)
+
+        def _cleanup(task: asyncio.Task[None]) -> None:
+            self._image_prewarm_tasks.discard(task)
+            if self._image_prewarm_workers.get(group_openid) is task:
+                self._image_prewarm_workers.pop(group_openid, None)
+
+        worker.add_done_callback(_cleanup)
+
+    async def _image_prewarm_worker(self, group_openid: str) -> None:
+        queue = self._image_prewarm_queues[group_openid]
+        while True:
+            try:
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            try:
+                await self._run_image_prewarm_item(item)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("image prewarm failed: %s", item.message_key)
+            finally:
+                # 成功、失败、取消都要放行等待方，否则 @ 会一直卡在这一张图上。
+                item.done.set()
+                self._image_prewarm_items.pop(
+                    (group_openid, item.message_key), None
+                )
+
+    async def _run_image_prewarm_item(self, item: _ImagePrewarmItem) -> None:
+        stored = self.store.get_message(item.group_openid, item.message_key)
+        if stored is not None:
+            if not needs_image_description(stored.content, stored.raw):
+                return
+            content = stored.content
+            attachments = image_attachments(stored.raw) or item.attachments
+        else:
+            content = item.content
+            attachments = item.attachments
+        if not attachments:
+            return
+        descriptions = await self._describe_attachments(attachments, hint=content)
+        # 识图期间，同一条消息可能已经被语音转写或另一条路径回填过。
+        # 写回前重新读最新正文，避免用旧快照覆盖掉别的结果。
+        latest = self.store.get_message(item.group_openid, item.message_key)
+        if latest is not None:
+            if not needs_image_description(latest.content, latest.raw):
+                return
+            content = latest.content
+        if any(description.strip() for description in descriptions):
+            enriched = message_with_image_descriptions(content, descriptions)
+        else:
+            logger.warning(
+                "image prewarm produced no description for %s, marking unrecognized",
+                item.message_key,
+            )
+            enriched = message_with_unrecognized_images(content)
+        if enriched != content:
+            self.store.update_message_content(
+                item.group_openid, item.message_key, enriched
+            )
+
+    def _image_prewarm_event(
+        self, group_openid: str, message_key: str
+    ) -> asyncio.Event | None:
+        item = self._image_prewarm_items.get((group_openid, message_key))
+        return item.done if item is not None else None
+
+    def _image_prewarm_events(
+        self,
+        group_openid: str,
+        message_keys: Iterable[str] | None = None,
+    ) -> list[asyncio.Event]:
+        keys = set(message_keys) if message_keys is not None else None
+        events: list[asyncio.Event] = []
+        for (group, key), item in list(self._image_prewarm_items.items()):
+            if group != group_openid:
+                continue
+            if keys is not None and key not in keys:
+                continue
+            events.append(item.done)
+        return events
+
+    async def _wait_image_prewarm(
+        self, events: list[asyncio.Event], *, timeout: float
+    ) -> bool:
+        """等一批预识别完成；超时只记日志，让调用方用库里的现状兜底。"""
+        if not events:
+            return True
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(event.wait() for event in events)),
+                timeout=max(0.0, float(timeout)),
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "image prewarm wait timed out with %d batch(es) still running",
+                len(events),
+            )
+            return False
+
     async def _describe_recent_images(
         self,
         group_openid: str,
@@ -521,8 +694,10 @@ class MaodouClient(botpy.Client):
         ):
             if budget <= 0:
                 break
-            if stored.message_key == exclude_key or not needs_image_description(
-                stored.content, stored.raw
+            if (
+                stored.message_key == exclude_key
+                or (group_openid, stored.message_key) in self._image_prewarm_items
+                or not needs_image_description(stored.content, stored.raw)
             ):
                 continue
             attachments = image_attachments(stored.raw)[:budget]
@@ -555,9 +730,10 @@ class MaodouClient(botpy.Client):
     ) -> list[tuple[StoredMessage, list[ImageAttachment]]]:
         """从最新消息往前收集「连续的一批待识别图片」。
 
-        图片消息本身不会触发视觉模型，只有 @ 事件才会。用户一次连发好几张图再 @ 时，
-        如果只同步最新一张，第一轮回答仍然会把前面几张当成没看到。这里按消息从新到旧
-        扫，碰到普通文字就停，最多收满本轮额度；机器人自己的消息跳过，不打断图片批次。
+        收到图片时后台已经会预识别；这里负责兜住进程重启、预识别超时等留下的旧图。
+        用户一次连发好几张图再 @ 时，如果只同步最新一张，第一轮回答仍然会把前面几张
+        当成没看到。这里按消息从新到旧扫，碰到普通文字就停，最多收满本轮额度；
+        机器人自己的消息跳过，不打断图片批次。
         """
         if budget <= 0:
             return []
@@ -611,6 +787,15 @@ class MaodouClient(botpy.Client):
         )
         used = 0
         for stored, attachments in items:
+            latest = self.store.get_message(group_openid, stored.message_key)
+            if latest is not None:
+                if not needs_image_description(latest.content, latest.raw):
+                    # 后台预识别已经写回去了，直接跳过，别重复调用视觉模型。
+                    continue
+                stored = latest
+            if (group_openid, stored.message_key) in self._image_prewarm_items:
+                # 等待超时，后台还在跑：这一轮先不重复识别。
+                continue
             logger.info(
                 "describing pending image batch synchronously: %s (%s image(s))",
                 stored.message_key,
@@ -1144,7 +1329,21 @@ class MaodouClient(botpy.Client):
             if self._active_window(group_openid) is None:
                 return False
 
-            content = normalize_face_tags(message.content).strip()
+            # 活跃会话里的图片可能还在后台识别。先等这一条的结果，再判断和生成，
+            # 免得模型拿「（这张还没识别）」当正文。最多等 15 秒，不拖住整段聊天。
+            key = ChatStore.message_key(message.id, message.msg_seq)
+            event = self._image_prewarm_event(group_openid, key)
+            if event is not None:
+                wait_setting = float(
+                    getattr(self.settings, "vision_prewarm_wait_seconds", 45.0)
+                )
+                await self._wait_image_prewarm(
+                    [event], timeout=max(1.0, min(15.0, wait_setting))
+                )
+            stored = self.store.get_message(group_openid, key)
+            content = normalize_face_tags(
+                stored.content if stored is not None else message.content
+            ).strip()
             requester = StoredMessage(
                 username=message.username,
                 member_openid=message.author.member_openid or "",
@@ -1431,6 +1630,8 @@ class MaodouClient(botpy.Client):
         if not self._group_allowed(message.group_openid):
             return
         self._save_message(message, "GROUP_MESSAGE_CREATE")
+        # 不管有没有 @，带图就先在后台识别。它只回填数据库，不发消息、不进 action。
+        self._prewarm_image_message(message)
         logger.debug("saved full message from %s", message.username)
 
         if self._bot_mention(message):
@@ -1481,10 +1682,13 @@ class MaodouClient(botpy.Client):
             0, int(getattr(self.settings, "asr_max_per_request", 5) or 0)
         )
         pre_acked = False
-        ack_task: asyncio.Task[bool] | None = None
+
+        # 收到图片就在后台识别；@ 到这条消息时，下面直接等它的结果。
+        # 同一条消息重复触发时这里会命中去重，不会多烧一次视觉模型。
+        self._prewarm_image_message(message, message_key=key)
 
         current_images = (
-            image_attachments(message.raw)[:image_budget] if image_budget > 0 else []
+            image_attachments(message.raw) if image_budget > 0 else []
         )
         pending_image_batch: list[tuple[StoredMessage, list[ImageAttachment]]] = []
         if image_budget > 0 and not current_images:
@@ -1511,17 +1715,108 @@ class MaodouClient(botpy.Client):
             len(items) for _, items in pending_voice_batch
         )
 
+        async def prepare_media() -> tuple[list[str], list[str]]:
+            nonlocal content, image_budget, voice_budget
+            nonlocal descriptions, voice_transcripts
+            if planned_images > 0:
+                # 先把这一群里已经交给后台的图等完：当前图、以及用户刚连发的
+                # 那批图，都不会被同步路径重复识别。超时就用库里的现状兜底。
+                events = self._image_prewarm_events(message.group_openid)
+                if events:
+                    await self._wait_image_prewarm(
+                        events,
+                        timeout=float(
+                            getattr(
+                                self.settings,
+                                "vision_prewarm_wait_seconds",
+                                45.0,
+                            )
+                        ),
+                    )
+                stored = self.store.get_message(message.group_openid, key)
+                if stored is not None:
+                    content = stored.content
+                if (
+                    needs_image_description(content, message.raw)
+                    and image_budget > 0
+                    # 等待超时但后台还拿着这条消息时，不要重复调用视觉模型。
+                    and self._image_prewarm_event(message.group_openid, key) is None
+                ):
+                    attachments = current_images[:image_budget]
+                    descriptions = await self._describe_attachments(
+                        attachments, hint=content
+                    )
+                    image_budget -= len(attachments)
+                    latest = self.store.get_message(message.group_openid, key)
+                    if latest is not None:
+                        content = latest.content
+                    if needs_image_description(content, message.raw):
+                        if any(item.strip() for item in descriptions):
+                            enriched = message_with_image_descriptions(
+                                content, descriptions
+                            )
+                        else:
+                            enriched = message_with_unrecognized_images(content)
+                        if enriched != content:
+                            self.store.update_message_content(
+                                message.group_openid, key, enriched
+                            )
+                        content = enriched
+            if planned_images > 0 and not current_images and image_budget > 0:
+                # 图片先单独发、下一条再 @ 问图：后台没接手的旧图才在这里同步补。
+                used = await self._describe_pending_image_batch(
+                    message.group_openid,
+                    exclude_key=key,
+                    budget=image_budget,
+                    batch=pending_image_batch,
+                )
+                image_budget -= used
+
+            if current_voices:
+                voice_transcripts = await self._transcribe_voice_attachments(
+                    current_voices
+                )
+                voice_budget -= len(current_voices)
+                if any(voice_transcripts):
+                    enriched = message_with_voice_transcripts(
+                        content, voice_transcripts
+                    )
+                else:
+                    logger.warning(
+                        "voice transcript empty for current message %s, marking unrecognized",
+                        key,
+                    )
+                    enriched = message_with_unrecognized_voice(content)
+                if enriched != content:
+                    self.store.update_message_content(
+                        message.group_openid, key, enriched
+                    )
+                content = enriched
+            if voice_budget > 0 and not current_voices:
+                # 语音先单独发、下一条文字再 @：先同步转写最近一批，再组装话题。
+                used = await self._transcribe_pending_voice_batch(
+                    message.group_openid,
+                    exclude_key=key,
+                    budget=voice_budget,
+                    batch=pending_voice_batch,
+                )
+                voice_budget -= used
+            return descriptions, voice_transcripts
+
         if planned_images > 0 or planned_voices > 0:
-            # 下载识图或调 ASR 都可能卡几秒。图片和语音共用一次 ack，避免用户
-            # 同时收到「我看看图」和「我听听」两条垫场；正式回复从 seq=2 开始。
+            # 识图和 ASR 都可能卡几秒。先让媒体准备跑起来，超过 ack 阈值才垫一句；
+            # 图片已经预识别过的常见情况下，这里会直接进入正式回复，不再发「我看看图」。
             if planned_images > 0 and planned_voices > 0:
                 ack_text = ACK_TEXT_VOICE_IMAGES
             elif planned_voices > 0:
                 ack_text = ACK_TEXT_VOICE
             else:
                 ack_text = ACK_TEXT_IMAGES if planned_images > 1 else ACK_TEXT_IMAGE
-            ack_task = asyncio.create_task(
-                self._send_reply(
+            media_task = asyncio.create_task(prepare_media())
+            ack_after = float(getattr(self.settings, "ack_after_seconds", 0.0))
+            if ack_after <= 0:
+                # 0 保留旧语义：先垫一句。生产默认 4 秒，只有真的慢了才发。
+                pre_acked = await self._send_reply(
                     message,
                     ack_text,
                     1,
@@ -1530,67 +1825,22 @@ class MaodouClient(botpy.Client):
                     proactive_fallback=False,
                     remember=False,
                 )
-            )
-
-        if current_images:
-            descriptions = await self._describe_attachments(
-                current_images, hint=content
-            )
-            image_budget -= len(current_images)
-            if any(description.strip() for description in descriptions):
-                enriched = message_with_image_descriptions(content, descriptions)
-                if enriched != content:
-                    self.store.update_message_content(
-                        message.group_openid, key, enriched
-                    )
-                content = enriched
-        if not current_images and image_budget > 0:
-            # 图片先单独发、下一条再 @ 问图：这一轮必须先把最近一批看完，
-            # 否则 prompt 已经组装完，后台识别再快也赶不上当前回复。
-            used = await self._describe_pending_image_batch(
-                message.group_openid,
-                exclude_key=key,
-                budget=image_budget,
-                batch=pending_image_batch,
-            )
-            image_budget -= used
-
-        if current_voices:
-            voice_transcripts = await self._transcribe_voice_attachments(
-                current_voices
-            )
-            voice_budget -= len(current_voices)
-            if any(voice_transcripts):
-                enriched = message_with_voice_transcripts(
-                    content, voice_transcripts
-                )
             else:
-                logger.warning(
-                    "voice transcript empty for current message %s, marking unrecognized",
-                    key,
+                done, _pending = await asyncio.wait(
+                    {media_task}, timeout=ack_after
                 )
-                enriched = message_with_unrecognized_voice(content)
-            if enriched != content:
-                self.store.update_message_content(
-                    message.group_openid, key, enriched
-                )
-            content = enriched
-        if not current_voices and voice_budget > 0:
-            # 语音先单独发、下一条文字再 @：先同步转写最近一批，再组装话题。
-            used = await self._transcribe_pending_voice_batch(
-                message.group_openid,
-                exclude_key=key,
-                budget=voice_budget,
-                batch=pending_voice_batch,
-            )
-            voice_budget -= used
+                if not done:
+                    pre_acked = await self._send_reply(
+                        message,
+                        ack_text,
+                        1,
+                        f"{source}:ACK_MEDIA",
+                        attempts=1,
+                        proactive_fallback=False,
+                        remember=False,
+                    )
+            descriptions, voice_transcripts = await media_task
 
-        if ack_task is not None:
-            try:
-                pre_acked = await ack_task
-            except Exception:
-                logger.exception("failed to send media ack")
-                pre_acked = False
         self._queue_image_backfill(
             message.group_openid, exclude_key=key, budget=image_budget
         )
