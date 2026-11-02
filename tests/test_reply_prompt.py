@@ -135,6 +135,14 @@ class GenerateReplyPromptTests(unittest.TestCase):
         prompt = self._capture("随便聊聊")["user_prompt"]
         self.assertNotIn("【本轮输出方式：语音】", prompt)
 
+    def test_empty_request_means_continue_the_current_topic(self) -> None:
+        prompt = self._capture("")["user_prompt"]
+        self.assertIn("接着说", prompt)
+        self.assertIn("最后一条有内容的真人消息", prompt)
+        self.assertIn("刚才叫你一声的动作", prompt)
+        self.assertNotIn("没带话", prompt)
+        self.assertNotIn("光@", prompt)
+
 
 class IdentityLegendTests(unittest.TestCase):
     """身份块要把【】标签对准人：谁是「你」、谁是「另一位」。"""

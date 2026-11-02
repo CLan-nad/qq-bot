@@ -6,7 +6,8 @@
 「自我介绍」这一条路上，SYSTEM_PROMPT 里那句「不要重复自己」根本拦不住，
 因为重复的指令是代码自己下的。
 
-现在只如实告诉模型「对方没带话」，接什么由它照【当前话题】自己定。
+现在的语义是「叫一声，接着说」：空请求保留为空，跳过意图解析，
+由回复模型自然接住【当前话题】，不再围绕「没带话」做文章。
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from types import SimpleNamespace
 
 import maodou.bot as bot_module
 import maodou.store as store_module
-from maodou.bot import EMPTY_AT_REQUEST, MaodouClient
+from maodou.bot import MaodouClient
 from maodou.llm import SYSTEM_PROMPT
 from maodou.store import ChatStore
 
@@ -113,18 +114,20 @@ class EmptyAtRequestTests(unittest.TestCase):
             client._process_at_message(message, "GROUP_AT_MESSAGE_CREATE")
         )
 
-    def test_bare_at_becomes_an_honest_note_not_a_scripted_question(self) -> None:
-        # QQ 的 AT 事件里，只 @ 不说话时 content 就是一个空格
+    def test_bare_at_means_continue_not_a_scripted_question(self) -> None:
+        # QQ 的 AT 事件里，只 @ 不说话时 content 就是一个空格。
+        # 保留真实空串，不再伪造「没带话」，也不浪费一次意图解析。
         self._run(self._client(), _at_message(" "))
-        self.assertEqual(self.to_reply, [EMPTY_AT_REQUEST])
-        self.assertEqual(self.to_intent, [EMPTY_AT_REQUEST])
+        self.assertEqual(self.to_reply, [""])
+        self.assertEqual(self.to_intent, [])
         self.assertNotIn(OLD_SELF_INTRO, self.to_reply[0])
         self.assertEqual(self.sent[-1][1], "在呢，怎么啦？")
 
     def test_mention_only_message_counts_as_empty_too(self) -> None:
         # 全量消息模式下 @ 走 GROUP_MESSAGE_CREATE，剥掉提及之后什么都不剩
         self._run(self._client(), _at_message(f"<@{BOT_ID}> "))
-        self.assertEqual(self.to_reply, [EMPTY_AT_REQUEST])
+        self.assertEqual(self.to_reply, [""])
+        self.assertEqual(self.to_intent, [])
 
     def test_real_text_is_passed_through_untouched(self) -> None:
         self._run(self._client(), _at_message(f"<@{BOT_ID}> 明天记得提醒我买花"))
@@ -148,7 +151,7 @@ class EmptyAtRequestTests(unittest.TestCase):
             ),
         )
         self.assertIn("橘猫", self.to_reply[0])
-        self.assertNotEqual(self.to_reply[0], EMPTY_AT_REQUEST)
+        self.assertTrue(self.to_reply[0].strip())
 
     def test_the_hardcoded_self_intro_is_gone_from_the_code(self) -> None:
         # 那句话现在只允许出现在解释历史的注释里，绝不能再出现在代码里：
@@ -158,9 +161,7 @@ class EmptyAtRequestTests(unittest.TestCase):
             line for line in source.splitlines() if not line.lstrip().startswith("#")
         )
         self.assertFalse(OLD_SELF_INTRO in code_only, "空 @ 又被写死成一句假的用户消息了")
-        self.assertIn(
-            "EMPTY_AT_REQUEST", inspect.getsource(bot_module.MaodouClient._process_at_message)
-        )
+        self.assertNotIn("EMPTY_AT_REQUEST", code_only, "空 @ 不应该再有伪造占位符")
 
     def test_the_stored_placeholder_does_not_smell_like_internals(self) -> None:
         # 线上真出现过：空 @ 入库成「[non-text message]」，模型读到这个英文标记，
@@ -172,10 +173,11 @@ class EmptyAtRequestTests(unittest.TestCase):
         self.assertEqual(stored[-1].content, "[无文字内容]")
         self.assertNotIn("non-text message", inspect.getsource(store_module))
 
-    def test_system_prompt_forbids_recapping_the_feature_list(self) -> None:
-        # 光改掉那句假消息还不够：模型得知道空 @ 该怎么接，否则它自己也会去背清单
-        self.assertIn("只 @ 我没带话", SYSTEM_PROMPT)
-        self.assertIn("别背功能清单", SYSTEM_PROMPT)
+    def test_system_prompt_frames_a_bare_at_as_an_invitation_to_continue(self) -> None:
+        # 光改掉占位符还不够：系统提示词也必须用正面语义，不能反复强调「没带话」。
+        self.assertIn("接着说", SYSTEM_PROMPT)
+        self.assertIn("叫了你一声", SYSTEM_PROMPT)
+        self.assertNotIn("只 @ 我没带话", SYSTEM_PROMPT)
         self.assertIn("能力介绍只在被明确问起时说一次", SYSTEM_PROMPT)
 
 

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
@@ -28,6 +29,11 @@ DEFAULT_MAX_MESSAGES = 40
 DEFAULT_MAX_HOURS = 12
 # 当前话题只剩一条消息时，从上一个话题末尾借几条来补语境。
 FALLBACK_TAIL_SIZE = 5
+
+# 空 @ 入库后可能只剩一个 mention 标签，或落成 store 的通用空内容占位。
+# 这两种都不该把 ID / 占位符原样喂给模型。
+BARE_MENTION_PATTERN = re.compile(r"<@[^>]+>")
+EMPTY_CONTENT_MARK = "[无文字内容]"
 
 
 @dataclass(frozen=True)
@@ -119,6 +125,17 @@ def speaker_label(
     return username or "未知"
 
 
+def topic_content(message: StoredMessage) -> str:
+    """把空 @ 在上下文里写成「叫了你一声」，而不是 mention ID 或空占位。"""
+    text = (message.content or "").strip()
+    if text and BARE_MENTION_PATTERN.fullmatch(text):
+        return "（叫了你一声）"
+    source = (message.source or "").upper()
+    if "AT" in source and (not text or text == EMPTY_CONTENT_MARK):
+        return "（叫了你一声）"
+    return message.content
+
+
 def format_topic(
     messages: Iterable[StoredMessage],
     max_chars: int,
@@ -132,7 +149,7 @@ def format_topic(
     for message in messages:
         timestamp = (message.timestamp or "")[:19].replace("T", " ")
         prefix = f"{timestamp} 【{speaker_label(message, labels, bot_label=bot_label)}】"
-        block = prefix + format_message_content(message.content, indent=" " * len(prefix))
+        block = prefix + format_message_content(topic_content(message), indent=" " * len(prefix))
         if total + len(block) + 1 > max_chars:
             break
         lines.append(block)
@@ -147,4 +164,5 @@ __all__ = [
     "parse_timestamp",
     "speaker_label",
     "split_topic",
+    "topic_content",
 ]

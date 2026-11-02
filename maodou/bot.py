@@ -255,12 +255,9 @@ ACK_TEXT_VOICE = "我听听～"
 ACK_TEXT_VOICE_IMAGES = "我看看图、听听语音～"
 FALLBACK_TEXT = "小毛豆刚刚走神了，稍后再 @ 我一次试试。"
 
-# 只 @ 一下不说话，该怎么接？以前的答案是代码替它决定的：把空消息硬填成
-# 「你好，请介绍一下你能帮我们做什么。」，于是一天里连着四次空 @，每次都背回一份
-# 几乎一模一样的两百字功能清单——用户看到的不是机器人，是一段循环播放的说明书。
-# 现在只如实告诉模型「对方没带话」，接什么由它照【当前话题】自己定：
-# 绝大多数时候一句「在呢，怎么啦」就够了。行为规则写在 SYSTEM_PROMPT 第 4 条。
-EMPTY_AT_REQUEST = "（只 @ 了我，没带话）"
+# 只 @ 一下不说话，不是「用户漏说了什么」，而是「叫一声，接着说」。
+# 空请求不伪造占位文本、也不进意图解析：直接按 chat 接住【当前话题】。
+# 语义说明写在 SYSTEM_PROMPT 第 4 条和 generate_reply 的空请求分支里。
 # 被动回复的重试次数与间隔。ack 不走这套（它只是垫场，发不出去就算了）。
 SEND_ATTEMPTS = 3
 SEND_RETRY_DELAY_SECONDS = 0.4
@@ -1866,22 +1863,27 @@ class MaodouClient(botpy.Client):
                     if bot_mention
                     else raw_request
                 )
-                request = request or EMPTY_AT_REQUEST
-
-                intent_started = time.perf_counter()
-                intent = await self.llm.parse_intent(
-                    request=request,
-                    current_time=self._now().isoformat(timespec="seconds"),
-                    tasks_summary=ChatStore.format_tasks(self.store.tasks(message.group_openid)),
-                    identity_context=identity.prompt(),
-                    topic_context=topic,
-                    festival_context=format_festivals(
-                        upcoming_festivals(self._now(), days=30),
-                        today=self._now().date(),
-                    ),
-                    memory_context=self._memory_context(message.group_openid),
-                )
-                intent_ms = (time.perf_counter() - intent_started) * 1000
+                bare_at = not request.strip()
+                if bare_at:
+                    # 没有文字就没有可解析的意图，直接按聊天接话；少一次模型调用，
+                    # 也避免意图模型把空请求误判成任务、搜索或自我介绍。
+                    intent = {"action": "chat"}
+                    intent_ms = 0.0
+                else:
+                    intent_started = time.perf_counter()
+                    intent = await self.llm.parse_intent(
+                        request=request,
+                        current_time=self._now().isoformat(timespec="seconds"),
+                        tasks_summary=ChatStore.format_tasks(self.store.tasks(message.group_openid)),
+                        identity_context=identity.prompt(),
+                        topic_context=topic,
+                        festival_context=format_festivals(
+                            upcoming_festivals(self._now(), days=30),
+                            today=self._now().date(),
+                        ),
+                        memory_context=self._memory_context(message.group_openid),
+                    )
+                    intent_ms = (time.perf_counter() - intent_started) * 1000
                 action = str(intent.get("action") or "chat")
                 acked = await self._answer_with_ack(
                     message=message,

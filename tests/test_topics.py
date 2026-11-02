@@ -87,6 +87,26 @@ class SplitTopicTests(unittest.TestCase):
 
 
 class FormatTopicTests(unittest.TestCase):
+    def test_bare_mention_renders_as_a_nudge_not_an_id(self) -> None:
+        message = _at(0, "<@BOT-ID>", 1)
+        rendered = format_topic([message], 1000)
+        self.assertIn("（叫了你一声）", rendered)
+        self.assertNotIn("<@", rendered)
+
+    def test_stored_empty_at_placeholder_renders_as_a_nudge(self) -> None:
+        message = StoredMessage(
+            username="CL",
+            member_openid="openid-CL",
+            role="member",
+            content="[无文字内容]",
+            timestamp=BASE.isoformat(),
+            source="GROUP_AT_MESSAGE_CREATE",
+            row_id=1,
+        )
+        rendered = format_topic([message], 1000)
+        self.assertIn("（叫了你一声）", rendered)
+        self.assertNotIn("[无文字内容]", rendered)
+
     def test_line_shape_and_char_budget(self) -> None:
         messages = [
             _at(0, "第一条", 1, username="小虾"),
