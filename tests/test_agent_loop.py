@@ -239,6 +239,31 @@ class AgentLoopBudgetTests(unittest.TestCase):
         self.assertGreater(len(result["text"]), ctx.max_output_chars)
         self.assertEqual(len(completions.calls), 1)
 
+    def test_user_prompt_carries_time_requester_and_identity(self) -> None:
+        completions = _QueuedCompletions([_response("好")])
+        client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        ctx = AgentContext(
+            model="deepseek-flash",
+            requester_name="CL",
+            requester_openid="openid-CL",
+            identity_context="当前触发者：CL（群主）",
+        )
+
+        asyncio.run(
+            agent_run_loop(
+                client=client,
+                ctx=ctx,
+                query="我中午说过啥",
+                mode="fast",
+            )
+        )
+
+        content = completions.calls[0]["messages"][1]["content"]
+        self.assertIn("当前时间：", content)
+        self.assertIn("当前提问者：CL", content)
+        self.assertIn("当前触发者：CL（群主）", content)
+        self.assertIn("本轮任务：\n我中午说过啥", content)
+
 
 if __name__ == "__main__":
     unittest.main()

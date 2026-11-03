@@ -2951,6 +2951,11 @@ class MaodouClient(botpy.Client):
             group_openid=message.group_openid,
             now=self._now(),
             speaker_labels=identity.speaker_labels or self.store.speaker_labels(message.group_openid),
+            requester_name=getattr(message, "username", "") or "",
+            requester_openid=(
+                getattr(getattr(message, "author", None), "member_openid", "") or ""
+            ),
+            identity_context=identity.prompt(),
         )
 
         result = await agent_run_loop(

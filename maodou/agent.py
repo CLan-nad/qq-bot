@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
@@ -151,16 +151,31 @@ AGENT_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "memory_search",
-            "description": "在聊天记录和长期记忆中搜索相关内容。适合回答「我们之前聊过什么」「有没有提到过XX」这类问题。",
+            "description": "搜索聊天记录和长期记忆。适合「之前聊过什么」「有没有提到XX」；问「今天中午我说过什么」这类时间段问题时，优先填 since/until，不必硬凑关键词。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "搜索关键词或问题",
+                        "description": "搜索关键词；只按时间回看时可以留空",
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "开始时间，如 2026-11-03 或 2026-11-03T12:00:00；不填则不限",
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "结束时间，如 2026-11-03 或 2026-11-03T14:00:00；只填日期时包含当天",
+                    },
+                    "speaker": {
+                        "type": "string",
+                        "description": "只看某个人，填显示名或称呼；用户说「我」时可以填当前提问者",
+                    },
+                    "include_bot": {
+                        "type": "boolean",
+                        "description": "是否包含小毛豆自己的消息，默认 false",
                     },
                 },
-                "required": ["query"],
             },
         },
     },
@@ -175,8 +190,8 @@ AGENT_OPERATION_PROMPT = """你正在执行 agent_run 工具任务。下面是�
 - shell_run：在服务器上执行只读命令，查看文件或系统状态
 - math_eval：计算数学表达式
 - calendar_query：查节日日期
-- message_stats：统计群聊消息数量
-- memory_search：搜索聊天记录和长期记忆
+- message_stats：只统计群聊消息数量，不要用它回答“说了什么”
+- memory_search：回看聊天记录、搜索长期记忆；问“某段时间说过什么”时填 since/until，按人筛选填 speaker
 
 工作方式：
 1. 先理解用户真正要完成的任务，只调用能补足信息的工具。
@@ -246,6 +261,10 @@ class AgentContext:
     group_openid: str = ""
     now: datetime = field(default_factory=datetime.now)
     speaker_labels: dict[str, str] = field(default_factory=dict)
+    # 当前提问者：让 agent 知道「我」是谁，查聊天记录时能按人筛选。
+    requester_name: str = ""
+    requester_openid: str = ""
+    identity_context: str = ""
 
 
 def _format_search_result(result: ToolResult) -> str:
@@ -277,6 +296,24 @@ def _format_search_result(result: ToolResult) -> str:
         suffix = f"（{'，'.join(meta)}）" if meta else ""
         lines.append(f"{index}. {title}{suffix}\n   {url}\n   {snippet}")
     return "\n".join(lines) if lines else "（无结果）"
+
+
+def _parse_time_bound(value: str, *, end_of_day: bool) -> datetime | None:
+    """解析工具参数里的日期/时间；只给日期时，结束边界包含当天。"""
+    text = (value or "").strip().replace(" ", "T")
+    if not text:
+        return None
+    if len(text) <= 10:
+        day = datetime.strptime(text, "%Y-%m-%d")
+        return day + timedelta(days=1) if end_of_day else day
+    parsed = datetime.fromisoformat(text)
+    return parsed
+
+
+def _localize_bound(value: datetime | None, now: datetime) -> datetime | None:
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=now.tzinfo)
 
 
 async def _execute_tool(
@@ -385,18 +422,20 @@ async def _execute_tool(
             until_str = str(arguments.get("until", "")).strip()
             include_bot = bool(arguments.get("include_bot", False))
 
-            since = None
-            if since_str:
-                try:
-                    since = datetime.strptime(since_str, "%Y-%m-%d")
-                except ValueError:
-                    return f"日期格式不正确：{since_str}，请用 YYYY-MM-DD"
-            until = ctx.now
-            if until_str:
-                try:
-                    until = datetime.strptime(until_str, "%Y-%m-%d")
-                except ValueError:
-                    return f"日期格式不正确：{until_str}，请用 YYYY-MM-DD"
+            try:
+                since = _localize_bound(
+                    _parse_time_bound(since_str, end_of_day=False), ctx.now
+                )
+                until = ctx.now
+                if until_str:
+                    # until 是“结束日期”：只给日期时包含当天，而不是停在当天 00:00。
+                    until = _localize_bound(
+                        _parse_time_bound(until_str, end_of_day=True), ctx.now
+                    )
+                    if until > ctx.now:
+                        until = ctx.now
+            except ValueError:
+                return "日期格式不正确，请用 YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS"
 
             stats = store.message_stats(
                 ctx.group_openid,
@@ -418,22 +457,72 @@ async def _execute_tool(
 
         elif name == "memory_search":
             query = str(arguments.get("query", "")).strip()
-            if not query:
-                return "错误：搜索词不能为空"
+            since_str = str(arguments.get("since", "")).strip()
+            until_str = str(arguments.get("until", "")).strip()
+            speaker = str(arguments.get("speaker", "")).strip()
+            include_bot = bool(arguments.get("include_bot", False))
+            if not query and not since_str and not until_str:
+                return "错误：至少填搜索词或时间范围"
             store: ChatStore | None = ctx.store
             if store is None:
                 return "记忆搜索功能不可用"
-            results = store.search_messages(
-                ctx.group_openid,
-                query,
-                ctx.memory_search_messages,
-            )
-            cards = store.search_memory_cards(ctx.group_openid, query)
+
+            # 「我」映射到当前提问者；称呼/显示名交给 speaker_labels 反查。
+            if speaker in {"我", "自己", "俺"}:
+                speaker = ctx.requester_name or ctx.requester_openid
+            if speaker and ctx.speaker_labels:
+                for key, label in ctx.speaker_labels.items():
+                    if speaker in {key, label}:
+                        speaker = key
+                        break
+
+            try:
+                since = _localize_bound(
+                    _parse_time_bound(since_str, end_of_day=False), ctx.now
+                )
+                until = None
+                if until_str:
+                    until = _localize_bound(
+                        _parse_time_bound(until_str, end_of_day=True), ctx.now
+                    )
+                    if until > ctx.now:
+                        until = ctx.now
+            except ValueError:
+                return "时间格式不正确，请用 YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS"
+
+            since_text = since.isoformat(timespec="seconds") if since else None
+            until_text = until.isoformat(timespec="seconds") if until else None
+            results = []
+            time_fallback = False
+            if query:
+                results = store.search_messages(
+                    ctx.group_openid,
+                    query,
+                    ctx.memory_search_messages,
+                    since=since_text,
+                    until=until_text,
+                    speaker=speaker,
+                )
+            if not results and (since or until):
+                # 关键词没命中时，时间范围仍然可以作为回看依据；但明确标注，
+                # 免得模型把整段时间的原始记录当成关键词命中。
+                time_fallback = bool(query)
+                results = store.messages_between(
+                    ctx.group_openid,
+                    since=since_text,
+                    until=until_text,
+                    speaker=speaker,
+                    limit=ctx.memory_search_messages,
+                    include_bot=include_bot,
+                )
+            cards = store.search_memory_cards(ctx.group_openid, query) if query else []
             if not results and not cards:
-                return f"没找到和「{query}」有关的记录。"
+                scope = query or "这段时间"
+                return f"没找到{scope}相关的聊天记录。"
             parts = []
             if results:
-                parts.append("相关历史消息：\n" + ChatStore.format_search_results(results))
+                prefix = "（关键词没有直接命中，下面是这段时间的原始记录，供你判断）\n" if time_fallback else ""
+                parts.append(prefix + "相关历史消息：\n" + ChatStore.format_search_results(results))
             if cards:
                 parts.append("相关长期记忆：\n" + ChatStore.format_memory_cards(cards))
             return "\n\n".join(parts)
@@ -478,9 +567,19 @@ async def agent_run_loop(
     model = ctx.model or "deepseek-flash"
     tool_calls_made: list[str] = []
 
+    context_lines = [f"当前时间：{ctx.now.isoformat(timespec='seconds')}"]
+    if ctx.requester_name or ctx.requester_openid:
+        context_lines.append(
+            f"当前提问者：{ctx.requester_name or '未知'}"
+            f"（{ctx.requester_openid or '无 openid'}）；用户说「我」时指这个人。"
+        )
+    if ctx.identity_context:
+        context_lines.append(f"身份信息：\n{ctx.identity_context}")
+    context_lines.append(f"本轮任务：\n{query}")
+    user_content = "\n\n".join(context_lines)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": agent_system_prompt(mode)},
-        {"role": "user", "content": query},
+        {"role": "user", "content": user_content},
     ]
 
     def _finish_reason(response: Any) -> str | None:

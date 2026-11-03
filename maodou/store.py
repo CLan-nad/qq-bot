@@ -6,6 +6,7 @@ import re
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -790,6 +791,21 @@ class ChatStore:
             for row in reversed(rows)
         ]
 
+    @staticmethod
+    def _normalize_time_bound(value: str | None) -> str:
+        """把带时区或不带时区的 ISO 时间统一成可比较的本地字符串。
+
+        库里历史数据的 timestamp 有 `+08:00` 和纯本地时间两种写法；直接按字符串
+        比较时，带后缀的那批会在边界上表现不一致。统一截到秒再比较。
+        """
+        text = str(value or "").strip().replace(" ", "T")
+        if not text:
+            return ""
+        try:
+            return datetime.fromisoformat(text).strftime("%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            return text[:19]
+
     def message_stats(
         self,
         group_openid: str,
@@ -814,12 +830,14 @@ class ChatStore:
         """
         conditions = ["group_openid = ?"]
         params: list[Any] = [group_openid]
-        if since:
-            conditions.append("timestamp >= ?")
-            params.append(since)
-        if until:
-            conditions.append("timestamp < ?")
-            params.append(until)
+        since_bound = self._normalize_time_bound(since) if since else ""
+        until_bound = self._normalize_time_bound(until) if until else ""
+        if since_bound:
+            conditions.append("substr(timestamp, 1, 19) >= ?")
+            params.append(since_bound)
+        if until_bound:
+            conditions.append("substr(timestamp, 1, 19) < ?")
+            params.append(until_bound)
         if not include_bot:
             conditions.append("COALESCE(role, '') != 'bot'")
 
@@ -1048,10 +1066,29 @@ class ChatStore:
         limit: int = 20,
         *,
         priority_text: str = "",
+        since: str | None = None,
+        until: str | None = None,
+        speaker: str = "",
     ) -> list[SearchResult]:
         terms = self._search_terms(query)
         if not terms:
             return []
+
+        filters = ["m.group_openid = ?"]
+        filter_params: list[Any] = [group_openid]
+        since_bound = self._normalize_time_bound(since) if since else ""
+        until_bound = self._normalize_time_bound(until) if until else ""
+        if since_bound:
+            filters.append("substr(m.timestamp, 1, 19) >= ?")
+            filter_params.append(since_bound)
+        if until_bound:
+            filters.append("substr(m.timestamp, 1, 19) < ?")
+            filter_params.append(until_bound)
+        speaker = (speaker or "").strip()
+        if speaker:
+            filters.append("(m.username = ? OR m.member_openid = ?)")
+            filter_params.extend([speaker, speaker])
+        where_clause = " AND ".join(filters)
 
         term_rows = ", ".join("(?, ?)" for _ in terms)
         term_params = [
@@ -1070,7 +1107,7 @@ class ChatStore:
                        WHERE INSTR(m.content, term) > 0 OR INSTR(m.username, term) > 0
                    ) AS score
             FROM messages AS m
-            WHERE m.group_openid = ?
+            WHERE {where_clause}
               AND EXISTS (
                   SELECT 1
                   FROM search_terms
@@ -1079,7 +1116,7 @@ class ChatStore:
             ORDER BY score DESC, m.row_id DESC
             LIMIT ?
             """,
-            (*term_params, group_openid, candidate_limit),
+            (*term_params, *filter_params, candidate_limit),
         ).fetchall()
 
         ranked_rows = []
@@ -1101,6 +1138,54 @@ class ChatStore:
                 timestamp=row["timestamp"] or "",
             )
             for row in (item[4] for item in ranked_rows[:limit])
+        ]
+
+    def messages_between(
+        self,
+        group_openid: str,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        speaker: str = "",
+        limit: int = 40,
+        include_bot: bool = False,
+    ) -> list[SearchResult]:
+        """按时间范围取真实聊天记录，供「我中午说过什么」这类问题使用。"""
+        conditions = ["group_openid = ?"]
+        params: list[Any] = [group_openid]
+        since_bound = self._normalize_time_bound(since) if since else ""
+        until_bound = self._normalize_time_bound(until) if until else ""
+        if since_bound:
+            conditions.append("substr(timestamp, 1, 19) >= ?")
+            params.append(since_bound)
+        if until_bound:
+            conditions.append("substr(timestamp, 1, 19) < ?")
+            params.append(until_bound)
+        speaker = (speaker or "").strip()
+        if speaker:
+            conditions.append("(username = ? OR member_openid = ?)")
+            params.extend([speaker, speaker])
+        if not include_bot:
+            conditions.append("COALESCE(role, '') != 'bot'")
+        params.append(max(1, int(limit)))
+        rows = self._conn.execute(
+            f"""
+            SELECT row_id, username, content, timestamp
+            FROM messages
+            WHERE {' AND '.join(conditions)}
+            ORDER BY row_id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [
+            SearchResult(
+                row_id=row["row_id"],
+                username=row["username"] or "unknown",
+                content=row["content"] or "",
+                timestamp=row["timestamp"] or "",
+            )
+            for row in reversed(rows)
         ]
 
     @staticmethod
