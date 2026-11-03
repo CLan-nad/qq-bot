@@ -46,6 +46,7 @@ from .store import (
     MemoryCard,
     MessageStats,
     ScheduledTask,
+    SocialState,
     StoredMessage,
     clip_summary,
 )
@@ -120,6 +121,9 @@ ACK_ACTIONS = frozenset(
     {"chat", "agent_run"}
 )
 TASK_SCHEDULE_TYPES = frozenset({"once", "daily", "weekly", "yearly", "lunar_yearly"})
+# 代码只负责发现「可能是在叫它」，是否真的在叫由便宜模型判断。
+BOT_NAME_HINTS = ("毛豆", "小毛豆")
+SOCIAL_SCOPES = frozenset({"proactive", "all"})
 
 # 工具回复限长：计算类只给答案不该长篇，命令输出给个中等上限；检索/网页/文档走默认回复上限。
 TOOL_REPLY_MAX_CHARS: dict[str, int] = {
@@ -317,11 +321,13 @@ class IdentityContext:
 
 @dataclass
 class _ActiveWindow:
-    """一次 @ 触发的群级“在场”状态，只保存在进程内。"""
+    """一次直接触发的群级“在场”状态，只保存在进程内。"""
 
     until: float
     last_message_at: float
     followup_done: bool = False
+    minutes: int = 0
+    source: str = ""
 
 
 @dataclass
@@ -953,17 +959,234 @@ class MaodouClient(botpy.Client):
             0, int(getattr(self.settings, "active_followup_seconds", 180) or 0)
         )
 
-    def _activate_active_group(self, group_openid: str) -> None:
-        seconds = self._active_window_seconds()
-        if seconds <= 0:
+    def _mentions_bot_name(self, content: str | None) -> bool:
+        """发现「毛豆/小毛豆」候选。是不是在叫它交给 judge_attention 判断。"""
+        text = normalize_face_tags(content or "")
+        return any(name in text for name in BOT_NAME_HINTS)
+
+    def _record_presence_event(
+        self,
+        group_openid: str,
+        event: str,
+        *,
+        source: str = "",
+        attention: str = "",
+        mode: str = "",
+        minutes: int = 0,
+        scope: str = "",
+        reason: str = "",
+    ) -> None:
+        try:
+            self.store.record_social_event(
+                group_openid=group_openid,
+                event=event,
+                source=source,
+                attention=attention,
+                mode=mode,
+                minutes=minutes,
+                scope=scope,
+                reason=reason,
+            )
+        except Exception:
+            # 审计日志永远不能影响真正说话/不说话。
+            logger.exception("failed to record social event %s", event)
+
+    def _social_state(self, group_openid: str) -> SocialState | None:
+        """读取未过期的安静状态；到期时懒清理，不需要额外定时器。"""
+        state = self.store.get_social_state(group_openid)
+        if state is None or state.mode != "quiet":
+            return None
+        raw_until = (state.until_at or "").strip()
+        if not raw_until:
+            self.store.clear_social_state(group_openid)
+            return None
+        try:
+            until = datetime.fromisoformat(raw_until)
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=ZoneInfo(self.settings.timezone))
+        except ValueError:
+            logger.warning("ignoring malformed social until_at for %s: %r", group_openid, raw_until)
+            self.store.clear_social_state(group_openid)
+            return None
+        if self._now() >= until:
+            self.store.clear_social_state(group_openid)
+            self._record_presence_event(
+                group_openid,
+                "quiet_expired",
+                mode="available",
+                reason="安静时间到期，自动恢复",
+            )
+            logger.info("social quiet expired for %s", group_openid)
+            return None
+        return state
+
+    def _is_quiet(self, group_openid: str) -> bool:
+        return self._social_state(group_openid) is not None
+
+    def _format_until(self, until: datetime) -> str:
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=ZoneInfo(self.settings.timezone))
+        local = until.astimezone(ZoneInfo(self.settings.timezone))
+        if local.date() == self._now().date():
+            return local.strftime("%H:%M")
+        return local.strftime("%m-%d %H:%M")
+
+    def _presence_context(self, group_openid: str, *, trigger: str = "") -> str:
+        """给模型看的社交状态，不是给代码判断的关键词规则。"""
+        parts: list[str] = []
+        state = self._social_state(group_openid)
+        if state is not None:
+            scope = (
+                "连明确 @ 也先不回应，只接受叫你出来/恢复说话"
+                if state.scope == "all"
+                else "不主动插话，但被明确叫到时可以回应"
+            )
+            parts.append(
+                f"【当前社交状态】安静中（{scope}），到 {self._format_until(datetime.fromisoformat(state.until_at))}。"
+                f"原因：{state.reason or '现场判断'}。"
+            )
+        else:
+            parts.append("【当前社交状态】正常，可以按现场决定接话、旁听或主动关心。")
+
+        window = self._active_window(group_openid)
+        if window is not None:
+            remaining = max(0, int(window.until - self._monotonic()))
+            parts.append(
+                f"【当前在场状态】活跃中，约剩 {remaining} 秒；可以自然接话，也可以选择沉默。"
+            )
+
+        if trigger == "name":
+            parts.append(
+                "【本轮触发方式】对方没有 @ 你，但叫到了你的名字；先判断是在叫你、说你，还是只是提到这个词。"
+            )
+        elif trigger == "mention":
+            parts.append("【本轮触发方式】对方明确 @ 了你。")
+        elif trigger == "active":
+            parts.append("【本轮触发方式】你没有 @ 也被消息触发，是活跃会话里的旁听接话。")
+        return "\n".join(parts)
+
+    def _format_presence_status(self, group_openid: str) -> str:
+        now = self._now()
+        state = self._social_state(group_openid)
+        if state is not None:
+            scope = "连 @ 也暂不回应" if state.scope == "all" else "不主动插话，被叫到可回应"
+            lines = [
+                f"现在在安静模式：到 {self._format_until(datetime.fromisoformat(state.until_at))}，"
+                f"范围是「{scope}」。"
+            ]
+            if state.reason:
+                lines.append(f"原因：{state.reason}")
+        else:
+            lines = ["现在没有在安静，可以正常接话。"]
+
+        window = self._active_window(group_openid)
+        if window is not None:
+            lines.append(
+                f"现在也处于活跃在场，约剩 {max(0, int(window.until - self._monotonic()))} 秒。"
+            )
+
+        today_iso = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(
+            timespec="seconds"
+        )
+        try:
+            count = self.store.proactive_message_count(
+                group_openid=group_openid, since_iso=today_iso
+            )
+            limit = self._pref_int(
+                group_openid,
+                "active_msg_daily_max",
+                getattr(self.settings, "active_msg_daily_max", 6),
+            )
+            lines.append(f"今天主动消息：{count}/{limit}（定时任务和主动关心共用）。")
+        except Exception:
+            logger.exception("failed to build proactive count for status")
+
+        events = self.store.recent_social_events(
+            group_openid,
+            int(getattr(self.settings, "presence_status_events", 8) or 8),
+        )
+        if events:
+            labels = {
+                "active": "进入活跃",
+                "active_skipped_quiet": "安静中未进入活跃",
+                "quiet": "进入安静",
+                "available": "恢复说话",
+                "attention": "点名判断",
+                "quiet_suppressed": "安静中未接话",
+                "quiet_expired": "安静到期",
+                "active_ended": "结束活跃",
+                "reply": "自然接话",
+                "followup": "主动补话",
+                "care": "主动关心",
+            }
+            recent = "；".join(
+                f"{labels.get(item.event, item.event)}"
+                + (f"（{item.reason}）" if item.reason else "")
+                for item in events
+            )
+            lines.append(f"最近决策：{recent}")
+        return "\n".join(lines)
+
+    def _activate_active_group(
+        self,
+        group_openid: str,
+        *,
+        minutes: int | None = None,
+        source: str = "mention",
+    ) -> None:
+        if self._is_quiet(group_openid):
             self._active_windows.pop(group_openid, None)
+            self._record_presence_event(
+                group_openid,
+                "active_skipped_quiet",
+                source=source,
+                reason="当前处于安静状态",
+            )
             return
+
+        if minutes is None:
+            seconds = self._active_window_seconds()
+            if seconds <= 0:
+                self._active_windows.pop(group_openid, None)
+                return
+            active_minutes = max(1, seconds // 60)
+        else:
+            max_minutes = max(
+                1, int(getattr(self.settings, "presence_active_max_minutes", 120) or 120)
+            )
+            active_minutes = max(0, min(max_minutes, int(minutes)))
+            if active_minutes <= 0:
+                self._active_windows.pop(group_openid, None)
+                self._record_presence_event(
+                    group_openid,
+                    "active_ended",
+                    source=source,
+                    reason="模型选择退场",
+                )
+                return
+            seconds = active_minutes * 60
+
         now = self._monotonic()
         self._active_windows[group_openid] = _ActiveWindow(
             until=now + seconds,
             last_message_at=now,
+            minutes=active_minutes,
+            source=source,
         )
-        logger.info("active chat started for %s for %ss", group_openid, seconds)
+        self._record_presence_event(
+            group_openid,
+            "active",
+            source=source,
+            mode="active",
+            minutes=active_minutes,
+            reason="进入活跃在场",
+        )
+        logger.info(
+            "active chat started for %s for %ss (%s)",
+            group_openid,
+            seconds,
+            source,
+        )
 
     def _active_window(self, group_openid: str) -> _ActiveWindow | None:
         window = self._active_windows.get(group_openid)
@@ -1316,14 +1539,24 @@ class MaodouClient(botpy.Client):
         self._remember_bot_reply(group_openid, text, source)
         return True
 
-    async def _maybe_active_reply(self, message: RichGroupMessage) -> bool:
-        """活跃窗口里的非 @ 消息：只判断和生成自然聊天，不进入 action 分发。"""
+    async def _maybe_active_reply(
+        self, message: RichGroupMessage, *, name_mentioned: bool = False
+    ) -> bool:
+        """活跃窗口或点名消息：判断该 direct / ambient / ignore，再决定是否开口。"""
         group_openid = message.group_openid
-        if self._active_window(group_openid) is None:
+        active = self._active_window(group_openid) is not None
+        if not active and not name_mentioned:
+            return False
+        # 安静状态里，普通活跃消息一律不接；名字候选还要让模型判断是不是在叫它。
+        if self._is_quiet(group_openid) and not name_mentioned:
             return False
 
         async with self._active_lock(group_openid):
-            if self._active_window(group_openid) is None:
+            active = self._active_window(group_openid) is not None
+            quiet = self._is_quiet(group_openid)
+            if not active and not name_mentioned:
+                return False
+            if quiet and not name_mentioned:
                 return False
 
             # 活跃会话里的图片可能还在后台识别。先等这一条的结果，再判断和生成，
@@ -1351,19 +1584,74 @@ class MaodouClient(botpy.Client):
             )
             topic, background, _full_recent = self._topic_context(group_openid)
             identity = self._identity_context(group_openid, requester)
-            verdict = await self.llm.judge_active_reply(
-                content=content,
-                topic_context=topic,
-                mode="message",
+            presence = self._presence_context(
+                group_openid, trigger="name" if name_mentioned else "active"
             )
-            reason = str(verdict.get("reason") or "").strip()
-            if not verdict.get("reply"):
-                logger.info(
-                    "active chat stayed quiet for %s: %s",
-                    message.username,
-                    reason or "model chose silence",
+
+            if name_mentioned:
+                judge_attention = getattr(self.llm, "judge_attention", None)
+                if judge_attention is not None:
+                    verdict = await judge_attention(
+                        content=content,
+                        topic_context=topic,
+                        presence_context=presence,
+                        already_active=active,
+                    )
+                    attention = str(verdict.get("attention") or "ignore").strip().lower()
+                    reason = str(verdict.get("reason") or "").strip()
+                else:
+                    # 兼容旧测试/旧 LLM：没有注意力判断时，只在已经活跃的情况下
+                    # 退回原来的接话判断，绝不把裸名字直接当命令。
+                    if not active:
+                        return False
+                    legacy = await self.llm.judge_active_reply(
+                        content=content,
+                        topic_context=topic,
+                        presence_context=presence,
+                        mode="message",
+                    )
+                    attention = "ambient" if legacy.get("reply") else "ignore"
+                    reason = str(legacy.get("reason") or "").strip()
+                self._record_presence_event(
+                    group_openid,
+                    "attention",
+                    source="name",
+                    attention=attention,
+                    reason=reason,
                 )
-                return False
+                if attention == "direct":
+                    self._activate_active_group(group_openid, source="name")
+                    await self._process_at_message(
+                        message, "GROUP_MESSAGE_CREATE", trigger="name"
+                    )
+                    return True
+                if attention == "ignore":
+                    logger.info(
+                        "name mention stayed quiet for %s: %s",
+                        message.username,
+                        reason or "model chose ignore",
+                    )
+                    return False
+                if quiet:
+                    # 安静时不主动 ambient，只允许 direct 把名字当成叫它。
+                    return False
+                mode = "name"
+            else:
+                verdict = await self.llm.judge_active_reply(
+                    content=content,
+                    topic_context=topic,
+                    presence_context=presence,
+                    mode="message",
+                )
+                reason = str(verdict.get("reason") or "").strip()
+                if not verdict.get("reply"):
+                    logger.info(
+                        "active chat stayed quiet for %s: %s",
+                        message.username,
+                        reason or "model chose silence",
+                    )
+                    return False
+                mode = "message"
 
             reply = await self.llm.generate_active_reply(
                 requester=requester,
@@ -1373,12 +1661,13 @@ class MaodouClient(botpy.Client):
                 memory_context=self._memory_context(group_openid),
                 summaries_context=self._summaries_context(group_openid),
                 identity_context=identity.prompt(),
+                presence_context=presence,
                 face_context=face_prompt(
                     self.store.face_book(group_openid),
                     as_tags=self.settings.face_tags,
                     stickers=self.stickers,
                 ),
-                mode="message",
+                mode=mode,
             )
             reply = (reply or "").strip()
             if not reply:
@@ -1389,6 +1678,13 @@ class MaodouClient(botpy.Client):
                 reply,
                 source="BOT_ACTIVE",
             ):
+                self._record_presence_event(
+                    group_openid,
+                    "reply",
+                    source="name" if name_mentioned else "active",
+                    attention="ambient" if name_mentioned else "active",
+                    reason=reason or "natural opening",
+                )
                 logger.info(
                     "active chat replied to %s (%s): %s",
                     message.username,
@@ -1406,6 +1702,9 @@ class MaodouClient(botpy.Client):
             return
 
         for group_openid in list(self._active_windows):
+            if self._is_quiet(group_openid):
+                self._active_windows.pop(group_openid, None)
+                continue
             window = self._active_window(group_openid)
             if window is None or window.followup_done:
                 continue
@@ -1439,9 +1738,11 @@ class MaodouClient(botpy.Client):
 
                 topic, background, _full_recent = self._topic_context(group_openid)
                 identity = self._identity_context(group_openid, last_human)
+                presence = self._presence_context(group_openid, trigger="active")
                 verdict = await self.llm.judge_active_reply(
                     content=last_human.content,
                     topic_context=topic,
+                    presence_context=presence,
                     mode="followup",
                 )
                 reason = str(verdict.get("reason") or "").strip()
@@ -1464,6 +1765,7 @@ class MaodouClient(botpy.Client):
                     memory_context=self._memory_context(group_openid),
                     summaries_context=self._summaries_context(group_openid),
                     identity_context=identity.prompt(),
+                    presence_context=presence,
                     face_context=face_prompt(
                         self.store.face_book(group_openid),
                         as_tags=self.settings.face_tags,
@@ -1483,11 +1785,17 @@ class MaodouClient(botpy.Client):
                     or self._monotonic() - current.last_message_at < followup_seconds
                 ):
                     continue
-                await self._send_active_message(
+                if await self._send_active_message(
                     group_openid,
                     reply,
                     source="BOT_ACTIVE",
-                )
+                ):
+                    self._record_presence_event(
+                        group_openid,
+                        "followup",
+                        source="active",
+                        reason=reason or "conversation still open",
+                    )
                 logger.info(
                     "active follow-up sent for %s (%s): %s",
                     group_openid,
@@ -1572,10 +1880,12 @@ class MaodouClient(botpy.Client):
         两级判定：关键词预筛不花钱，命中才让便宜模型判断到底要不要说、说什么。
         任何一步拿不准都不开口——在这个群里，安静比说错话好。
         """
+        group_openid = message.group_openid
+        if self._is_quiet(group_openid):
+            return
         content = normalize_face_tags(message.content).strip()
         if not should_ask_model(content):
             return
-        group_openid = message.group_openid
         member_openid = message.author.member_openid or ""
         now = self._now()
         if not self._care_gate(group_openid, member_openid, now):
@@ -1616,6 +1926,12 @@ class MaodouClient(botpy.Client):
 
         self.store.mark_care_sent(message_key)
         self._remember_bot_reply(group_openid, text, "BOT_CARE")
+        self._record_presence_event(
+            group_openid,
+            "care",
+            source="care",
+            reason=",".join(matched_signals(content)),
+        )
         logger.info(
             "proactive care for %s (%s): %s",
             message.username,
@@ -1632,17 +1948,25 @@ class MaodouClient(botpy.Client):
         logger.debug("saved full message from %s", message.username)
 
         if self._bot_mention(message):
-            self._activate_active_group(message.group_openid)
-            await self._process_at_message(message, "GROUP_MESSAGE_CREATE")
+            self._activate_active_group(message.group_openid, source="mention")
+            await self._process_at_message(
+                message, "GROUP_MESSAGE_CREATE", trigger="mention"
+            )
             return
 
         self._touch_active_group(message.group_openid)
-        if self._active_window(message.group_openid) is not None:
+        content = normalize_face_tags(message.content).strip()
+        name_mentioned = self._mentions_bot_name(content)
+        if self._active_window(message.group_openid) is not None or name_mentioned:
             try:
-                if await self._maybe_active_reply(message):
+                if await self._maybe_active_reply(
+                    message, name_mentioned=name_mentioned
+                ):
                     return
             except Exception:
-                logger.exception("active-chat reply failed")
+                logger.exception("active/name reply failed")
+        if self._is_quiet(message.group_openid):
+            return
         try:
             await self._maybe_care(message)
         except Exception:
@@ -1651,10 +1975,14 @@ class MaodouClient(botpy.Client):
     async def on_group_at_message_create(self, message: RichGroupMessage) -> None:
         if not self._group_allowed(message.group_openid):
             return
-        self._activate_active_group(message.group_openid)
-        await self._process_at_message(message, "GROUP_AT_MESSAGE_CREATE")
+        self._activate_active_group(message.group_openid, source="mention")
+        await self._process_at_message(
+            message, "GROUP_AT_MESSAGE_CREATE", trigger="mention"
+        )
 
-    async def _process_at_message(self, message: RichGroupMessage, source: str) -> None:
+    async def _process_at_message(
+        self, message: RichGroupMessage, source: str, *, trigger: str = "mention"
+    ) -> None:
         if not self._group_allowed(message.group_openid):
             return
         started = time.perf_counter()
@@ -1811,7 +2139,12 @@ class MaodouClient(botpy.Client):
                 ack_text = ACK_TEXT_IMAGES if planned_images > 1 else ACK_TEXT_IMAGE
             media_task = asyncio.create_task(prepare_media())
             ack_after = float(getattr(self.settings, "ack_after_seconds", 0.0))
-            if ack_after <= 0:
+            quiet_state = self._social_state(message.group_openid)
+            quiet_all = quiet_state is not None and quiet_state.scope == "all"
+            if quiet_all:
+                # 连 @ 都处于「先别回」的状态：媒体照常准备，但不要先垫一句话。
+                pass
+            elif ack_after <= 0:
                 # 0 保留旧语义：先垫一句。生产默认 4 秒，只有真的慢了才发。
                 pre_acked = await self._send_reply(
                     message,
@@ -1852,6 +2185,7 @@ class MaodouClient(botpy.Client):
         )
         topic, background, full_recent = self._topic_context(message.group_openid)
         identity = self._identity_context(message.group_openid, requester)
+        presence = self._presence_context(message.group_openid, trigger=trigger)
 
         async with self._reply_lock:
             acked = pre_acked
@@ -1882,9 +2216,43 @@ class MaodouClient(botpy.Client):
                             today=self._now().date(),
                         ),
                         memory_context=self._memory_context(message.group_openid),
+                        presence_context=presence,
                     )
                     intent_ms = (time.perf_counter() - intent_started) * 1000
                 action = str(intent.get("action") or "chat")
+
+                # 安静范围是 all 时，只有 social_control 能产生回复；普通聊天和
+                # 任务动作一律静默执行/拒绝，避免模型一边“闭嘴”一边继续说话。
+                state = self._social_state(message.group_openid)
+                if (
+                    state is not None
+                    and state.scope == "all"
+                    and action != "social_control"
+                ):
+                    self._record_presence_event(
+                        message.group_openid,
+                        "quiet_suppressed",
+                        source=trigger,
+                        mode="quiet",
+                        scope=state.scope,
+                        reason=f"quiet all suppressed {action}",
+                    )
+                    logger.info(
+                        "quiet-all suppressed action=%s from %s",
+                        action,
+                        message.username,
+                    )
+                    return
+
+                if action != "social_control":
+                    active_minutes = self._int_field(intent.get("active_minutes"))
+                    if active_minutes is not None:
+                        self._activate_active_group(
+                            message.group_openid,
+                            minutes=active_minutes,
+                            source=trigger,
+                        )
+
                 acked = await self._answer_with_ack(
                     message=message,
                     intent=intent,
@@ -1894,6 +2262,7 @@ class MaodouClient(botpy.Client):
                     background=background,
                     full_recent=full_recent,
                     identity=identity,
+                    presence_context=presence,
                     source=source,
                     pre_acked=pre_acked,
                 )
@@ -2423,6 +2792,7 @@ class MaodouClient(botpy.Client):
         full_recent: str,
         identity: IdentityContext,
         source: str,
+        presence_context: str = "",
         pre_acked: bool = False,
     ) -> bool:
         """执行 intent，返回是否已经发过 ack（决定正式回复用哪个 msg_seq）。"""
@@ -2438,6 +2808,7 @@ class MaodouClient(botpy.Client):
                 background=background,
                 full_recent=full_recent,
                 identity=identity,
+                presence_context=presence_context,
             )
         )
         seq = 2 if pre_acked else 1
@@ -2602,6 +2973,7 @@ class MaodouClient(botpy.Client):
         background: str,
         full_recent: str,
         identity: IdentityContext,
+        presence_context: str = "",
     ) -> str:
         action = str(intent.get("action") or "chat")
         # 永久/临时记忆入口已经下线；旧模型若还返回这两个动作，按普通聊天处理。
@@ -2636,6 +3008,8 @@ class MaodouClient(botpy.Client):
             return self._handle_calendar_query(intent)
         if action == "bot_pref":
             return await speak(self._handle_bot_pref(intent, message))
+        if action == "social_control":
+            return self._handle_social_control(intent, message)
         if action == "agent_run":
             return await self._handle_agent_run(
                 intent=intent,
@@ -2660,12 +3034,87 @@ class MaodouClient(botpy.Client):
             memory_context=self._memory_context(message.group_openid),
             summaries_context=self._summaries_context(message.group_openid),
             identity_context=identity.prompt(),
+            presence_context=presence_context,
             face_context=face_context,
             voice_reply=voice_reply,
         )
         if voice_reply:
             return VoiceReply(reply)
         return reply
+
+    def _handle_social_control(self, intent: dict, message: RichGroupMessage) -> str:
+        """执行模型给出的安静/回来/查看状态决定。
+
+        代码不判断“闭嘴”该持续多久；这里只做范围校验、落库、清理活跃窗口和
+        给模型一个兜底确认文案。
+        """
+        group_openid = message.group_openid
+        now = self._now()
+        op = str(intent.get("op") or intent.get("mode") or "show").strip().lower()
+        reason = str(intent.get("reason") or "").strip()
+        reply = str(intent.get("reply") or "").strip()
+
+        if op in {"show", "status", "query", "state"}:
+            return self._format_presence_status(group_openid)
+
+        if op in {"available", "resume", "wake", "unmute", "open", "come_back"}:
+            self.store.clear_social_state(group_openid)
+            active_minutes = self._int_field(intent.get("active_minutes"))
+            self._activate_active_group(
+                group_openid,
+                minutes=active_minutes,
+                source="social_control",
+            )
+            self._record_presence_event(
+                group_openid,
+                "available",
+                source="model",
+                mode="available",
+                minutes=active_minutes or 0,
+                reason=reason or "模型选择恢复说话",
+            )
+            return reply or "好，我回来啦。"
+
+        if op not in {"quiet", "mute", "silence", "hush"}:
+            return self._format_presence_status(group_openid)
+
+        minutes = self._int_field(intent.get("minutes"))
+        if minutes is None or minutes <= 0:
+            minutes = int(
+                getattr(self.settings, "presence_quiet_default_minutes", 10) or 10
+            )
+        max_minutes = max(
+            1, int(getattr(self.settings, "presence_quiet_max_minutes", 1440) or 1440)
+        )
+        minutes = max(1, min(max_minutes, minutes))
+        scope = str(intent.get("scope") or "proactive").strip().lower()
+        if scope not in SOCIAL_SCOPES:
+            scope = "proactive"
+        until = now + timedelta(minutes=minutes)
+        self.store.set_social_quiet(
+            group_openid=group_openid,
+            until_at=until.isoformat(timespec="seconds"),
+            scope=scope,
+            reason=reason or "模型按现场决定安静",
+        )
+        self._active_windows.pop(group_openid, None)
+        self._record_presence_event(
+            group_openid,
+            "quiet",
+            source="model",
+            mode="quiet",
+            minutes=minutes,
+            scope=scope,
+            reason=reason or "模型选择安静",
+        )
+        logger.info(
+            "social quiet set for %s: %s minutes, scope=%s (%s)",
+            group_openid,
+            minutes,
+            scope,
+            reason or "model decision",
+        )
+        return reply or f"好，我安静到 {self._format_until(until)}。"
 
     async def _persona_or_raw(
         self,

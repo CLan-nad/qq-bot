@@ -53,6 +53,34 @@ class MessageStats:
 
 
 @dataclass(frozen=True)
+class SocialState:
+    """群级的社交状态。目前只持久化“安静”，活跃窗口仍在进程内维护。"""
+
+    group_openid: str
+    mode: str
+    scope: str
+    until_at: str
+    reason: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class SocialEvent:
+    """模型每次自主社交决策的审计记录，用来回看它为什么说/没说。"""
+
+    id: int
+    group_openid: str
+    event: str
+    source: str
+    attention: str
+    mode: str
+    minutes: int
+    scope: str
+    reason: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class MemoryCard:
     id: int
     kind: str
@@ -287,6 +315,31 @@ class ChatStore:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (group_openid, key)
                 );
+
+                CREATE TABLE IF NOT EXISTS social_state (
+                    group_openid TEXT PRIMARY KEY,
+                    mode TEXT NOT NULL DEFAULT 'available',
+                    scope TEXT NOT NULL DEFAULT 'proactive',
+                    until_at TEXT,
+                    reason TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS social_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_openid TEXT NOT NULL,
+                    event TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT '',
+                    attention TEXT NOT NULL DEFAULT '',
+                    mode TEXT NOT NULL DEFAULT '',
+                    minutes INTEGER NOT NULL DEFAULT 0,
+                    scope TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_social_events_group
+                    ON social_events(group_openid, id DESC);
 
                 CREATE TABLE IF NOT EXISTS person_aliases (
                     group_openid TEXT NOT NULL,
@@ -2164,6 +2217,125 @@ class ChatStore:
                 (group_openid, key),
             )
             return cursor.rowcount > 0
+
+    # ---------- 社交状态：模型决定安静/回来，代码只负责持久化和执行 ----------
+
+    def get_social_state(self, group_openid: str) -> SocialState | None:
+        row = self._conn.execute(
+            "SELECT * FROM social_state WHERE group_openid = ?",
+            (group_openid,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SocialState(
+            group_openid=str(row["group_openid"]),
+            mode=str(row["mode"] or "available"),
+            scope=str(row["scope"] or "proactive"),
+            until_at=str(row["until_at"] or ""),
+            reason=str(row["reason"] or ""),
+            updated_at=str(row["updated_at"] or ""),
+        )
+
+    def set_social_quiet(
+        self,
+        *,
+        group_openid: str,
+        until_at: str,
+        scope: str = "proactive",
+        reason: str = "",
+    ) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO social_state (
+                    group_openid, mode, scope, until_at, reason, updated_at
+                ) VALUES (?, 'quiet', ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(group_openid) DO UPDATE SET
+                    mode = 'quiet',
+                    scope = excluded.scope,
+                    until_at = excluded.until_at,
+                    reason = excluded.reason,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (group_openid, scope, until_at, reason),
+            )
+
+    def clear_social_state(self, group_openid: str) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM social_state WHERE group_openid = ?",
+                (group_openid,),
+            )
+            return cursor.rowcount > 0
+
+    def record_social_event(
+        self,
+        *,
+        group_openid: str,
+        event: str,
+        source: str = "",
+        attention: str = "",
+        mode: str = "",
+        minutes: int = 0,
+        scope: str = "",
+        reason: str = "",
+    ) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO social_events (
+                    group_openid, event, source, attention, mode, minutes, scope, reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    group_openid,
+                    event,
+                    source,
+                    attention,
+                    mode,
+                    int(minutes),
+                    scope,
+                    reason[:240],
+                ),
+            )
+            # 每群只留最近 500 条，避免审计表无限增长。
+            self._conn.execute(
+                """
+                DELETE FROM social_events
+                WHERE group_openid = ? AND id NOT IN (
+                    SELECT id FROM social_events
+                    WHERE group_openid = ? ORDER BY id DESC LIMIT 500
+                )
+                """,
+                (group_openid, group_openid),
+            )
+
+    def recent_social_events(
+        self, group_openid: str, limit: int = 8
+    ) -> list[SocialEvent]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM social_events
+            WHERE group_openid = ?
+            ORDER BY id DESC LIMIT ?
+            """,
+            (group_openid, max(1, int(limit))),
+        ).fetchall()
+        return [
+            SocialEvent(
+                id=int(row["id"]),
+                group_openid=str(row["group_openid"]),
+                event=str(row["event"]),
+                source=str(row["source"] or ""),
+                attention=str(row["attention"] or ""),
+                mode=str(row["mode"] or ""),
+                minutes=int(row["minutes"] or 0),
+                scope=str(row["scope"] or ""),
+                reason=str(row["reason"] or ""),
+                created_at=str(row["created_at"] or ""),
+            )
+            for row in rows
+        ]
 
     def close(self) -> None:
         self._conn.close()

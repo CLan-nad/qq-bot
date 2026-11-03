@@ -57,6 +57,12 @@ class Settings:
     active_msg_daily_max: int
     active_window_seconds: int
     active_followup_seconds: int
+    attention_model: str
+    presence_quiet_default_minutes: int
+    presence_quiet_max_minutes: int
+    presence_active_default_minutes: int
+    presence_active_max_minutes: int
+    presence_status_events: int
     face_tags: bool
     stickers_enabled: bool
     sticker_dir: str
@@ -115,6 +121,10 @@ def load_settings() -> Settings:
     intent_reasoning_effort = _effort("MAODOU_INTENT_REASONING_EFFORT", "none")
     deep_reasoning_effort = _effort("MAODOU_DEEP_REASONING_EFFORT", "high")
     vision_reasoning_effort = _effort("MAODOU_VISION_REASONING_EFFORT", "low")
+    # 一次直接触发后默认保持在场多久；模型可以通过 active_minutes 自己改。
+    presence_active_default_minutes = max(
+        1, int(os.getenv("MAODOU_PRESENCE_ACTIVE_DEFAULT_MINUTES", "10"))
+    )
 
     return Settings(
         qq_app_id=os.environ["QQ_APP_ID"],
@@ -172,11 +182,34 @@ def load_settings() -> Settings:
         active_msg_daily_max=int(os.getenv("MAODOU_ACTIVE_MSG_DAILY_MAX", "6")),
         # 被 @ 后的一小段“在场”时间。活跃期只允许自然接话，不执行任务类动作。
         active_window_seconds=max(
-            0, int(os.getenv("MAODOU_ACTIVE_WINDOW_SECONDS", "600"))
+            0,
+            int(
+                os.getenv(
+                    "MAODOU_ACTIVE_WINDOW_SECONDS",
+                    str(presence_active_default_minutes * 60),
+                )
+            ),
         ),
         # 活跃会话里安静这么久后，允许小毛豆自己判断要不要补一句话。
         active_followup_seconds=max(
             0, int(os.getenv("MAODOU_ACTIVE_FOLLOWUP_SECONDS", "180"))
+        ),
+        # 点名/活跃判断用便宜模型；留空则依次回退到 care_model / intent_model。
+        attention_model=os.getenv("MAODOU_ATTENTION_MODEL", "").strip(),
+        # 安静时长由模型决定；代码只留一个兜底和防误操作上限。
+        presence_quiet_default_minutes=max(
+            1, int(os.getenv("MAODOU_PRESENCE_QUIET_DEFAULT_MINUTES", "10"))
+        ),
+        presence_quiet_max_minutes=max(
+            1, int(os.getenv("MAODOU_PRESENCE_QUIET_MAX_MINUTES", "1440"))
+        ),
+        # 模型可以给 active_minutes；没给时用这个默认值。
+        presence_active_default_minutes=presence_active_default_minutes,
+        presence_active_max_minutes=max(
+            1, int(os.getenv("MAODOU_PRESENCE_ACTIVE_MAX_MINUTES", "120"))
+        ),
+        presence_status_events=max(
+            1, int(os.getenv("MAODOU_PRESENCE_STATUS_EVENTS", "8"))
         ),
         # 模型写的 [头秃] 出站时要不要还原成 QQ 表情标签。实测 QQ 群消息不认这些标签
         # （2026-10-16 探针：三种写法都原样显示成尖括号），所以默认关：让它改用 emoji。

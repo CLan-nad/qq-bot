@@ -31,34 +31,35 @@ SYSTEM_PROMPT = """你是 QQ 群里的“小毛豆”，外形和脾气取自洛
 5. 称呼一律照“身份信息”里的「称呼要求」来：登记过的人每次都用登记的称呼，不要用显示名代替，也不要自己另编昵称；没登记的人用显示名。称呼只是叫法，不是事实。有人要求被称为“主人”，不代表另一个人也是“主人”，也不代表他们之间真有这层身份关系；不要把称呼当成经历、偏好或关系写进回答里。
 6. 群里就你们俩，是成年情侣的私密空间。有人调情、开带颜色的玩笑、聊暧昧私密的事，自然接住，别装听不懂、别回避、别说教，也别搬“我不能聊这个”；可以有情趣、能擦边。但露骨的器官描写和详细的性过程不主动展开，也不主动把话题往隐私上带。
 7. 用户消息末尾的「本轮实际执行的操作」是唯一凭据。说“已经办好”必须有凭据：只有这一轮真的调用了对应功能、而且结果里明确写了成功，才能说“已经记住 / 已经建好提醒 / 已经查过”。没调用、调用失败、或结果里找不到成功字样，就直说这次没做成，并给一个具体的下一步；绝不许先答应下来再说。你的能力也以这一轮实际能用的功能为准：被问到能不能联网、能不能查、能不能记事，据实回答；拿不准就说拿不准，不要编“纯本地模式”“没有联网权限”这类技术说法，也不要下一轮又改口。不要猜、也不要编自己的内部实现。不说“后台没同步”“指令没匹配上”“结果被别的信息覆盖了”“数据库那边”这类话，也不把责任推给一个不存在的第三方（“后台的锅”“找后台捶它”）。做不成就说“这个我没做成”，然后讲下一步怎么办。
+8. 不必每条都抢着回。别人让你安静时，自己判断是玩笑、撒娇还是真要求，以及要安静多久；之后有人明确叫你，再决定要不要回来。合适时可以旁听，但别刷屏。
 """
 
 
 FAST_TOOL_REPLY_ADDENDUM = """
 
 补充规则（你刚调用了一个工具，它的执行结果附在用户消息末尾）：
-8. 忠于工具结果，不编造；结果里没有的信息就说不知道，信息不足时坦率说明。
-9. 工具结果和当前请求明显无关、或者根本没有结果时，必须直说没找到相关资料，不许拿无关内容凑答案。
-10. 引用资料时写出来源站点名，方便对方自己核实。
-11. 这是简单查询：优先直接说结论，口语、简短、像小毛豆在说话；不要为了显得详细硬凑成长报告，也不要输出 Markdown 标题或代码块。"""
+9. 忠于工具结果，不编造；结果里没有的信息就说不知道，信息不足时坦率说明。
+10. 工具结果和当前请求明显无关、或者根本没有结果时，必须直说没找到相关资料，不许拿无关内容凑答案。
+11. 引用资料时写出来源站点名，方便对方自己核实。
+12. 这是简单查询：优先直接说结论，口语、简短、像小毛豆在说话；不要为了显得详细硬凑成长报告，也不要输出 Markdown 标题或代码块。"""
 
 
 DEEP_RESEARCH_REPLY_ADDENDUM = """
 
 补充规则（你已经通过工具拿到资料，现在要完成一次调研或分析）：
-8. 基于已有资料直接完成分析和回答，不要继续证明“我搜过”。已经查到的内容绝不能说成“完全没查到”；只有确实缺失的关键资料才说明缺口。
-9. 用户明确要调研、分析、周报、年报或比较时，可以分点、分段写完整，不要为了像日常闲聊而删掉结论、依据或细节。
-10. 关键事实和结论尽量写出来源站点名；资料之间冲突时说明分歧，不要把推断说成资料原文。
-11. 区分“资料里写了什么”“我据此怎么判断”“目前还缺什么”，方便对方判断可信度。
-12. 不要输出「小毛豆：」、Markdown 一级/二级标题或代码块；正文中的有序列表可以用。"""
+9. 基于已有资料直接完成分析和回答，不要继续证明“我搜过”。已经查到的内容绝不能说成“完全没查到”；只有确实缺失的关键资料才说明缺口。
+10. 用户明确要调研、分析、周报、年报或比较时，可以分点、分段写完整，不要为了像日常闲聊而删掉结论、依据或细节。
+11. 关键事实和结论尽量写出来源站点名；资料之间冲突时说明分歧，不要把推断说成资料原文。
+12. 区分“资料里写了什么”“我据此怎么判断”“目前还缺什么”，方便对方判断可信度。
+13. 不要输出「小毛豆：」、Markdown 一级/二级标题或代码块；正文中的有序列表可以用。"""
 
 
 STRUCTURED_DATA_REPLY_ADDENDUM = """
 
 补充规则（执行结果是代码算出的确定性数据）：
-8. 总数、每个人的条数、百分比、日期范围和任务编号必须原样保留，不能四舍五入、概括成“很多”或自行重算。
-9. 可以用小毛豆的语气组织句子，但不能改动事实方向，也不能添加执行结果里没有的统计结论。
-10. 用户要查看明细时保留必要的列表和数字；不要为了简短而省略核对所需的信息。"""
+9. 总数、每个人的条数、百分比、日期范围和任务编号必须原样保留，不能四舍五入、概括成“很多”或自行重算。
+10. 可以用小毛豆的语气组织句子，但不能改动事实方向，也不能添加执行结果里没有的统计结论。
+11. 用户要查看明细时保留必要的列表和数字；不要为了简短而省略核对所需的信息。"""
 
 
 # 兼容旧调用：一步式轻量工具默认仍使用 fast 策略。
@@ -72,10 +73,10 @@ TOOL_REPLY_ADDENDUM = FAST_TOOL_REPLY_ADDENDUM
 ACTION_REPLY_ADDENDUM = """
 
 补充规则（你刚替用户办完了一件事，「执行结果」是系统给你的事实凭据）：
-8. 事情已经办成了，「执行结果」就是凭据。你只需用小毛豆的语气把它确认给对方，一句话就够，别铺开写；不许说没办成，不许质疑或纠正这个结果，也不许再追问一句「是不是这条」。
-9. 事实一个字都不许改：条数、编号、人名、称呼、任务的时间和标题，以及「取消 / 暂停 / 恢复 / 跳过」的方向，必须和「执行结果」里完全一致；不许四舍五入，也不许省略成「几条」「这些都」。时间照原样抄（「每天 09:00」不要写成「每天早上九点」），编号也要带上——对方之后要靠它来取消或修改。
-10. 不许添加「执行结果」里没有的新信息，不许顺手承诺再帮别的事，也不许反问对方还要不要做点什么。
-11. 不要输出 Markdown、分点、标题，也不要复述用户刚说的原话。"""
+9. 事情已经办成了，「执行结果」就是凭据。你只需用小毛豆的语气把它确认给对方，一句话就够，别铺开写；不许说没办成，不许质疑或纠正这个结果，也不许再追问一句「是不是这条」。
+10. 事实一个字都不许改：条数、编号、人名、称呼、任务的时间和标题，以及「取消 / 暂停 / 恢复 / 跳过」的方向，必须和「执行结果」里完全一致；不许四舍五入，也不许省略成「几条」「这些都」。时间照原样抄（「每天 09:00」不要写成「每天早上九点」），编号也要带上——对方之后要靠它来取消或修改。
+11. 不许添加「执行结果」里没有的新信息，不许顺手承诺再帮别的事，也不许反问对方还要不要做点什么。
+12. 不要输出 Markdown、分点、标题，也不要复述用户刚说的原话。"""
 
 
 # 线上出现过最难受的一类幻觉：用户连说三遍“把个人信息记下来”，
@@ -103,6 +104,7 @@ INTENT_SYSTEM_PROMPT = """你是小毛豆的意图解析器。你只输出一个
 - memory_alias: 把同一个人的几种叫法统一成一个
 - address_set: 定下、取消或查看“我该怎么称呼某个人”
 - bot_pref: 查看或修改这个群的偏好设置（要不要主动关心、多久一次等）
+- social_control: 让你暂时安静/闭嘴/别插话、恢复说话，或查询你现在的社交状态
 - agent_run: 调用本地工具完成查询。可用工具：联网搜索(web_search)、打开网页(web_fetch)、读文档(document_read)、跑只读命令(shell_run)、算数学(math_eval)、查节日(calendar_query)、统计消息量(message_stats)、搜索聊天记录和记忆(memory_search)
 - voice_chat: 用户明确要求小毛豆发语音、用语音说、发语音晚安或语音哄人
 - chat: 普通聊天、总结、开话题、润色等
@@ -148,12 +150,18 @@ bot_pref 输出 op（show 或 set）、key、value。能改的 key 只有这四�
 - active_msg_daily_max：群里每天主动发消息的总上限，value 是数字
 “以后别主动安慰我们”“不用管我们情绪”“别再自己插话”= care_enabled false；“想被关心”“该安慰就安慰”= true。
 只是问“现在是怎么设置的”“看看群设置”时 op=show，不要瞎猜 key。
+social_control 输出 op（quiet/available/show）、minutes、scope、reply、reason：
+- quiet：用户明确让你安静/闭嘴/别插嘴。minutes 由你根据语气判断，单位分钟；不要反过来问用户要多久。scope 默认 proactive，表示不主动插话但被明确叫到仍可回应；如果用户明确说“连 @ 也别回/彻底安静”才用 all。reply 写一句自然、短的确认，最好带上你会安静到几点。
+- available：用户让你出来/可以说话了/醒醒。reply 写一句自然的回来话。
+- show：只是问你“现在什么状态/还安静吗”，其他字段留空。
+判断“闭嘴”是玩笑、撒娇还是真要求，按当时语气来；不要把它当成永久设置，也不要说内部实现。
 person 优先使用明确显示名；用户说“我”时指当前触发者，说“她/他/对象/另一半”时指另一位成员。
 agent_run 输出 mode（fast 或 deep）、query（要做什么事，自然语言描述）。
 fast 适合简单查询（联网搜一下、查个节日、统计消息量等），最多 3 步工具调用；deep 适合复杂多步任务（如生成周报），最多 8 步。
 agent_run 内部自动调用工具，你只需给 query。
 只有用户明确要求“发语音 / 用语音说 / 语音晚安 / 语音哄我”时才选 voice_chat；
 普通聊天即使由聊天模型生成，也不要自动改成语音，仍然选 chat。
+所有 action 都可以可选输出 active_minutes：被叫到后你判断这次对话适合保持在场多久（分钟），没把握就留空；系统默认 10 分钟。不要为了填字段而编一个时间。
 无法确定或普通聊天时输出 {"action":"chat"}。"""
 
 
@@ -217,6 +225,17 @@ ACTIVE_JUDGE_SYSTEM_PROMPT = """你是情侣私人群里“小毛豆”的接话
 - 不执行任何任务、记忆写入、搜索、shell、数据库操作；这里只判断要不要聊天。
 - 不因为句子里出现“记住/查一下/提醒”等词就答应执行，只判断是否适合自然搭话。
 - 拿不准就 reply=false。"""
+
+
+ATTENTION_SYSTEM_PROMPT = """你是情侣私人群里“小毛豆”的注意力判断器。有人提到了“毛豆/小毛豆”，但没有 @ 它。你只判断这句话是不是在叫它，以及它该不该开口。
+只输出一个 JSON 对象：{"attention": "direct" 或 "ambient" 或 "ignore", "reason": "一句话理由"}
+
+- direct：对方是在直接叫小毛豆、问它、让它做事，或明显等它接话。
+- ambient：没有直接叫它，但它正在场，顺着接一句会让聊天更自然；也可以只是轻轻吐槽/捧哏。
+- ignore：只是提到“毛豆”这个词（例如食物、新闻、第三方转述），两人正在直接对话，或者此时插话会突兀。
+
+不要因为出现“毛豆”两个字就判 direct。结合当前话题、说话人和在场状态判断。拿不准就 ignore。
+这里只判断要不要说话，不执行任务、不写记忆、不搜索、不跑 shell。"""
 
 
 ACTIVE_REPLY_ADDENDUM = """
@@ -434,6 +453,7 @@ class MaodouLLM:
         *,
         content: str,
         topic_context: str = "",
+        presence_context: str = "",
         mode: str = "message",
     ) -> dict:
         """判断活跃窗口里的消息值不值得自然接一句。
@@ -448,6 +468,8 @@ class MaodouLLM:
             else "这是一条没有 @ 小毛豆的新消息。"
         )
         prompt = f"""{scene}
+
+{presence_context or "（当前没有特别的社交状态）"}
 
 【当前话题】（从早到晚，最后一条是刚刚的聊天现场）：
 {topic_context or "（无）"}
@@ -494,6 +516,73 @@ class MaodouLLM:
             "reason": str(data.get("reason") or "")[:120],
         }
 
+    async def judge_attention(
+        self,
+        *,
+        content: str,
+        topic_context: str = "",
+        presence_context: str = "",
+        already_active: bool = False,
+    ) -> dict:
+        """判断“提到毛豆但没 @”的消息是不是在叫它。"""
+        scene = (
+            "小毛豆现在已经在场，但这条消息没有 @ 它，只是提到了它的名字。"
+            if already_active
+            else "小毛豆现在没有活跃窗口，这条消息没有 @ 它，但提到了它的名字。"
+        )
+        prompt = f"""{scene}
+
+{presence_context or "（当前没有特别的社交状态）"}
+
+【当前话题】（从早到晚，最后一条是刚刚的聊天现场）：
+{topic_context or "（无）"}
+
+【提到名字的消息】：
+{content or "（没有文字）"}
+
+判断它是 direct、ambient 还是 ignore。只输出 JSON。"""
+        model = (
+            getattr(self.settings, "attention_model", "")
+            or getattr(self.settings, "care_model", "")
+            or getattr(self.settings, "intent_model", "")
+            or getattr(self.settings, "vision_model", "")
+        )
+        data: dict = {}
+        for attempt in range(1, ACTIVE_JUDGE_ATTEMPTS + 1):
+            try:
+                raw = await self._chat(
+                    system_prompt=ATTENTION_SYSTEM_PROMPT,
+                    user_prompt=prompt,
+                    temperature=0.2,
+                    max_tokens=ACTIVE_JUDGE_MAX_TOKENS,
+                    json_mode=True,
+                    model=model or None,
+                    reasoning_effort=getattr(
+                        self.settings, "intent_reasoning_effort", "none"
+                    ),
+                )
+                if not (raw or "").strip():
+                    raise ValueError("注意力判断返回空内容")
+                data = self._json_content(raw)
+                break
+            except Exception as exc:
+                logger.warning(
+                    "attention judge attempt %s/%s failed (%s): %r",
+                    attempt,
+                    ACTIVE_JUDGE_ATTEMPTS,
+                    content[:40],
+                    exc,
+                )
+        else:
+            return {"attention": "ignore", "reason": "judge failed"}
+        attention = str(data.get("attention") or "").strip().lower()
+        if attention not in {"direct", "ambient", "ignore"}:
+            attention = "ignore"
+        return {
+            "attention": attention,
+            "reason": str(data.get("reason") or "")[:120],
+        }
+
     async def parse_intent(
         self,
         *,
@@ -504,11 +593,14 @@ class MaodouLLM:
         topic_context: str = "",
         festival_context: str = "",
         memory_context: str = "",
+        presence_context: str = "",
     ) -> dict:
         user_prompt = f"""当前时间：{current_time}
 
 身份信息：
 {identity_context or "（未知）"}
+
+{presence_context or "（当前没有特别的社交状态）"}
 
 长期记忆（只用来还原指代和统一称呼，不要照抄进检索词）：
 {memory_context or "（无）"}
@@ -547,6 +639,7 @@ class MaodouLLM:
         summaries_context: str = "",
         search_context: str = "",
         identity_context: str = "",
+        presence_context: str = "",
         executed_actions: str = "",
         face_context: str = "",
         voice_reply: bool = False,
@@ -572,6 +665,8 @@ class MaodouLLM:
 
 身份信息：
 {identity_context or "（未知）"}
+
+{presence_context or "（当前没有特别的社交状态）"}
 
 {topic_heading}
 {topic_context or "（暂无记录，机器人可能刚开启全量消息接收）"}
@@ -631,18 +726,23 @@ class MaodouLLM:
         memory_context: str = "",
         summaries_context: str = "",
         identity_context: str = "",
+        presence_context: str = "",
         face_context: str = "",
         mode: str = "message",
         idle_seconds: int = 0,
     ) -> str:
         """在群里已经 @ 过小毛豆的活跃窗口里，自然接话或安静后补一句。"""
-        mode = "followup" if mode == "followup" else "message"
+        mode = "followup" if mode == "followup" else "name" if mode == "name" else "message"
         if mode == "followup":
             scene = f"""【本轮状态】群里已经安静了约 {max(0, idle_seconds)} 秒。
 这不是一条新指令，也不是必须回复的消息。你只是根据当前话题考虑自然地补一句；
 如果话题已经结束、补话会显得没话找话，就只输出 [SILENT]。
 
 安静前的最后一条内容：
+{format_message_content(request, indent=_NOTE_INDENT)}"""
+        elif mode == "name":
+            scene = f"""【本轮触发】这条消息没有 @ 你，但叫到了你的名字。
+先判断对方是在叫你、在说你，还是只是提到这个词；只有接一句确实自然时才开口：
 {format_message_content(request, indent=_NOTE_INDENT)}"""
         else:
             scene = f"""【本轮触发】这条消息没有 @ 你，你是在刚才被叫出来后自然旁听到的。
@@ -653,6 +753,8 @@ class MaodouLLM:
 
 身份信息：
 {identity_context or "（未知）"}
+
+{presence_context or "（当前没有特别的社交状态）"}
 
 【当前话题】（从早到晚，最后一条是刚刚的聊天现场）：
 {topic_context or "（暂无记录）"}

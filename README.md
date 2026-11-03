@@ -1,6 +1,6 @@
 # 小毛豆
 
-一个适合情侣私人群聊的 QQ 机器人，角色原型来自《洛克王国》的大耳帽兜。平时安静待在群里；被 @ 后会进入一段活跃会话，期间会判断是否自然接话，但只有 @ 消息才能执行任务和操作数据。
+一个适合情侣私人群聊的 QQ 机器人，角色原型来自《洛克王国》的大耳帽兜。平时安静待在群里；被 @ 或明确叫到名字时才会判断要不要回应，被要求安静时会自己决定安静多久。只有明确叫到它（@，或模型判定为 direct 的点名）才会执行任务和操作数据。
 
 ## 能做什么
 
@@ -15,7 +15,8 @@
 - **记忆**：明确说「记住 xx」才入库，只有长期记忆一种；日常闲聊只压成摘要，不会自己往记忆里塞
 - **节日日历**：公历农历互查，「中秋是几号」「最近有什么节日」
 - **主动关心**：没被 @ 时也能察觉「累了 / 心情不好 / 肚子疼」，接一句 25 字以内的关心
-- **活跃会话**：被 @ 后默认保持 10 分钟在场，期间没被 @ 的新消息也能自然接话；安静 3 分钟后最多主动补一句，也可以选择继续沉默
+- **活跃会话**：被 @ 后默认保持 10 分钟在场，期间没被 @ 的新消息也能自然接话；模型可以通过 `active_minutes` 自己延长或缩短在场时间，安静 3 分钟后最多主动补一句，也可以继续沉默
+- **自主社交状态**：被明确要求「安静/闭嘴」时，由模型自己决定安静多久、只抑制主动说话（`proactive`）还是连 @ 也先不回（`all`）；状态持久化到 SQLite，重启后仍有效。群里没 @ 但提到「毛豆/小毛豆」时，先做一次注意力判断：可能在叫它就进入完整流程，只是顺口提到就不打扰
 - **表情包**：16 张大耳帽兜主题表情图，先发文字再单独发图，一条回复最多一张
 - **群内偏好**：@ 它说一声就能改，存在库里，优先级高于 `.env`
 
@@ -80,7 +81,7 @@ flowchart LR
 
 ### 消息与 action 分支
 
-群里每条消息先看有没有 @ 小毛豆。带图消息无论是否 @，都会先丢进本群的后台识图队列：只回填数据库，不发消息，也不进入 action 分发。@ 消息随后进入主流程，由 `parse_intent` 分类到 16 个 action；没 @ 的消息在活跃窗口内只判断是否自然接话，否则走关键词主动关心。活跃接话不会执行任务、记忆、搜索、shell 或其他数据操作。
+群里每条消息先看有没有 @ 小毛豆。带图消息无论是否 @，都会先丢进本群的后台识图队列：只回填数据库，不发消息，也不进入 action 分发。@ 消息随后进入主流程，由 `parse_intent` 分类到 17 个 action；没 @ 但出现「毛豆/小毛豆」的消息先由便宜模型判断 `direct / ambient / ignore`，`direct` 才进入完整流程。其余消息在活跃窗口内只判断是否自然接话，否则走关键词主动关心。活跃接话不会执行任务、记忆、搜索、shell 或其他数据操作。
 
 ```mermaid
 flowchart TD
@@ -88,12 +89,21 @@ flowchart TD
     IMAGE -->|是| IMAGE_REC["后台预识别<br/>只回填数据库<br/>不发消息 · 不进 action"]
     IMAGE -->|否| AT{"@ 小毛豆？"}
     IMAGE_REC --> AT
-    ACTIVE{"群处于 @ 后活跃窗口？"}
+    NAME{"提到毛豆 / 小毛豆？"}
+    ATTENTION{"judge_attention<br/>direct / ambient / ignore"}
+    QUIET_CHECK{"当前处于安静状态？"}
+    ACTIVE{"群处于活跃窗口？"}
     ACTIVE_JUDGE{"模型判断<br/>适合自然接话？"}
     KEY{"关键词预筛命中？"}
     DONE["本轮结束"]
 
-    AT -->|否| ACTIVE
+    AT -->|否| NAME
+    NAME -->|是| ATTENTION
+    ATTENTION -->|direct| SAVE
+    ATTENTION -->|ambient / ignore| QUIET_CHECK
+    NAME -->|否| QUIET_CHECK
+    QUIET_CHECK -->|是| QUIET["保持安静"]
+    QUIET_CHECK -->|否| ACTIVE
     ACTIVE -->|是| ACTIVE_JUDGE
     ACTIVE_JUDGE -->|是| ACTIVE_REPLY["生成自然接话 / 表情<br/>不进入 action 分发"]
     ACTIVE_REPLY --> ACTIVE_SEND["先发文字<br/>表情用下一条单独发"]
@@ -101,7 +111,7 @@ flowchart TD
     ACTIVE_JUDGE -->|否| KEY
     ACTIVE -->|否| KEY
 
-    KEY -->|否| QUIET["保持安静"]
+    KEY -->|否| QUIET
     KEY -->|是| CARE{"模型判断值得关心？"}
     CARE -->|是| CARE_YES["主动发一句关心"]
     CARE_YES --> DONE
@@ -119,6 +129,7 @@ flowchart TD
     INTENT --> PREF["身份与设置 2 个<br/>address_set · bot_pref"]
     INTENT --> CALENDAR["节日 1 个<br/>calendar_query"]
     INTENT --> AGENT["工具 1 个<br/>agent_run"]
+    INTENT --> SOCIAL["社交 1 个<br/>social_control"]
     INTENT --> VOICE["语音 1 个<br/>voice_chat"]
     INTENT --> CHAT["聊天 1 个<br/>chat"]
 
@@ -126,6 +137,7 @@ flowchart TD
     MEMORY --> LOCAL
     PREF --> LOCAL
     CALENDAR --> CALC["calendar.py<br/>本地计算"]
+    SOCIAL --> SOCIAL_STATE["安静 / 回来 / 查看状态<br/>持久化 social_state"]
 
     AGENT --> LOOP["工具循环<br/>fast 3 次调用 / deep 12 次调用 · 8 回合"]
     LOOP --> TOOLS["8 个工具<br/>搜索 · 网页 · 文档 · shell<br/>数学 · 节日 · 消息统计 · 记忆检索"]
@@ -136,6 +148,7 @@ flowchart TD
 
     LOCAL --> POLISH["按需人设润色<br/>列表、报错和多条匹配保原文"]
     CALC --> FINAL["出站加工"]
+    SOCIAL_STATE --> FINAL
     TOOL_REPLY --> FINAL
     REPLY --> FINAL
     POLISH --> FINAL
@@ -150,7 +163,8 @@ flowchart TD
 几个实现细节：
 
 - 本地 action 先算出确定结果，再决定是否交给模型换语气；失败、列表和「匹配到多条」保持模板原文。
-- 活跃窗口是进程内的群级状态：每次 @ 开启或刷新默认 10 分钟窗口，普通消息只更新最近发言时间。活跃期里，没 @ 的消息不会进入 `parse_intent`，因此不能借聊天触发任务、记忆、搜索、shell 或查库；这些操作仍然必须明确 @。
+- 活跃窗口是进程内的群级状态：每次 @ 或 `direct` 点名开启/刷新默认 10 分钟窗口，普通消息只更新最近发言时间。模型可以在任意 action 里返回 `active_minutes` 来延长或缩短窗口，`0` 表示提前退场。活跃期里，没 @ 的消息不会进入 `parse_intent`，因此不能借聊天触发任务、记忆、搜索、shell 或查库；这些操作仍然必须明确 @。
+- 安静状态不是关键词硬编码：代码只持久化 `social_state` 并执行模型给出的 `minutes/scope`。`proactive` 只抑制主动接话和关心，被明确叫到仍可回应；`all` 连普通 @ 也先压住，只有 `social_control available` 能把它叫回来。每次 auto/direct/quiet/available/care 决策都写入 `social_events`，可用 `social_control show` 回看。
 - 活跃会话连续安静默认 180 秒后，后台循环会问一次模型要不要补话。每段活跃会话最多尝试一次，且生成期间如果真人又说话了就放弃补话。
 - `agent_run` 在同一个工具循环里持有完整证据并直接收口，不再做第二次润色，避免搜索结果在转述时丢失。最终落笔使用低思考预算和更大的正文 token 预算；若模型仍以 `finish_reason=length` 或悬空符号停下，会从断点续写，最多补两次。
 - 最终提示词按输出契约分层：全局 `SYSTEM_PROMPT` 负责人设与交流方式；`chat` 直接用全局提示词；本地 action、fast 查询、deep 调研、结构化统计分别追加自己的事实和长度约束。
@@ -177,13 +191,14 @@ flowchart TD
 
 ### 意图与工具
 
-意图解析器共 16 个 action：
+意图解析器共 17 个 action：
 
 | 类别 | action | 执行方式 |
 | --- | --- | --- |
 | 定时任务 | `task_create`、`task_list`、`task_cancel`、`task_pause`、`task_resume`、`task_skip` | `bot.py` 本地 handler + SQLite |
 | 长期记忆 | `memory_remember`、`memory_list`、`memory_forget`、`memory_alias` | `bot.py` 本地 handler + SQLite |
 | 身份与群设置 | `address_set`、`bot_pref` | 写称呼表 / 群偏好表，群偏好优先于 `.env` |
+| 社交状态 | `social_control` | 模型决定安静/回来/查看状态，写 `social_state` 和 `social_events` |
 | 节日查询 | `calendar_query` | `calendar.py` 直接计算 |
 | 工具任务 | `agent_run` | `agent.py` 的 function-calling 循环 |
 | 语音回复 | `voice_chat` | 先用普通聊天生成朗读正文，再直接合成并发送一条语音；成功时不发文字 |
@@ -221,6 +236,8 @@ flowchart TD
 | `scheduled_tasks` | 提醒与定时消息，包含周期、农历字段、提前天数和预热任务关联 |
 | `person_aliases` / `person_addresses` | 同一个人的多种叫法，以及机器人该怎么称呼 |
 | `group_preferences` | 每个群的主动关心和主动消息上限等设置 |
+| `social_state` | 每个群当前是否安静、到期时间和安静范围（`proactive` / `all`） |
+| `social_events` | 自主社交决策审计：active、quiet、available、attention、reply、care、quiet_suppressed 等 |
 | `image_descriptions` | 图片字节指纹到文字描述的缓存 |
 | `care_log` | 主动关心的发送记录与节流依据 |
 | `face_tokens` | 群里见过的 QQ 小表情名字与标签 |
@@ -233,6 +250,7 @@ flowchart TD
 - 同一轮后台检查会处理活跃会话：安静达到 `MAODOU_ACTIVE_FOLLOWUP_SECONDS`（默认 180 秒）后，最多判断一次要不要主动补话。
 - 每 `MAODOU_MEMORY_INTERVAL_SECONDS`（默认 300 秒）把攒够的消息压成摘要。
 - 未 @ 且不在活跃窗口的消息，先过 `care.py` 关键词预筛，再交给便宜模型判断要不要关心；同人冷却、每人每日上限、每群主动消息上限和 `care_log` 去重共同限流。
+- 安静状态到期采用懒清理：下一条群消息或状态查询时发现过期就恢复，不额外起定时器。
 
 ### 模型接口与扩展点
 
@@ -240,8 +258,9 @@ flowchart TD
 
 | 调用 | 用途 |
 | --- | --- |
-| `parse_intent()` | 自然语言 → 16 种 action 的 JSON |
+| `parse_intent()` | 自然语言 → 17 种 action 的 JSON |
 | `generate_reply()` | 普通聊天，按上下文分层组装 prompt |
+| `judge_attention()` | 没 @ 但提到名字时判断 `direct / ambient / ignore`，避免把「毛豆炒肉」当成在叫它 |
 | `judge_active_reply()` | 活跃窗口里判断一条群消息是否适合自然接话，只输出 `{"reply": bool, "reason": "..."}` |
 | `generate_active_reply()` | 活跃窗口里的自然接话与安静后补话；没有自然内容时可输出 `[SILENT]` |
 | `generate_tool_reply()` | 一步式工具、action 确认和结构化统计的人设化表达；不参与 `agent_run` 的最终收口 |
