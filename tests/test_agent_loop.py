@@ -239,6 +239,61 @@ class AgentLoopBudgetTests(unittest.TestCase):
         self.assertGreater(len(result["text"]), ctx.max_output_chars)
         self.assertEqual(len(completions.calls), 1)
 
+    def test_reasoning_exhausted_step_retries_without_reasoning(self) -> None:
+        # 线上真实故障：思考把 1600 token 预算吃满，正文为空、没有 tool_calls。
+        exhausted = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="", tool_calls=[]),
+                    finish_reason="length",
+                )
+            ],
+            usage=SimpleNamespace(
+                completion_tokens=1600,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=1600),
+            ),
+        )
+        responses = [
+            exhausted,
+            _tool_message(1),
+            _final_message("查到了：先做秘银砧"),
+        ]
+        result, executed, calls = self._run("deep", responses)
+
+        self.assertEqual(result["text"], "查到了：先做秘银砧")
+        self.assertEqual(executed, ["math_eval"])
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0]["reasoning_effort"], "high")
+        # 空回合的重试必须关掉思考，否则会再次把预算烧光。
+        self.assertEqual(calls[1]["reasoning_effort"], "none")
+        self.assertIn("tools", calls[1])
+
+    def test_step_token_budget_leaves_room_for_reasoning(self) -> None:
+        # max_tokens 同时覆盖思考与正文，1600/1200 会把思考直接截断。
+        self.assertGreaterEqual(agent_module.DEEP_STEP_MAX_TOKENS, 3000)
+        self.assertGreaterEqual(agent_module.FAST_STEP_MAX_TOKENS, 2000)
+
+    def test_two_empty_steps_return_honest_fallback(self) -> None:
+        def empty() -> SimpleNamespace:
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="", tool_calls=[]),
+                        finish_reason="length",
+                    )
+                ],
+                usage=SimpleNamespace(
+                    completion_tokens=3000,
+                    completion_tokens_details=SimpleNamespace(reasoning_tokens=3000),
+                ),
+            )
+
+        result, executed, calls = self._run("fast", [empty(), empty()])
+
+        self.assertEqual(executed, [])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("卡住了", result["text"])
+
     def test_user_prompt_carries_time_requester_and_identity(self) -> None:
         completions = _QueuedCompletions([_response("好")])
         client = SimpleNamespace(chat=SimpleNamespace(completions=completions))

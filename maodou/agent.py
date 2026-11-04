@@ -215,8 +215,11 @@ DEEP_MAX_STEPS = 8
 FAST_MAX_TOOL_CALLS = 3
 DEEP_MAX_TOOL_CALLS = 12
 MAX_PARALLEL_TOOLS = 3
-FAST_STEP_MAX_TOKENS = 1200
-DEEP_STEP_MAX_TOKENS = 1600
+# DeepSeek 的 reasoning token 也算在 max_tokens 里。工具回合如果额度太小，
+# 模型把预算全花在思考上，就会返回 finish_reason=length + 空正文 + 没有工具调用，
+# 整个 agent_run 直接报废（线上表现为“抱歉，我没想好怎么回答”）。这里留出思考空间。
+FAST_STEP_MAX_TOKENS = 2000
+DEEP_STEP_MAX_TOKENS = 3000
 FAST_FINAL_MAX_TOKENS = 1800
 DEEP_FINAL_MAX_TOKENS = 6000
 FAST_CONTINUATION_MAX_TOKENS = 1200
@@ -535,6 +538,52 @@ async def _execute_tool(
         return f"工具 {name} 执行出错：{exc}"
 
 
+def _reasoning_tokens(response: Any) -> Any:
+    usage = getattr(response, "usage", None)
+    details = getattr(usage, "completion_tokens_details", None)
+    return getattr(details, "reasoning_tokens", None)
+
+
+async def _step_completion(
+    *,
+    client: Any,
+    messages: list[dict[str, Any]],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    reasoning_effort: str,
+) -> Any:
+    """工具回合的模型调用，带「思考吃满预算」兜底。
+
+    思考 token 和正文共用 max_tokens：一旦思考把额度耗尽，返回就是
+    finish_reason=length、正文为空、也没有 tool_calls。以前这里把它当成
+    “模型不想回答”直接收场，于是整轮搜索白跑。空回合必须重试一次，
+    这次不开思考，保证要么给出工具调用、要么给出正文。
+    """
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "tools": AGENT_TOOLS,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    response = await client.chat.completions.create(
+        **kwargs, reasoning_effort=reasoning_effort
+    )
+    choice = response.choices[0]
+    message = choice.message
+    if message.tool_calls or (message.content or "").strip():
+        return response
+    logger.warning(
+        "agent_run empty step response (finish_reason=%s, completion_tokens=%s, "
+        "reasoning_tokens=%s); retrying without reasoning",
+        getattr(choice, "finish_reason", None),
+        getattr(getattr(response, "usage", None), "completion_tokens", None),
+        _reasoning_tokens(response),
+    )
+    return await client.chat.completions.create(**kwargs, reasoning_effort="none")
+
+
 async def agent_run_loop(
     *,
     client: Any,
@@ -706,10 +755,10 @@ async def agent_run_loop(
                 "工具调用预算已经用完。不要再请求工具，直接基于上面已有结果完成最终回答。"
             )
         try:
-            response = await client.chat.completions.create(
-                model=model,
+            response = await _step_completion(
+                client=client,
                 messages=messages,
-                tools=AGENT_TOOLS,
+                model=model,
                 temperature=0.3,
                 max_tokens=step_max_tokens,
                 reasoning_effort=ctx.reasoning_effort,
@@ -818,8 +867,11 @@ async def agent_run_loop(
                     "工具调用预算已经用完。不要再请求工具，直接基于上面已有结果完成最终回答。"
                 )
         else:
+            logger.warning(
+                "agent_run gave up at step %d after an empty response", _step + 1
+            )
             return {
-                "text": "抱歉，我没想好怎么回答，能换个说法吗？",
+                "text": "刚才查资料时卡住了，没拿到结果，要不再试一次？",
                 "tool_calls_made": tool_calls_made,
             }
 
