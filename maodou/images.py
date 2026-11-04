@@ -57,9 +57,65 @@ class ImageAttachment:
     url: str
     content_type: str
     filename: str
+    # 转发聊天记录（message_type=102）里的图片没有 raw.attachments，只以一行
+    # 「[附件N] 类型:图片 ... URL:...」的形式躺在正文里。anchor 保存这行原文，
+    # 识别完成后按它原位替换，避免多张图时把描述张冠李戴。
+    anchor: str = ""
+    index: int = 0
 
 
-def image_attachments(raw: dict[str, Any]) -> list[ImageAttachment]:
+# 转发记录里的图片行。抓 URL 时只认 http/https，其余交给 fetch_image_bytes 再校验。
+FORWARDED_IMAGE_LINE_PATTERN = re.compile(
+    r"^\[附件(?P<index>\d+)\]\s*类型[:：]\s*图片(?P<meta>[^\n]*?)URL[:：]\s*(?P<url>https?://\S+?)[ \t]*$",
+    re.MULTILINE,
+)
+FORWARDED_FILENAME_PATTERN = re.compile(r"文件名[:：]\s*(?P<name>[^\s]+)")
+_FILENAME_CONTENT_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+
+def _forwarded_content_type(filename: str) -> str:
+    lowered = filename.lower()
+    for suffix, content_type in _FILENAME_CONTENT_TYPES.items():
+        if lowered.endswith(suffix):
+            return content_type
+    return ""
+
+
+def forwarded_image_attachments(content: str | None) -> list[ImageAttachment]:
+    """从转发聊天记录的正文里抠出图片附件。
+
+    QQ 把转发记录压成纯文本，图片只剩元数据行。这里把 URL 和那一行原文都留着：
+    URL 用来下载，原文用来把识别结果写回它所在的位置。
+    """
+    result: list[ImageAttachment] = []
+    for match in FORWARDED_IMAGE_LINE_PATTERN.finditer(content or ""):
+        url = match.group("url").strip()
+        if not url:
+            continue
+        name_match = FORWARDED_FILENAME_PATTERN.search(match.group("meta") or "")
+        filename = name_match.group("name") if name_match else ""
+        result.append(
+            ImageAttachment(
+                url=url,
+                content_type=_forwarded_content_type(filename),
+                filename=filename,
+                anchor=match.group(0).rstrip(),
+                index=int(match.group("index")),
+            )
+        )
+    return result
+
+
+def image_attachments(
+    raw: dict[str, Any], content: str | None = None
+) -> list[ImageAttachment]:
+    """一条消息里的全部图片：常规附件 + 转发记录正文里的图片。"""
     result: list[ImageAttachment] = []
     for item in raw.get("attachments") or []:
         if not isinstance(item, dict):
@@ -75,6 +131,7 @@ def image_attachments(raw: dict[str, Any]) -> list[ImageAttachment]:
                 filename=str(item.get("filename") or ""),
             )
         )
+    result.extend(forwarded_image_attachments(content))
     return result
 
 
@@ -89,30 +146,94 @@ def needs_image_description(content: str | None, raw: dict[str, Any] | None = No
     """图片或表情包内容是否还没被识别过（用于避免重复调用视觉模型）。
 
     表情标签在入库时就已经解码成可读文本，光看 content 认不出「这条其实还带图」，
-    所以再用原始 payload 里的图片附件兜一次底。
+    所以再用原始 payload 里的图片附件兜一次底。转发记录里的图片只有正文里的
+    URL，识别完成后 URL 会被替换掉，于是「还有 URL」就等于「还有没看过的图」。
     """
     text = (content or "").strip()
+    if forwarded_image_attachments(text):
+        return True
     if any(mark in text for mark in IMAGE_DESCRIBED_MARKS):
         return False
     if IMAGE_PLACEHOLDER_PATTERN.search(text) or FACE_TAG_PATTERN.search(text):
         return True
     if not isinstance(raw, dict):
         return False
-    return bool(image_attachments(raw))
+    return bool(image_attachments(raw, text))
 
 
-def message_with_image_descriptions(content: str | None, descriptions: list[str]) -> str:
+def _strip_forwarded_url(line: str) -> str:
+    """去掉附件行尾的时效 URL：模型打不开它，留着只会浪费 token 并诱发瞎猜。"""
+    return re.sub(r"\s*URL[:：]\s*\S+\s*$", "", line).rstrip()
+
+
+def _apply_forwarded_note(text: str, anchor: str, note: str) -> str:
+    """把一条看图记录写回它对应的附件行下面，保持「哪张图说了什么」的对应关系。"""
+    if not anchor:
+        return text
+    line = _strip_forwarded_url(anchor)
+    replacement = (
+        f"{line}\n{IMAGE_NOTE_LABEL}{note}"
+        if note
+        else f"{line}\n{UNRECOGNIZED_IMAGE_MARK}"
+    )
+    if anchor in text:
+        return text.replace(anchor, replacement, 1)
+    # 正文在拼接/渲染时可能被压过空白，精确匹配不上就退回按 URL 找那一行。
+    url_match = re.search(r"URL[:：]\s*(\S+)", anchor)
+    if not url_match:
+        return text
+    target = url_match.group(1)
+    lines = text.split("\n")
+    for index, current in enumerate(lines):
+        if target in current:
+            lines[index] = replacement
+            return "\n".join(lines)
+    return text
+
+
+def message_with_image_descriptions(
+    content: str | None,
+    descriptions: list[str],
+    attachments: list[ImageAttachment] | None = None,
+) -> str:
+    """把看图结果写回消息正文。
+
+    普通附件沿用「补齐到正文末尾」的老做法；转发记录里的图片必须写回原位，
+    否则一次转发多张图时，模型无法知道哪段描述对应哪一张。
+    """
     text = strip_image_placeholders(content)
+    extras: list[str] = []
+    for index, attachment in enumerate(attachments or []):
+        description = descriptions[index].strip() if index < len(descriptions) else ""
+        if attachment.anchor:
+            text = _apply_forwarded_note(text, attachment.anchor, description)
+        elif description:
+            extras.append(description)
     parts = [text] if text else []
-    parts.extend(f"[图片内容：{description}]" for description in descriptions if description.strip())
+    if attachments is None:
+        parts.extend(
+            f"[图片内容：{description}]"
+            for description in descriptions
+            if description.strip()
+        )
+    else:
+        parts.extend(f"[图片内容：{description}]" for description in extras)
     return "\n".join(parts) or "[图片]"
 
 
-def message_with_unrecognized_images(content: str | None) -> str:
+def message_with_unrecognized_images(
+    content: str | None,
+    attachments: list[ImageAttachment] | None = None,
+) -> str:
     """识别失败时留下的标记，避免每次 @ 都重试已失效的图片链接。"""
     text = strip_image_placeholders(content)
+    anchors = [attachment for attachment in (attachments or []) if attachment.anchor]
+    for attachment in anchors:
+        text = _apply_forwarded_note(text, attachment.anchor, "")
     parts = [text] if text else []
-    parts.append(UNRECOGNIZED_IMAGE_MARK)
+    # 转发记录已经逐张标过了，不用再补一个总的标记。
+    if not anchors:
+        parts.append(UNRECOGNIZED_IMAGE_MARK)
     return "\n".join(parts)
 
 

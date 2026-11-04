@@ -546,7 +546,10 @@ class MaodouClient(botpy.Client):
             return False
         if (group_openid, key) in self._image_prewarm_items:
             return False
-        attachments = image_attachments(getattr(message, "raw", {}) or {})
+        attachments = image_attachments(
+            getattr(message, "raw", {}) or {},
+            getattr(message, "content", "") or "",
+        )
         if not attachments:
             return False
         stored = self.store.get_message(group_openid, key)
@@ -614,7 +617,9 @@ class MaodouClient(botpy.Client):
             if not needs_image_description(stored.content, stored.raw):
                 return
             content = stored.content
-            attachments = image_attachments(stored.raw) or item.attachments
+            attachments = (
+                image_attachments(stored.raw, stored.content) or item.attachments
+            )
         else:
             content = item.content
             attachments = item.attachments
@@ -629,13 +634,15 @@ class MaodouClient(botpy.Client):
                 return
             content = latest.content
         if any(description.strip() for description in descriptions):
-            enriched = message_with_image_descriptions(content, descriptions)
+            enriched = message_with_image_descriptions(
+                content, descriptions, attachments
+            )
         else:
             logger.warning(
                 "image prewarm produced no description for %s, marking unrecognized",
                 item.message_key,
             )
-            enriched = message_with_unrecognized_images(content)
+            enriched = message_with_unrecognized_images(content, attachments)
         if enriched != content:
             self.store.update_message_content(
                 item.group_openid, item.message_key, enriched
@@ -703,7 +710,7 @@ class MaodouClient(botpy.Client):
                 or not needs_image_description(stored.content, stored.raw)
             ):
                 continue
-            attachments = image_attachments(stored.raw)[:budget]
+            attachments = image_attachments(stored.raw, stored.content)[:budget]
             if not attachments:
                 continue
             descriptions = await self._describe_attachments(attachments)
@@ -716,10 +723,12 @@ class MaodouClient(botpy.Client):
                 self.store.update_message_content(
                     group_openid,
                     stored.message_key,
-                    message_with_unrecognized_images(stored.content),
+                    message_with_unrecognized_images(stored.content, attachments),
                 )
                 continue
-            enriched = message_with_image_descriptions(stored.content, descriptions)
+            enriched = message_with_image_descriptions(
+                stored.content, descriptions, attachments
+            )
             if enriched != stored.content:
                 self.store.update_message_content(group_openid, stored.message_key, enriched)
         return budget
@@ -750,7 +759,7 @@ class MaodouClient(botpy.Client):
         ):
             if stored.message_key == exclude_key or stored.role == "bot":
                 continue
-            attachments = image_attachments(stored.raw)
+            attachments = image_attachments(stored.raw, stored.content)
             if attachments and needs_image_description(stored.content, stored.raw):
                 taken = attachments[:remaining]
                 if taken:
@@ -814,10 +823,12 @@ class MaodouClient(botpy.Client):
                 self.store.update_message_content(
                     group_openid,
                     stored.message_key,
-                    message_with_unrecognized_images(stored.content),
+                    message_with_unrecognized_images(stored.content, attachments),
                 )
                 continue
-            enriched = message_with_image_descriptions(stored.content, descriptions)
+            enriched = message_with_image_descriptions(
+                stored.content, descriptions, attachments
+            )
             if enriched != stored.content:
                 self.store.update_message_content(group_openid, stored.message_key, enriched)
             logger.info("pending image described: %s", stored.message_key)
@@ -2013,7 +2024,7 @@ class MaodouClient(botpy.Client):
         self._prewarm_image_message(message, message_key=key)
 
         current_images = (
-            image_attachments(message.raw) if image_budget > 0 else []
+            image_attachments(message.raw, content) if image_budget > 0 else []
         )
         pending_image_batch: list[tuple[StoredMessage, list[ImageAttachment]]] = []
         if image_budget > 0 and not current_images:
@@ -2078,10 +2089,12 @@ class MaodouClient(botpy.Client):
                     if needs_image_description(content, message.raw):
                         if any(item.strip() for item in descriptions):
                             enriched = message_with_image_descriptions(
-                                content, descriptions
+                                content, descriptions, attachments
                             )
                         else:
-                            enriched = message_with_unrecognized_images(content)
+                            enriched = message_with_unrecognized_images(
+                                content, attachments
+                            )
                         if enriched != content:
                             self.store.update_message_content(
                                 message.group_openid, key, enriched
