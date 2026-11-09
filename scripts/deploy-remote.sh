@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
+umask 077
 
 DIR="__REMOTE_DIR__"
 SVC="__SERVICE__"
@@ -138,15 +139,24 @@ fi
 
 # ---- 6. back up database and code ----
 stamp="$(date +%Y%m%d-%H%M%S)"
+backup_owner="$(stat -c '%U:%G' "$DIR")"
 mkdir -p "$DIR/backups"
+chown "$backup_owner" "$DIR/backups"
+chmod 750 "$DIR/backups"
 if [ -f "$DIR/data/maodou.sqlite3" ]; then
-  $RUNAS sqlite3 "$DIR/data/maodou.sqlite3" ".backup '$DIR/backups/pre-deploy-$stamp.sqlite3'" \
-    && say backup "database -> backups/pre-deploy-$stamp.sqlite3"
+  if ! $RUNAS sqlite3 "$DIR/data/maodou.sqlite3" ".backup '$DIR/backups/pre-deploy-$stamp.sqlite3'"; then
+    say fail "database backup failed"
+    exit 9
+  fi
+  say backup "database -> backups/pre-deploy-$stamp.sqlite3"
   $RUNAS bash -c "ls -t $DIR/backups/pre-deploy-*.sqlite3 2>/dev/null | tail -n +9 | xargs -r rm -f"
 fi
-$RUNAS tar -czf "$DIR/backups/code-$stamp.tar.gz" \
-  --exclude=.venv --exclude=data --exclude=backups --exclude=.git -C "$DIR" . \
-  && say backup "code -> backups/code-$stamp.tar.gz"
+if ! $RUNAS tar -czf "$DIR/backups/code-$stamp.tar.gz" \
+  --exclude=.venv --exclude=data --exclude=backups --exclude=.git --exclude=.env -C "$DIR" .; then
+  say fail "code backup failed"
+  exit 9
+fi
+say backup "code -> backups/code-$stamp.tar.gz"
 $RUNAS bash -c "ls -t $DIR/backups/code-*.tar.gz 2>/dev/null | tail -n +9 | xargs -r rm -f"
 
 # ---- 7. restart and health check ----
