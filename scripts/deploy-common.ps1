@@ -2,7 +2,7 @@
 # 被 deploy.ps1 / rollback.ps1 引用，不要单独运行。
 
 $script:DeployDefaults = @{
-    Server       = "ubuntu@124.222.100.81"
+    Server       = "root@123.56.150.50"
     IdentityFile = Join-Path $env:USERPROFILE ".ssh\xiaomaodou_deploy_ed25519"
     RemoteDir    = "/opt/maodou"
     ServiceName  = "maodou"
