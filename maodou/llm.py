@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -266,12 +267,15 @@ ACTIVE_JUDGE_ATTEMPTS = 2
 class MaodouLLM:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        headers = {"User-Agent": "maodou-qq-bot/0.1"}
+        # OpenCode Go 网关要求带会话头，否则 400 MissingSessionID。
+        # 其他端点忽略这个头，所以只在指向 opencode 时补上。
+        if "opencode.ai" in (settings.llm_base_url or ""):
+            headers["x-opencode-session"] = uuid.uuid4().hex
         self.client = AsyncOpenAI(
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
-            default_headers={
-                "User-Agent": "maodou-qq-bot/0.1",
-            },
+            default_headers=headers,
         )
 
     async def _chat_response(

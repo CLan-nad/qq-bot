@@ -2939,6 +2939,8 @@ class MaodouClient(botpy.Client):
         ctx = AgentContext(
             llm_api_key=self.settings.llm_api_key,
             llm_base_url=self.settings.llm_base_url,
+            search_api_key=getattr(self.settings, "search_api_key", ""),
+            search_base_url=getattr(self.settings, "search_base_url", ""),
             model=self.settings.model,
             reasoning_effort=agent_effort,
             search_max_results=self.settings.search_max_results,
@@ -3945,8 +3947,10 @@ class MaodouClient(botpy.Client):
         result = await search_web(
             query,
             limit=self.settings.search_max_results,
-            api_key=self.settings.llm_api_key,
-            base_url=self.settings.llm_base_url,
+            api_key=getattr(self.settings, "search_api_key", "")
+            or self.settings.llm_api_key,
+            base_url=getattr(self.settings, "search_base_url", "")
+            or self.settings.llm_base_url,
             original_question=request,
             timeout=self.settings.search_timeout_seconds,
         )
@@ -3985,8 +3989,10 @@ class MaodouClient(botpy.Client):
             )
         result = await fetch_page(
             url,
-            api_key=self.settings.llm_api_key,
-            base_url=self.settings.llm_base_url,
+            api_key=getattr(self.settings, "search_api_key", "")
+            or self.settings.llm_api_key,
+            base_url=getattr(self.settings, "search_base_url", "")
+            or self.settings.llm_base_url,
             max_chars=self.settings.web_fetch_max_chars,
         )
         if not result.ok:

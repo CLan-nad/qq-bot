@@ -246,6 +246,9 @@ class AgentContext:
     """agent_run 所处的上下文环境，封装所有依赖。"""
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com"
+    # 搜索/抓取可单独走另一套凭据；留空则回退到 llm_*。
+    search_api_key: str = ""
+    search_base_url: str = ""
     model: str = ""
     reasoning_effort: str = "none"
     search_max_results: int = 5
@@ -333,8 +336,8 @@ async def _execute_tool(
             result = await search_web(
                 query,
                 limit=ctx.search_max_results,
-                api_key=ctx.llm_api_key,
-                base_url=ctx.llm_base_url,
+                api_key=ctx.search_api_key or ctx.llm_api_key,
+                base_url=ctx.search_base_url or ctx.llm_base_url,
                 timeout=ctx.search_timeout_seconds,
             )
             if not result.ok:
@@ -347,8 +350,8 @@ async def _execute_tool(
                 return "错误：URL 不能为空"
             result = await fetch_page(
                 url,
-                api_key=ctx.llm_api_key,
-                base_url=ctx.llm_base_url,
+                api_key=ctx.search_api_key or ctx.llm_api_key,
+                base_url=ctx.search_base_url or ctx.llm_base_url,
                 max_chars=ctx.web_fetch_max_chars,
             )
             if not result.ok:

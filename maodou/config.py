@@ -98,6 +98,10 @@ class Settings:
     shell_timeout_seconds: int
     shell_max_output_chars: int
     document_max_chars: int
+    # 搜索/抓取凭据。默认跟随 LLM_*；单独配置后可以把对话模型临时切到别的
+    # 网关，而 DeepSeek 原生搜索仍指向官方端点。
+    search_api_key: str = ""
+    search_base_url: str = ""
 
 
 def load_settings() -> Settings:
@@ -131,6 +135,8 @@ def load_settings() -> Settings:
         qq_app_secret=os.environ["QQ_APP_SECRET"],
         llm_api_key=os.environ["LLM_API_KEY"],
         llm_base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com"),
+        search_api_key=os.getenv("MAODOU_SEARCH_API_KEY", "").strip(),
+        search_base_url=os.getenv("MAODOU_SEARCH_BASE_URL", "").strip(),
         # 全站统一用 flash；deepseek-chat 是旧别名，也会被网关悄悄改成 flash。
         model=os.getenv("MAODOU_MODEL", "deepseek-flash"),
         reasoning_effort=reasoning_effort,
