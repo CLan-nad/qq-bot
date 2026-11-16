@@ -151,12 +151,13 @@ class ImageDownloadFailureTests(_LoopTestCase):
 
     def test_image_reference_yields_no_ref_when_download_fails(self) -> None:
         self._stub_fetch(None)
-        image_ref, digest, size, content_type = asyncio.run(
+        image_ref, digest, size, content_type, data = asyncio.run(
             self.client._image_reference(_attachment())
         )
         # 旧代码这里返回的是 attachment.url，视觉模型拿到也打不开
         self.assertEqual((image_ref, digest, size), ("", "", 0))
         self.assertEqual(content_type, "image/jpeg")
+        self.assertEqual(data, b"")
 
     def test_failed_download_skips_vision_model(self) -> None:
         self._stub_fetch(None)

@@ -102,6 +102,10 @@ class Settings:
     # 网关，而 DeepSeek 原生搜索仍指向官方端点。
     search_api_key: str = ""
     search_base_url: str = ""
+    # DeepSeek 原生 OCR：给「读字」用的补充通道，视觉模型仍然负责「这是什么」。
+    ocr_enabled: bool = True
+    ocr_max_chars: int = 1200
+    ocr_timeout_seconds: float = 30.0
 
 
 def load_settings() -> Settings:
@@ -137,6 +141,10 @@ def load_settings() -> Settings:
         llm_base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com"),
         search_api_key=os.getenv("MAODOU_SEARCH_API_KEY", "").strip(),
         search_base_url=os.getenv("MAODOU_SEARCH_BASE_URL", "").strip(),
+        ocr_enabled=os.getenv("MAODOU_OCR", "1").strip().lower()
+        not in {"0", "false", "no", "off"},
+        ocr_max_chars=int(os.getenv("MAODOU_OCR_MAX_CHARS", "1200")),
+        ocr_timeout_seconds=float(os.getenv("MAODOU_OCR_TIMEOUT_SECONDS", "30")),
         # 全站统一用 flash；deepseek-chat 是旧别名，也会被网关悄悄改成 flash。
         model=os.getenv("MAODOU_MODEL", "deepseek-flash"),
         reasoning_effort=reasoning_effort,

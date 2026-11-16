@@ -297,6 +297,15 @@ class ChatStore:
                     last_hit_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS image_ocr (
+                    digest TEXT PRIMARY KEY,
+                    text TEXT NOT NULL,
+                    chars INTEGER NOT NULL DEFAULT 0,
+                    hits INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_hit_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE TABLE IF NOT EXISTS care_log (
                     message_key TEXT PRIMARY KEY,
                     group_openid TEXT NOT NULL,
@@ -715,6 +724,58 @@ class ChatStore:
                     DELETE FROM image_descriptions
                     WHERE digest NOT IN (
                         SELECT digest FROM image_descriptions
+                        ORDER BY last_hit_at DESC, hits DESC
+                        LIMIT ?
+                    )
+                    """,
+                    (max_rows,),
+                )
+
+    def get_image_ocr(self, digest: str) -> str:
+        """命中缓存就返回上次的 OCR 结果，并把命中计数加一。"""
+        if not digest:
+            return ""
+        row = self._conn.execute(
+            "SELECT text FROM image_ocr WHERE digest = ?", (digest,)
+        ).fetchone()
+        if row is None:
+            return ""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE image_ocr"
+                " SET hits = hits + 1, last_hit_at = CURRENT_TIMESTAMP WHERE digest = ?",
+                (digest,),
+            )
+        return row["text"] or ""
+
+    def save_image_ocr(
+        self,
+        *,
+        digest: str,
+        text: str,
+        max_rows: int = 2000,
+    ) -> None:
+        value = (text or "").strip()
+        if not digest or not value:
+            return
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO image_ocr (digest, text, chars, hits)
+                VALUES (?, ?, ?, 0)
+                ON CONFLICT(digest) DO UPDATE SET
+                    text = excluded.text,
+                    chars = excluded.chars,
+                    last_hit_at = CURRENT_TIMESTAMP
+                """,
+                (digest, value, len(value)),
+            )
+            if max_rows > 0:
+                self._conn.execute(
+                    """
+                    DELETE FROM image_ocr
+                    WHERE digest NOT IN (
+                        SELECT digest FROM image_ocr
                         ORDER BY last_hit_at DESC, hits DESC
                         LIMIT ?
                     )

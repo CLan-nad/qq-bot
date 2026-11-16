@@ -355,6 +355,64 @@ async def fetch_image_bytes(
     return data, content_type
 
 
+def image_dimensions(data: bytes) -> tuple[int, int] | None:
+    """从文件头读宽高，避免为了一个尺寸判断引入图像库（服务器上没装 Pillow）。"""
+    if not data:
+        return None
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
+        return (
+            int.from_bytes(data[16:20], "big"),
+            int.from_bytes(data[20:24], "big"),
+        )
+    if data[:6] in (b"GIF87a", b"GIF89a") and len(data) >= 10:
+        return (
+            int.from_bytes(data[6:8], "little"),
+            int.from_bytes(data[8:10], "little"),
+        )
+    if data[:2] == b"\xff\xd8":
+        index, length = 2, len(data)
+        sof_markers = {
+            0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+            0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+        }
+        while index + 9 < length:
+            if data[index] != 0xFF:
+                index += 1
+                continue
+            marker = data[index + 1]
+            if marker == 0xFF:
+                index += 1
+                continue
+            if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                index += 2
+                continue
+            segment = int.from_bytes(data[index + 2:index + 4], "big")
+            if marker in sof_markers:
+                height = int.from_bytes(data[index + 5:index + 7], "big")
+                width = int.from_bytes(data[index + 7:index + 9], "big")
+                return width, height
+            if segment <= 0:
+                return None
+            index += 2 + segment
+        return None
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP" and len(data) >= 30:
+        kind = data[12:16]
+        if kind == b"VP8X":
+            return (
+                int.from_bytes(data[24:27], "little") + 1,
+                int.from_bytes(data[27:30], "little") + 1,
+            )
+        if kind == b"VP8 ":
+            return (
+                int.from_bytes(data[26:28], "little") & 0x3FFF,
+                int.from_bytes(data[28:30], "little") & 0x3FFF,
+            )
+        if kind == b"VP8L" and len(data) >= 25:
+            bits = int.from_bytes(data[21:25], "little")
+            return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+    return None
+
+
 def to_data_url(data: bytes, content_type: str) -> str:
     encoded = base64.b64encode(data).decode("ascii")
     return f"data:{content_type};base64,{encoded}"

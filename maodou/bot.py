@@ -30,6 +30,7 @@ from .config import Settings
 from .images import (
     ImageAttachment,
     fetch_image_bytes,
+    image_dimensions,
     image_attachments,
     message_with_image_descriptions,
     message_with_unrecognized_images,
@@ -38,6 +39,12 @@ from .images import (
     to_data_url,
 )
 from .llm import ACTION_REPLY_ADDENDUM, STRUCTURED_DATA_REPLY_ADDENDUM, MaodouLLM
+from .ocr import (
+    compose_image_note,
+    description_mentions_text,
+    ocr_image,
+    ocr_precheck,
+)
 from .replies import split_reply_text
 from .scheduling import advance_task, parse_datetime, resolve_next_run, schedule_label
 from .store import (
@@ -452,6 +459,60 @@ class MaodouClient(botpy.Client):
         except Exception:
             logger.exception("failed to persist bot reply")
 
+    def _ocr_ready(self) -> bool:
+        """OCR 走 DeepSeek 官方通道；没配 key 就整体跳过，不影响看图。"""
+        if not getattr(self.settings, "ocr_enabled", True):
+            return False
+        return bool(
+            getattr(self.settings, "search_api_key", "")
+            or getattr(self.settings, "llm_api_key", "")
+        )
+
+    async def _ocr_image_text(
+        self,
+        *,
+        digest: str,
+        data: bytes,
+        content_type: str,
+        filename: str = "",
+    ) -> str:
+        """识别图片里的文字；命中缓存或失败都只返回空串，绝不抛异常。"""
+        if not self._ocr_ready() or not data:
+            return ""
+        if digest:
+            cached = self.store.get_image_ocr(digest)
+            if cached:
+                logger.info("image ocr cache hit %s", digest[:12])
+                return cached
+        try:
+            result = await ocr_image(
+                data,
+                filename=filename or "image.png",
+                content_type=content_type or "image/png",
+                api_key=getattr(self.settings, "search_api_key", "")
+                or getattr(self.settings, "llm_api_key", ""),
+                base_url=getattr(self.settings, "search_base_url", "")
+                or getattr(self.settings, "llm_base_url", "https://api.deepseek.com"),
+                timeout=float(getattr(self.settings, "ocr_timeout_seconds", 30.0)),
+                max_chars=int(getattr(self.settings, "ocr_max_chars", 1200)),
+            )
+        except Exception:
+            logger.exception("image ocr crashed")
+            return ""
+        if not result.ok:
+            logger.info("image ocr skipped: %s", result.error)
+            return ""
+        logger.info(
+            "image ocr ok pages=%d chars=%d", result.page_count, len(result.text)
+        )
+        if digest:
+            self.store.save_image_ocr(
+                digest=digest,
+                text=result.text,
+                max_rows=self.settings.image_cache_max_rows,
+            )
+        return result.text
+
     async def _describe_attachments(
         self,
         attachments: list[ImageAttachment],
@@ -460,7 +521,13 @@ class MaodouClient(botpy.Client):
     ) -> list[str]:
         descriptions: list[str] = []
         for attachment in attachments:
-            image_ref, digest, byte_size, content_type = await self._image_reference(attachment)
+            (
+                image_ref,
+                digest,
+                byte_size,
+                content_type,
+                data,
+            ) = await self._image_reference(attachment)
             if not image_ref:
                 # 图根本没下载下来。QQ 的 rkey 链接过一会儿就失效，把原始 url 丢给
                 # 视觉模型它同样打不开，只会白烧一次调用再拿回一个空描述。
@@ -473,40 +540,76 @@ class MaodouClient(botpy.Client):
                 continue
             use_cache = bool(digest) and self.settings.image_cache_enabled
             cached = self.store.get_image_description(digest) if use_cache else ""
+
+            # 长截图 / 文档型图片 / 用户明确要读字：OCR 和视觉模型并行跑，
+            # 不额外多等一个来回。其余情况等看完图再决定要不要补 OCR。
+            ocr_task = None
+            if data and self._ocr_ready():
+                width, height = image_dimensions(data) or (0, 0)
+                if ocr_precheck(
+                    hint=hint,
+                    width=width,
+                    height=height,
+                    byte_size=byte_size,
+                    content_type=content_type,
+                ):
+                    ocr_task = asyncio.create_task(
+                        self._ocr_image_text(
+                            digest=digest,
+                            data=data,
+                            content_type=content_type,
+                            filename=attachment.filename,
+                        )
+                    )
+
             if cached:
                 logger.info("image description cache hit %s", digest[:12])
-                descriptions.append(cached)
-                continue
-            try:
-                description = await self.llm.describe_image(image_ref, hint=hint)
-            except Exception:
-                logger.exception(
-                    "failed to describe image %s",
-                    attachment.filename or attachment.content_type,
-                )
-                description = ""
-            if not description.strip():
-                logger.warning(
-                    "image description empty: %s",
-                    attachment.filename or attachment.content_type,
-                )
-            elif use_cache:
-                # 空描述不写缓存，留下次重新识别的机会。
-                self.store.save_image_description(
+                description = cached
+            else:
+                try:
+                    description = await self.llm.describe_image(image_ref, hint=hint)
+                except Exception:
+                    logger.exception(
+                        "failed to describe image %s",
+                        attachment.filename or attachment.content_type,
+                    )
+                    description = ""
+                if not description.strip():
+                    logger.warning(
+                        "image description empty: %s",
+                        attachment.filename or attachment.content_type,
+                    )
+                elif use_cache:
+                    # 空描述不写缓存，留下次重新识别的机会。
+                    self.store.save_image_description(
+                        digest=digest,
+                        description=description,
+                        content_type=content_type,
+                        byte_size=byte_size,
+                        max_rows=self.settings.image_cache_max_rows,
+                    )
+
+            ocr_text = ""
+            if ocr_task is not None:
+                ocr_text = await ocr_task
+            elif data and self._ocr_ready() and description_mentions_text(description):
+                ocr_text = await self._ocr_image_text(
                     digest=digest,
-                    description=description,
+                    data=data,
                     content_type=content_type,
-                    byte_size=byte_size,
-                    max_rows=self.settings.image_cache_max_rows,
+                    filename=attachment.filename,
                 )
-            descriptions.append(description)
+            descriptions.append(compose_image_note(description, ocr_text))
         return descriptions
 
-    async def _image_reference(self, attachment: ImageAttachment) -> tuple[str, str, int, str]:
+    async def _image_reference(
+        self, attachment: ImageAttachment
+    ) -> tuple[str, str, int, str, bytes]:
         """自己取图并内联成 data url，交给视觉模型。
 
-        返回 (给视觉模型的引用, 字节的 sha256, 字节数, content_type)。
-        下载失败时四个值里前三个都是空/0，调用方据此跳过视觉模型。
+        返回 (给视觉模型的引用, 字节的 sha256, 字节数, content_type, 原始字节)。
+        原始字节留给 OCR 复用，避免同一张图下载两次。
+        下载失败时前四个值都是空/0，调用方据此跳过视觉模型。
         """
         fetched = await fetch_image_bytes(
             attachment.url,
@@ -514,7 +617,7 @@ class MaodouClient(botpy.Client):
         )
         if fetched is None:
             logger.info("image download failed: %s", attachment.filename)
-            return "", "", 0, attachment.content_type
+            return "", "", 0, attachment.content_type, b""
         data, content_type = fetched
         logger.debug(
             "inlined image %s (%s bytes, %s)",
@@ -523,7 +626,7 @@ class MaodouClient(botpy.Client):
             content_type,
         )
         digest = hashlib.sha256(data).hexdigest()
-        return to_data_url(data, content_type), digest, len(data), content_type
+        return to_data_url(data, content_type), digest, len(data), content_type, data
 
     def _prewarm_image_message(
         self,
