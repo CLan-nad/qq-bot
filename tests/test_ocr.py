@@ -213,6 +213,86 @@ class OcrResponseTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("not supported", result.error)
 
+    def test_empty_result_is_retried_once(self) -> None:
+        calls = {"count": 0}
+
+        class FakeResponse:
+            status_code = 200
+
+            def __init__(self, payload):
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def post(self, url, **kwargs):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    return FakeResponse(
+                        {"page_count": 1, "pages": [{"index": 0, "text": ""}]}
+                    )
+                return FakeResponse(
+                    {"page_count": 1, "pages": [{"index": 0, "text": "第二次才有字"}]}
+                )
+
+        import maodou.ocr as ocr_module
+
+        saved = ocr_module.httpx2.AsyncClient
+        ocr_module.httpx2.AsyncClient = FakeClient
+        try:
+            result = asyncio.run(ocr_image(b"x", api_key="k"))
+        finally:
+            ocr_module.httpx2.AsyncClient = saved
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.text, "第二次才有字")
+        self.assertEqual(calls["count"], 2)
+
+    def test_bad_format_is_not_retried(self) -> None:
+        calls = {"count": 0}
+
+        class FakeResponse:
+            status_code = 400
+
+            def json(self):
+                return {"error": {"message": "file format is not supported"}}
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def post(self, url, **kwargs):
+                calls["count"] += 1
+                return FakeResponse()
+
+        import maodou.ocr as ocr_module
+
+        saved = ocr_module.httpx2.AsyncClient
+        ocr_module.httpx2.AsyncClient = FakeClient
+        try:
+            result = asyncio.run(ocr_image(b"x", api_key="k"))
+        finally:
+            ocr_module.httpx2.AsyncClient = saved
+
+        self.assertFalse(result.ok)
+        self.assertEqual(calls["count"], 1, "确定性错误不该重试")
+
     def test_missing_key_is_reported(self) -> None:
         result = asyncio.run(ocr_image(b"x", api_key=""))
         self.assertFalse(result.ok)

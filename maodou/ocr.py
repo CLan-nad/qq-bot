@@ -7,6 +7,7 @@ prompt 即可。
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -17,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 OCR_PATH = "/v1/tools/ocr"
 PURPOSE_TEXT = "text_recognition"
+# OCR 偶发返回 200 但正文为空（模型这一轮没输出）。重试一次比让群里
+# 「读不到字」划算得多：一次调用约 0.0015 元。
+OCR_ATTEMPTS = 2
+OCR_RETRY_DELAY_SECONDS = 0.3
 
 # rich_layout_recognition 会在文本外裹版面坐标：&#x3000;[[x1, y1, x2, y2]]
 # text_recognition 一般没有，这里只是兜底清理。
@@ -175,28 +180,22 @@ def _error_detail(payload: object) -> str:
     return str(error or "").strip()[:160]
 
 
-async def ocr_image(
+async def _ocr_once(
     data: bytes,
     *,
-    filename: str = "image.png",
-    content_type: str = "image/png",
-    api_key: str = "",
-    base_url: str = "https://api.deepseek.com",
-    timeout: float = 30.0,
-    max_chars: int = 1200,
+    filename: str,
+    content_type: str,
+    api_key: str,
+    base_url: str,
+    timeout: float,
+    max_chars: int,
 ) -> OcrResult:
-    """识别图片里的文字。失败只返回 ok=False，不抛异常。"""
-    if not data:
-        return OcrResult(ok=False, error="图片为空")
-    key = (api_key or "").strip()
-    if not key:
-        return OcrResult(ok=False, error="OCR 没有配置：缺少 MAODOU_SEARCH_API_KEY")
     url = _ocr_url(base_url)
     try:
         async with httpx2.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 url,
-                headers={"Authorization": f"Bearer {key}"},
+                headers={"Authorization": f"Bearer {api_key}"},
                 data={"purpose": PURPOSE_TEXT},
                 files={
                     "file": (
@@ -241,3 +240,44 @@ async def ocr_image(
     if not text:
         return OcrResult(ok=False, error="图里没有识别到文字", page_count=page_count)
     return OcrResult(ok=True, text=text, page_count=page_count)
+
+
+async def ocr_image(
+    data: bytes,
+    *,
+    filename: str = "image.png",
+    content_type: str = "image/png",
+    api_key: str = "",
+    base_url: str = "https://api.deepseek.com",
+    timeout: float = 30.0,
+    max_chars: int = 1200,
+) -> OcrResult:
+    """识别图片里的文字。失败只返回 ok=False，不抛异常。
+
+    空结果会重试一次；鉴权/格式这类确定性错误不重试。
+    """
+    if not data:
+        return OcrResult(ok=False, error="图片为空")
+    key = (api_key or "").strip()
+    if not key:
+        return OcrResult(ok=False, error="OCR 没有配置：缺少 MAODOU_SEARCH_API_KEY")
+
+    last = OcrResult(ok=False, error="OCR 未执行")
+    for attempt in range(1, OCR_ATTEMPTS + 1):
+        last = await _ocr_once(
+            data,
+            filename=filename,
+            content_type=content_type,
+            api_key=key,
+            base_url=base_url,
+            timeout=timeout,
+            max_chars=max_chars,
+        )
+        if last.ok:
+            return last
+        retryable = last.page_count > 0 or last.error in {"OCR 超时"}
+        if not retryable or attempt >= OCR_ATTEMPTS:
+            return last
+        logger.info("image ocr retry %d/%d: %s", attempt + 1, OCR_ATTEMPTS, last.error)
+        await asyncio.sleep(OCR_RETRY_DELAY_SECONDS)
+    return last
